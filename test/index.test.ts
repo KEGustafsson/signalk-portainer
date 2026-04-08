@@ -478,8 +478,8 @@ describe('signalk-portainer plugin', () => {
 
       // eslint-disable-next-line @typescript-eslint/no-require-imports
       const { Socket } = require('net') as typeof import('net')
-      const mockSocket = Object.create(Socket.prototype) as InstanceType<typeof Socket>
-      Object.assign(mockSocket, { destroy: jest.fn() })
+      const mockSocket = new Socket()
+      mockSocket.destroy = jest.fn() as typeof mockSocket.destroy
 
       errorHandler(new Error('ws error'), {} as Request, mockSocket)
 

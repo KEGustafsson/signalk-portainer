@@ -38,7 +38,7 @@ If you don't already have Portainer CE running, start it with Docker:
 docker volume create portainer_data
 
 docker run -d \
-  -p 9000:9000 \
+  -p 9443:9443 \
   --name portainer \
   --restart=always \
   -v /var/run/docker.sock:/var/run/docker.sock \
@@ -46,7 +46,25 @@ docker run -d \
   portainer/portainer-ce:lts
 ```
 
-This starts Portainer on port **9000** (the default). If you use a different port, update the plugin configuration accordingly.
+Portainer CE v2.9+ defaults to **HTTPS on port 9443** with a self-signed certificate. Configure the plugin with scheme `https`, port `9443`, and enable **Allow Self-Signed Certificates**.
+
+<details>
+<summary>Legacy HTTP setup (Portainer &lt; v2.9 or manually enabled HTTP)</summary>
+
+```bash
+docker run -d \
+  -p 9000:9000 \
+  --name portainer \
+  --restart=always \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -v portainer_data:/data \
+  portainer/portainer-ce:lts \
+  --http-enabled
+```
+
+Use scheme `http` and port `9000` in the plugin configuration.
+
+</details>
 
 ## Plugin Configuration
 
