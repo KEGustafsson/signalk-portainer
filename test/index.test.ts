@@ -295,26 +295,35 @@ describe('signalk-portainer plugin', () => {
 
   describe('registerWithRouter', () => {
     let mockRouter: IRouter
-    let registeredHandler: MiddlewareFn | null
+    let registeredHandlers: Map<string, MiddlewareFn>
 
     beforeEach(() => {
-      registeredHandler = null
+      registeredHandlers = new Map()
       mockRouter = {
-        use: jest.fn((_path: string, handler: MiddlewareFn) => {
-          registeredHandler = handler
+        use: jest.fn((path: string, handler: MiddlewareFn) => {
+          registeredHandlers.set(path, handler)
           return mockRouter
         }),
       } as unknown as IRouter
     })
 
-    it('registers a middleware on the router', () => {
+    it('registers middleware on /proxy and / routes', () => {
       plugin.registerWithRouter!(mockRouter)
+      expect(mockRouter.use).toHaveBeenCalledWith('/proxy', expect.any(Function))
       expect(mockRouter.use).toHaveBeenCalledWith('/', expect.any(Function))
+    })
+
+    it('registers /proxy before / to take priority', () => {
+      plugin.registerWithRouter!(mockRouter)
+      const calls = (mockRouter.use as jest.Mock).mock.calls as [string, MiddlewareFn][]
+      const paths = calls.map((c) => c[0])
+      expect(paths).toEqual(['/proxy', '/'])
     })
 
     it('returns 503 when plugin is not started', () => {
       plugin.registerWithRouter!(mockRouter)
 
+      const handler = registeredHandlers.get('/proxy')!
       const mockReq = {} as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
@@ -322,7 +331,7 @@ describe('signalk-portainer plugin', () => {
       } as unknown as Response
       const mockNext = jest.fn()
 
-      registeredHandler!(mockReq, mockRes, mockNext)
+      handler(mockReq, mockRes, mockNext)
 
       expect(mockRes.status).toHaveBeenCalledWith(503)
       expect(mockRes.json).toHaveBeenCalledWith({ error: 'Plugin is not started' })
@@ -335,11 +344,12 @@ describe('signalk-portainer plugin', () => {
       plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
+      const handler = registeredHandlers.get('/proxy')!
       const mockReq = {} as Request
       const mockRes = {} as Response
       const mockNext = jest.fn()
 
-      registeredHandler!(mockReq, mockRes, mockNext)
+      handler(mockReq, mockRes, mockNext)
 
       expect(dummyProxy).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
     })
@@ -352,6 +362,7 @@ describe('signalk-portainer plugin', () => {
       plugin.registerWithRouter!(mockRouter)
       void plugin.stop()
 
+      const handler = registeredHandlers.get('/proxy')!
       const mockReq = {} as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
@@ -359,7 +370,7 @@ describe('signalk-portainer plugin', () => {
       } as unknown as Response
       const mockNext = jest.fn()
 
-      registeredHandler!(mockReq, mockRes, mockNext)
+      handler(mockReq, mockRes, mockNext)
 
       expect(mockRes.status).toHaveBeenCalledWith(503)
     })
@@ -385,7 +396,7 @@ describe('signalk-portainer plugin', () => {
       expect(mockServer.listenerCount('upgrade')).toBe(1)
     })
 
-    it('forwards upgrade requests matching plugin path to proxy', () => {
+    it('forwards upgrade requests matching plugin path and strips prefix', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
 
@@ -396,6 +407,37 @@ describe('signalk-portainer plugin', () => {
       mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
 
       expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/api/websocket/exec')
+    })
+
+    it('strips /proxy subpath from upgrade requests', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-portainer/proxy/api/websocket/exec',
+      } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/api/websocket/exec')
+    })
+
+    it('sets url to / when upgrade request matches only prefix', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const mockReq = { url: '/plugins/signalk-portainer/proxy' } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/')
     })
 
     it('ignores upgrade requests not matching plugin path', () => {
