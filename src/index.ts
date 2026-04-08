@@ -49,7 +49,8 @@ function buildTarget(config: PortainerPluginConfig): string {
   return url.origin
 }
 
-const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}/`
+const PROXY_SUBPATH = '/proxy'
+const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}`
 
 module.exports = function (app: ServerAPIWithServer): Plugin {
   let proxy: RequestHandler | null = null
@@ -110,6 +111,13 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         const proxyUpgrade = proxy.upgrade.bind(proxy)
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
           if (req.url?.startsWith(PLUGIN_PATH_PREFIX)) {
+            // Strip plugin path prefix (and optional /proxy subpath) so
+            // the upstream server receives the correct resource path.
+            let path = req.url.substring(PLUGIN_PATH_PREFIX.length)
+            if (path.startsWith(PROXY_SUBPATH)) {
+              path = path.substring(PROXY_SUBPATH.length)
+            }
+            req.url = path || '/'
             proxyUpgrade(req, socket, head)
           }
         }
@@ -127,13 +135,20 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     },
 
     registerWithRouter(router: IRouter): void {
-      router.use('/', (req: Request, res: Response, next: () => void) => {
+      const handler = (req: Request, res: Response, next: () => void): void => {
         if (proxy) {
           ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
         } else {
           res.status(503).json({ error: 'Plugin is not started' })
         }
-      })
+      }
+      // Mount at /proxy first — the iframe loads from here to avoid
+      // the reserved GET /plugins/<id> endpoint.  Express strips the
+      // /proxy prefix automatically so the proxy sees the correct path.
+      router.use(PROXY_SUBPATH, handler)
+      // Catch-all for sub-resource requests (CSS, JS, API calls) that
+      // Portainer references with paths relative to the plugin root.
+      router.use('/', handler)
     },
 
     schema() {

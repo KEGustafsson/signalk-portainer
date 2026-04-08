@@ -1,4 +1,4 @@
-const PROXY_PATH = '/plugins/signalk-portainer/'
+const PROXY_PATH = '/plugins/signalk-portainer/proxy/'
 
 const panelStyle: React.CSSProperties = {
   width: '100%',

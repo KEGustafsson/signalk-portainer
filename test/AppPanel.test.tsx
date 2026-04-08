@@ -13,7 +13,7 @@ describe('AppPanel', () => {
   it('points to the correct proxy path', () => {
     render(<AppPanel />)
     const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveAttribute('src', '/plugins/signalk-portainer/')
+    expect(iframe).toHaveAttribute('src', '/plugins/signalk-portainer/proxy/')
   })
 
   it('has no border', () => {
