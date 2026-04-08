@@ -9,7 +9,10 @@
   },
   "keywords": [
     "signalk-node-server-plugin",
-    "signalk-embeddable-webapp"
+    "signalk-embeddable-webapp",
+    "docker",
+    "portainer",
+    "containers"
   ],
   "scripts": {
     "build": "npm run build:plugin && npm run build:ui",
@@ -36,7 +39,7 @@
   },
   "homepage": "https://github.com/KEGustafsson/signalk-portainer#readme",
   "engines": {
-    "node": ">=24.0.0"
+    "node": ">=18.0.0"
   },
   "dependencies": {
     "http-proxy-middleware": "^3.0.3"

@@ -7,7 +7,15 @@ const panelStyle: React.CSSProperties = {
 }
 
 const AppPanel: React.FC = () => {
-  return <iframe src={PROXY_PATH} style={panelStyle} title="Portainer CE" />
+  return (
+    <iframe
+      src={PROXY_PATH}
+      style={panelStyle}
+      title="Portainer CE"
+      sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
+      referrerPolicy="no-referrer"
+    />
+  )
 }
 
 export default AppPanel

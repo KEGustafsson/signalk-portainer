@@ -1,7 +1,7 @@
-import type { Plugin } from '@signalk/server-api'
+import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
 import type { IncomingMessage, ServerResponse } from 'http'
-import type { Socket } from 'net'
+import { Socket } from 'net'
 import { createProxyMiddleware, type RequestHandler } from 'http-proxy-middleware'
 
 interface PortainerPluginConfig {
@@ -15,28 +15,43 @@ const PLUGIN_NAME = 'Portainer CE'
 const DEFAULT_HOST = 'localhost'
 const DEFAULT_PORT = 9000
 
-module.exports = function (): Plugin {
+const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
+const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal'])
+
+function isValidHost(host: string): boolean {
+  if (!HOST_PATTERN.test(host)) return false
+  if (CLOUD_METADATA_HOSTS.has(host)) return false
+  return true
+}
+
+function buildTarget(config: PortainerPluginConfig): string {
+  const url = new URL(`http://${config.portainerHost}:${String(config.portainerPort)}`)
+  if (url.username || url.password || url.pathname !== '/') {
+    throw new Error('Invalid Portainer host configuration')
+  }
+  return url.origin
+}
+
+module.exports = function (_app: ServerAPI): Plugin {
   let proxy: RequestHandler | null = null
   let currentConfig: PortainerPluginConfig | null = null
 
-  function getTarget(config: PortainerPluginConfig): string {
-    return `http://${config.portainerHost}:${String(config.portainerPort)}`
-  }
-
   function parseConfig(config: object): PortainerPluginConfig {
     const raw = config as Record<string, unknown>
-    return {
-      portainerHost:
-        typeof raw['portainerHost'] === 'string' && raw['portainerHost'].length > 0
-          ? raw['portainerHost']
-          : DEFAULT_HOST,
-      portainerPort:
-        typeof raw['portainerPort'] === 'number' &&
-        raw['portainerPort'] >= 1 &&
-        raw['portainerPort'] <= 65535
-          ? raw['portainerPort']
-          : DEFAULT_PORT,
-    }
+    const host =
+      typeof raw['portainerHost'] === 'string' &&
+      raw['portainerHost'].length > 0 &&
+      isValidHost(raw['portainerHost'])
+        ? raw['portainerHost']
+        : DEFAULT_HOST
+    const port =
+      typeof raw['portainerPort'] === 'number' &&
+      Number.isInteger(raw['portainerPort']) &&
+      raw['portainerPort'] >= 1 &&
+      raw['portainerPort'] <= 65535
+        ? raw['portainerPort']
+        : DEFAULT_PORT
+    return { portainerHost: host, portainerPort: port }
   }
 
   const plugin: Plugin = {
@@ -44,20 +59,24 @@ module.exports = function (): Plugin {
     name: PLUGIN_NAME,
     description: 'Embeds Portainer CE container management as a webapp in SignalK',
 
-    start(config: object): void {
+    start(config: object, _restart: (newConfiguration: object) => void): void {
       currentConfig = parseConfig(config)
-      const target = getTarget(currentConfig)
+      const target = buildTarget(currentConfig)
 
       proxy = createProxyMiddleware({
         target,
         changeOrigin: true,
         ws: true,
         on: {
-          error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
-            if ('writeHead' in res && !res.headersSent) {
+          error(_err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
+            if (res instanceof Socket) {
+              res.destroy()
+              return
+            }
+            if (!res.headersSent) {
               res.writeHead(502, { 'Content-Type': 'application/json' })
             }
-            res.end(JSON.stringify({ error: 'Portainer is not reachable', detail: err.message }))
+            res.end(JSON.stringify({ error: 'Portainer is not reachable' }))
           },
         },
       })
@@ -104,7 +123,7 @@ module.exports = function (): Plugin {
 
     statusMessage(): string {
       if (currentConfig) {
-        return `Proxying to ${getTarget(currentConfig)}`
+        return `Proxying to ${buildTarget(currentConfig)}`
       }
       return 'Not started'
     },

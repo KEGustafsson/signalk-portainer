@@ -1,4 +1,4 @@
-import type { Plugin } from '@signalk/server-api'
+import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
 
 type MiddlewareFn = (req: Request, res: Response, next: () => void) => void
@@ -14,14 +14,16 @@ jest.mock('http-proxy-middleware', () => ({
 }))
 
 // eslint-disable-next-line @typescript-eslint/no-require-imports
-const pluginFactory = require('../src/index') as () => Plugin
+const pluginFactory = require('../src/index') as (app: ServerAPI) => Plugin
+
+const mockApp = {} as ServerAPI
 
 describe('signalk-portainer plugin', () => {
   let plugin: Plugin
 
   beforeEach(() => {
     jest.clearAllMocks()
-    plugin = pluginFactory()
+    plugin = pluginFactory(mockApp)
   })
 
   describe('metadata', () => {
@@ -108,6 +110,38 @@ describe('signalk-portainer plugin', () => {
 
     it('uses default values for invalid config values', () => {
       plugin.start({ portainerHost: '', portainerPort: -1 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000')
+    })
+
+    it('rejects hosts with URL metacharacters', () => {
+      plugin.start({ portainerHost: 'evil.com/path', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000')
+    })
+
+    it('rejects cloud metadata host addresses', () => {
+      plugin.start({ portainerHost: '169.254.169.254', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000')
+    })
+
+    it('rejects hosts with special characters', () => {
+      plugin.start({ portainerHost: 'user:pass@evil.com', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000')
+    })
+
+    it('rejects non-integer port numbers', () => {
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000.5 }, jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -228,7 +262,7 @@ describe('signalk-portainer plugin', () => {
       expect(typeof on['error']).toBe('function')
     })
 
-    it('error handler returns 502 with details', () => {
+    it('error handler returns 502 without leaking details', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
       plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
@@ -248,9 +282,12 @@ describe('signalk-portainer plugin', () => {
       errorHandler(new Error('ECONNREFUSED'), mockReq, mockRes)
 
       expect(mockRes.writeHead).toHaveBeenCalledWith(502, { 'Content-Type': 'application/json' })
-      expect(mockRes.end).toHaveBeenCalledWith(
-        JSON.stringify({ error: 'Portainer is not reachable', detail: 'ECONNREFUSED' }),
-      )
+      const body = JSON.parse((mockRes.end as jest.Mock).mock.calls[0][0] as string) as Record<
+        string,
+        unknown
+      >
+      expect(body['error']).toBe('Portainer is not reachable')
+      expect(body).not.toHaveProperty('detail')
     })
 
     it('error handler does not write headers if already sent', () => {
@@ -274,6 +311,30 @@ describe('signalk-portainer plugin', () => {
 
       expect(mockRes.writeHead).not.toHaveBeenCalled()
       expect(mockRes.end).toHaveBeenCalled()
+    })
+
+    it('error handler destroys socket for WebSocket errors', () => {
+      mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
+
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      const on = options['on'] as Record<string, unknown>
+      const errorHandler = on['error'] as (
+        err: Error,
+        req: Request,
+        res: { destroy: () => void },
+      ) => void
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { Socket } = require('net') as typeof import('net')
+      const mockSocket = Object.create(Socket.prototype) as InstanceType<typeof Socket>
+      Object.assign(mockSocket, { destroy: jest.fn() })
+
+      errorHandler(new Error('ws error'), {} as Request, mockSocket)
+
+      expect(mockSocket.destroy).toHaveBeenCalled()
     })
   })
 })
