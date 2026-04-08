@@ -100,10 +100,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
             const existing = httpReq.headers['x-forwarded-for']
             const forwarded = existing ? `${String(existing)}, ${remoteAddress}` : remoteAddress
             proxyReq.setHeader('X-Forwarded-For', forwarded)
-            proxyReq.setHeader(
-              'X-Forwarded-Proto',
-              (httpReq.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
-            )
+            const incomingProto = httpReq.headers['x-forwarded-proto']
+            const rawProto = typeof incomingProto === 'string' ? incomingProto : (incomingProto?.[0] ?? '')
+            const proto =
+              rawProto.split(',')[0]?.trim() ||
+              ((httpReq.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
+            proxyReq.setHeader('X-Forwarded-Proto', proto)
           },
           error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
             app.error(`Portainer proxy error: ${err.message}`)
