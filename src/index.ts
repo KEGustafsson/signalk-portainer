@@ -28,6 +28,19 @@ const VALID_SCHEMES = new Set<string>(['http', 'https'])
 const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
 const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal'])
 
+// RFC 7230 §3.2.6 — characters valid in a header field name (HTTP token)
+const HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
+
+function stripInvalidHeaders(req: IncomingMessage): void {
+  if (!req.headers) return
+  for (const key of Object.keys(req.headers)) {
+    if (!HTTP_TOKEN_RE.test(key)) {
+      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
+      delete req.headers[key]
+    }
+  }
+}
+
 function normalizeHost(host: string): string {
   return host.trim().toLowerCase().replace(/\.+$/, '')
 }
@@ -125,6 +138,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         const proxyUpgrade = proxy.upgrade.bind(proxy)
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
           if (req.url?.startsWith(PLUGIN_PATH_PREFIX)) {
+            stripInvalidHeaders(req)
             // Strip plugin path prefix (and optional /proxy subpath) so
             // the upstream server receives the correct resource path.
             let path = req.url.substring(PLUGIN_PATH_PREFIX.length)
@@ -150,6 +164,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
 
     registerWithRouter(router: IRouter): void {
       const handler = (req: Request, res: Response, next: () => void): void => {
+        stripInvalidHeaders(req as unknown as IncomingMessage)
         if (proxy) {
           ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
         } else {
