@@ -121,7 +121,7 @@ describe('signalk-portainer plugin', () => {
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://localhost:9000')
       expect(options['changeOrigin']).toBe(true)
-      expect(options['ws']).toBe(true)
+      expect(options['ws']).toBe(false)
     })
 
     it('uses custom host and port from config', () => {
