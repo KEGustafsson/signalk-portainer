@@ -43,7 +43,8 @@ docker run -d \
   --restart=always \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
-  portainer/portainer-ce:lts
+  portainer/portainer-ce:lts \
+  --base-url /plugins/signalk-portainer/proxy
 ```
 
 Portainer CE v2.9+ defaults to **HTTPS on port 9443** with a self-signed certificate. Configure the plugin with scheme `https`, port `9443`, and enable **Allow Self-Signed Certificates**.
@@ -59,7 +60,8 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
   portainer/portainer-ce:lts \
-  --http-enabled
+  --http-enabled \
+  --base-url /plugins/signalk-portainer/proxy
 ```
 
 Use scheme `http` and port `9000` in the plugin configuration.
@@ -143,6 +145,16 @@ The first time you access Portainer, you will need to create an admin user throu
   - HTTP: `curl http://127.0.0.1:9000`
   - HTTPS (self-signed): `curl -k https://127.0.0.1:9443`
 - Adjust host and port to match your Portainer deployment
+
+### Login fails or POST requests never get a response
+
+The Portainer login screen loads but clicking **Sign In** appears to hang with no response.
+
+**Cause**: Portainer's JavaScript makes API calls using absolute paths (e.g. `POST /api/auth`). Without a base URL configured, these go directly to the SignalK server instead of through the plugin's proxy.
+
+**Fix**: Start Portainer with the `--base-url /plugins/signalk-portainer/proxy` flag (shown in the Docker commands above). This tells Portainer's frontend to prefix all API calls with the correct sub-path so they are routed through the proxy.
+
+If you already have Portainer running without this flag, recreate the container with `--base-url` added. The existing `portainer_data` volume is preserved.
 
 ### Container console/terminal not working
 

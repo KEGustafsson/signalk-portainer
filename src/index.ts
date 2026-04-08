@@ -93,6 +93,18 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         ws: true,
         secure: !(currentConfig.portainerScheme === 'https' && currentConfig.allowSelfSigned),
         on: {
+          proxyReq(proxyReq, req): void {
+            const httpReq = req as IncomingMessage
+            const remoteAddress = httpReq.socket?.remoteAddress ?? ''
+            proxyReq.setHeader('X-Real-IP', remoteAddress)
+            const existing = httpReq.headers['x-forwarded-for']
+            const forwarded = existing ? `${String(existing)}, ${remoteAddress}` : remoteAddress
+            proxyReq.setHeader('X-Forwarded-For', forwarded)
+            proxyReq.setHeader(
+              'X-Forwarded-Proto',
+              (httpReq.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http',
+            )
+          },
           error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
             app.error(`Portainer proxy error: ${err.message}`)
             if (res instanceof Socket) {

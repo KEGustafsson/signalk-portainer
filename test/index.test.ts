@@ -233,6 +233,64 @@ describe('signalk-portainer plugin', () => {
       expect(options['secure']).toBe(false)
     })
 
+    it('configures a proxyReq handler that sets forwarding headers', () => {
+      mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
+
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      const on = options['on'] as Record<string, unknown>
+      expect(on['proxyReq']).toBeDefined()
+      expect(typeof on['proxyReq']).toBe('function')
+
+      const proxyReqHandler = on['proxyReq'] as (
+        proxyReq: { setHeader: jest.Mock },
+        req: unknown,
+      ) => void
+
+      const mockProxyReq = { setHeader: jest.fn() }
+      const mockReq = {
+        socket: { remoteAddress: '10.0.0.1', encrypted: false },
+        headers: {},
+      }
+
+      proxyReqHandler(mockProxyReq, mockReq)
+
+      const setCalls = mockProxyReq.setHeader.mock.calls as [string, string][]
+      const headerMap = Object.fromEntries(setCalls.map(([k, v]) => [k, v]))
+      expect(headerMap['X-Real-IP']).toBe('10.0.0.1')
+      expect(headerMap['X-Forwarded-For']).toBe('10.0.0.1')
+      expect(headerMap['X-Forwarded-Proto']).toBe('http')
+    })
+
+    it('appends to existing X-Forwarded-For header', () => {
+      mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
+
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      const on = options['on'] as Record<string, unknown>
+      const proxyReqHandler = on['proxyReq'] as (
+        proxyReq: { setHeader: jest.Mock },
+        req: unknown,
+      ) => void
+
+      const mockProxyReq = { setHeader: jest.fn() }
+      const mockReq = {
+        socket: { remoteAddress: '10.0.0.2', encrypted: true },
+        headers: { 'x-forwarded-for': '192.168.1.1' },
+      }
+
+      proxyReqHandler(mockProxyReq, mockReq)
+
+      const setCalls = mockProxyReq.setHeader.mock.calls as [string, string][]
+      const headerMap = Object.fromEntries(setCalls.map(([k, v]) => [k, v]))
+      expect(headerMap['X-Forwarded-For']).toBe('192.168.1.1, 10.0.0.2')
+      expect(headerMap['X-Forwarded-Proto']).toBe('https')
+    })
+
     it('ignores allowSelfSigned when scheme is http', () => {
       plugin.start(
         { portainerHost: 'localhost', portainerPort: 9000, allowSelfSigned: true },
