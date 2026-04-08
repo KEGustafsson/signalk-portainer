@@ -144,6 +144,12 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
+    it('reports no apps configured when started with empty apps', () => {
+      plugin.start({ apps: [] }, jest.fn())
+
+      expect(plugin.statusMessage?.()).toBe('No apps configured')
+    })
+
     it('uses default values for missing or invalid app fields', () => {
       plugin.start({ apps: [{ name: 'X', host: '', port: -1 }] }, jest.fn())
 
@@ -721,6 +727,21 @@ describe('signalk-web-proxy plugin', () => {
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
     })
 
+    it('ignores upgrade requests with non-numeric index', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0abc/api/websocket/exec',
+      } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+    })
+
     it('ignores upgrade requests with out-of-range index', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start(oneApp(), jest.fn()) // only 1 app → index 0 valid, index 1 invalid
@@ -743,6 +764,13 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockServer.listenerCount('upgrade')).toBe(1)
 
       void plugin.stop()
+
+      expect(mockServer.listenerCount('upgrade')).toBe(0)
+    })
+
+    it('does not register upgrade handler when no apps are configured', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ apps: [] }, jest.fn())
 
       expect(mockServer.listenerCount('upgrade')).toBe(0)
     })

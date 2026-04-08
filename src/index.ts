@@ -103,6 +103,7 @@ function parseConfig(config: object): AppConfig[] {
 module.exports = function (app: ServerAPIWithServer): Plugin {
   let proxies: RequestHandler[] = []
   let currentApps: AppConfig[] = []
+  let started = false
   let upgradeHandler: ((req: IncomingMessage, socket: Socket, head: Buffer) => void) | null = null
 
   const plugin: Plugin = {
@@ -112,6 +113,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
 
     start(config: object, _restart: (newConfiguration: object) => void): void {
       currentApps = parseConfig(config)
+      started = true
 
       proxies = currentApps.map((appConfig) =>
         createProxyMiddleware({
@@ -153,7 +155,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         }),
       )
 
-      if (app.server) {
+      if (app.server && proxies.length > 0) {
         // Forward WebSocket upgrades to the correct per-app proxy.
         // ws:false above means http-proxy-middleware does NOT auto-intercept
         // upgrades; we dispatch manually so only our plugin paths are affected.
@@ -163,8 +165,9 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           const rest = req.url.substring(prefix.length) // e.g. "0/api/websocket/exec"
           const slash = rest.indexOf('/')
           const indexStr = slash >= 0 ? rest.substring(0, slash) : rest
-          const index = parseInt(indexStr, 10)
-          if (isNaN(index) || index < 0 || index >= proxies.length) return
+          if (!/^\d+$/.test(indexStr)) return
+          const index = Number(indexStr)
+          if (index >= proxies.length) return
           const targetProxy = proxies[index]
           if (!targetProxy) return
           const proxyUpgrade = targetProxy.upgrade
@@ -184,6 +187,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
       upgradeHandler = null
       proxies = []
       currentApps = []
+      started = false
     },
 
     registerWithRouter(router: IRouter): void {
@@ -269,7 +273,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     },
 
     statusMessage(): string {
-      if (currentApps.length === 0) return 'Not started'
+      if (!started) return 'Not started'
+      if (currentApps.length === 0) return 'No apps configured'
       const targets = currentApps.map((a) => buildTarget(a)).join(', ')
       return `Proxying to: ${targets}`
     },
