@@ -28,9 +28,14 @@ const VALID_SCHEMES = new Set<string>(['http', 'https'])
 const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
 const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal'])
 
+function normalizeHost(host: string): string {
+  return host.trim().toLowerCase().replace(/\.+$/, '')
+}
+
 function isValidHost(host: string): boolean {
-  if (!HOST_PATTERN.test(host)) return false
-  if (CLOUD_METADATA_HOSTS.has(host)) return false
+  const normalized = normalizeHost(host)
+  if (!HOST_PATTERN.test(normalized)) return false
+  if (CLOUD_METADATA_HOSTS.has(normalized)) return false
   return true
 }
 
@@ -53,12 +58,9 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
 
   function parseConfig(config: object): PortainerPluginConfig {
     const raw = config as Record<string, unknown>
-    const host =
-      typeof raw['portainerHost'] === 'string' &&
-      raw['portainerHost'].length > 0 &&
-      isValidHost(raw['portainerHost'])
-        ? raw['portainerHost']
-        : DEFAULT_HOST
+    const rawHost = typeof raw['portainerHost'] === 'string' ? raw['portainerHost'] : ''
+    const normalized = normalizeHost(rawHost)
+    const host = normalized.length > 0 && isValidHost(rawHost) ? normalized : DEFAULT_HOST
     const port =
       typeof raw['portainerPort'] === 'number' &&
       Number.isInteger(raw['portainerPort']) &&

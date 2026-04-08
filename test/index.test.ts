@@ -11,10 +11,10 @@ interface MockProxyMiddleware {
   upgrade?: jest.Mock
 }
 
-const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, []>()
+const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, [options: Record<string, unknown>]>()
 
 jest.mock('http-proxy-middleware', () => ({
-  createProxyMiddleware: (...args: unknown[]) => mockCreateProxyMiddleware(...(args as [])),
+  createProxyMiddleware: (options: Record<string, unknown>) => mockCreateProxyMiddleware(options),
 }))
 
 interface ServerAPIWithServer extends ServerAPI {
@@ -165,6 +165,38 @@ describe('signalk-portainer plugin', () => {
 
     it('rejects hosts with special characters', () => {
       plugin.start({ portainerHost: 'user:pass@evil.com', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://127.0.0.1:9000')
+    })
+
+    it('normalizes host to lowercase', () => {
+      plugin.start({ portainerHost: 'MyHost.Local', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://myhost.local:9000')
+    })
+
+    it('strips trailing dots from host', () => {
+      plugin.start({ portainerHost: 'myhost.local.', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://myhost.local:9000')
+    })
+
+    it('rejects cloud metadata host with trailing dot', () => {
+      plugin.start({ portainerHost: '169.254.169.254.', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://127.0.0.1:9000')
+    })
+
+    it('rejects cloud metadata host with mixed case', () => {
+      plugin.start({ portainerHost: 'Metadata.Google.Internal', portainerPort: 9000 }, jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>

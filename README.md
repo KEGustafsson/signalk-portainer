@@ -79,8 +79,10 @@ After installation, configure the plugin in the SignalK admin UI:
 | ---------------------------------- | ---------------------------------------------------- | ----------- |
 | **Portainer Scheme**               | Protocol to use (`http` or `https`)                  | `http`      |
 | **Portainer Host**                 | Hostname or IP address where Portainer is running    | `127.0.0.1` |
-| **Portainer Port**                 | Port number of the Portainer instance                | `9000`      |
+| **Portainer Port**                 | Port number of the Portainer instance                | `9000`\*    |
 | **Allow Self-Signed Certificates** | Accept self-signed TLS certs (only applies to HTTPS) | `false`     |
+
+\*The plugin defaults to port 9000 for backward compatibility. Portainer CE v2.9+ defaults to HTTPS on port **9443** — set **Portainer Scheme** to `https` and **Portainer Port** to `9443` for newer installations.
 
 5. Click **Submit** to save
 
@@ -135,9 +137,12 @@ The first time you access Portainer, you will need to create an admin user throu
 
 ### Connection refused
 
-- If Portainer runs in Docker, ensure the port is mapped to the host (`-p 9000:9000`)
+- If Portainer runs in Docker, ensure the port is mapped to the host (e.g. `-p 9443:9443`)
 - Check firewall rules if Portainer is on a different host
-- Verify with: `curl http://localhost:9000` (adjust host/port as needed)
+- Verify connectivity:
+  - HTTP: `curl http://127.0.0.1:9000`
+  - HTTPS (self-signed): `curl -k https://127.0.0.1:9443`
+- Adjust host and port to match your Portainer deployment
 
 ### Container console/terminal not working
 
