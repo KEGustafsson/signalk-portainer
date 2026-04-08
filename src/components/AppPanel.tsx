@@ -19,7 +19,10 @@ const AppPanel: React.FC = () => {
 
   React.useEffect(() => {
     fetch(`${PLUGIN_PATH}/apps`)
-      .then((r) => r.json() as Promise<AppInfo[]>)
+      .then((r) => {
+        if (!r.ok) throw new Error(`HTTP ${String(r.status)}`)
+        return r.json() as Promise<AppInfo[]>
+      })
       .then((data) => {
         setApps(data)
         // Auto-select the only app so the iframe loads immediately

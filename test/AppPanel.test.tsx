@@ -9,12 +9,17 @@ interface AppInfo {
 
 function mockFetchApps(apps: AppInfo[]): void {
   global.fetch = jest.fn().mockResolvedValue({
+    ok: true,
     json: (): Promise<AppInfo[]> => Promise.resolve(apps),
   })
 }
 
 function mockFetchError(): void {
   global.fetch = jest.fn().mockRejectedValue(new Error('Network error'))
+}
+
+function mockFetchHttpError(status: number): void {
+  global.fetch = jest.fn().mockResolvedValue({ ok: false, status })
 }
 
 describe('AppPanel', () => {
@@ -40,6 +45,12 @@ describe('AppPanel', () => {
 
     it('shows configure message when fetch fails', async () => {
       mockFetchError()
+      render(<AppPanel />)
+      expect(await screen.findByText(/No web applications configured/i)).toBeInTheDocument()
+    })
+
+    it('shows configure message when server returns non-2xx', async () => {
+      mockFetchHttpError(500)
       render(<AppPanel />)
       expect(await screen.findByText(/No web applications configured/i)).toBeInTheDocument()
     })

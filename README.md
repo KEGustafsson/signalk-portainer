@@ -86,7 +86,7 @@ If only one application is configured, it loads automatically without requiring 
 
 Each application is accessible at:
 
-```
+```text
 /plugins/signalk-web-proxy/proxy/{index}/
 ```
 
@@ -99,7 +99,7 @@ Where `{index}` is the zero-based position of the app in the `apps` array.
 
 The list of configured apps (name + index) is also available as JSON:
 
-```
+```http
 GET /plugins/signalk-web-proxy/apps
 ```
 

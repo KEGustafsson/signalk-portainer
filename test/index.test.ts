@@ -564,7 +564,7 @@ describe('signalk-web-proxy plugin', () => {
       expect(proxy0).not.toHaveBeenCalled()
     })
 
-    it('/proxy/1 returns 503 when only one app is configured', () => {
+    it('/proxy/1 returns 404 when only one app is configured', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
@@ -581,7 +581,8 @@ describe('signalk-web-proxy plugin', () => {
 
       handler(mockReq, mockRes, mockNext)
 
-      expect(mockRes.status).toHaveBeenCalledWith(503)
+      expect(mockRes.status).toHaveBeenCalledWith(404)
+      expect(mockRes.json).toHaveBeenCalledWith({ error: 'No app configured at slot 1' })
     })
 
     it('returns 503 after plugin is stopped', () => {

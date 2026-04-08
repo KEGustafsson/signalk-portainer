@@ -210,6 +210,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
             const proxy = proxies[idx]
             if (proxy) {
               ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
+            } else if (started) {
+              res.status(404).json({ error: `No app configured at slot ${idx}` })
             } else {
               res.status(503).json({ error: 'Plugin is not started' })
             }
