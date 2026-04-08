@@ -1,8 +1,12 @@
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
-import type { IncomingMessage, ServerResponse } from 'http'
+import type { IncomingMessage, Server, ServerResponse } from 'http'
 import { Socket } from 'net'
 import { createProxyMiddleware, type RequestHandler } from 'http-proxy-middleware'
+
+interface ServerAPIWithServer extends ServerAPI {
+  server?: Server
+}
 
 interface PortainerPluginConfig {
   portainerHost: string
@@ -32,9 +36,12 @@ function buildTarget(config: PortainerPluginConfig): string {
   return url.origin
 }
 
-module.exports = function (_app: ServerAPI): Plugin {
+const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}/`
+
+module.exports = function (app: ServerAPIWithServer): Plugin {
   let proxy: RequestHandler | null = null
   let currentConfig: PortainerPluginConfig | null = null
+  let upgradeHandler: ((req: IncomingMessage, socket: Socket, head: Buffer) => void) | null = null
 
   function parseConfig(config: object): PortainerPluginConfig {
     const raw = config as Record<string, unknown>
@@ -80,9 +87,23 @@ module.exports = function (_app: ServerAPI): Plugin {
           },
         },
       })
+
+      if (app.server && proxy.upgrade) {
+        const proxyUpgrade = proxy.upgrade.bind(proxy)
+        upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
+          if (req.url?.startsWith(PLUGIN_PATH_PREFIX)) {
+            proxyUpgrade(req, socket, head)
+          }
+        }
+        app.server.on('upgrade', upgradeHandler)
+      }
     },
 
     stop(): void {
+      if (upgradeHandler && app.server) {
+        app.server.removeListener('upgrade', upgradeHandler)
+      }
+      upgradeHandler = null
       proxy = null
       currentConfig = null
     },

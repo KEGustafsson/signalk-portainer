@@ -57,24 +57,27 @@ After installation, configure the plugin in the SignalK admin UI:
 3. Enable the plugin
 4. Configure the settings:
 
-| Setting | Description | Default |
-|---|---|---|
+| Setting            | Description                                       | Default     |
+| ------------------ | ------------------------------------------------- | ----------- |
 | **Portainer Host** | Hostname or IP address where Portainer is running | `localhost` |
-| **Portainer Port** | Port number of the Portainer instance | `9000` |
+| **Portainer Port** | Port number of the Portainer instance             | `9000`      |
 
 5. Click **Submit** to save
 
 ### Common configurations
 
 **Portainer on the same host (default):**
+
 - Host: `localhost`
 - Port: `9000`
 
 **Portainer on a different host:**
+
 - Host: `192.168.1.100` (the IP of the host running Portainer)
 - Port: `9000`
 
 **Portainer on a custom port:**
+
 - Host: `localhost`
 - Port: `9443`
 

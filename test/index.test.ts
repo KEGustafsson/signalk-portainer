@@ -1,10 +1,14 @@
 import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
+import type { IncomingMessage, Server } from 'http'
+import type { Socket } from 'net'
+import { EventEmitter } from 'events'
 
 type MiddlewareFn = (req: Request, res: Response, next: () => void) => void
 
 interface MockProxyMiddleware {
   (...args: Parameters<MiddlewareFn>): void
+  upgrade?: jest.Mock
 }
 
 const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, []>()
@@ -13,10 +17,14 @@ jest.mock('http-proxy-middleware', () => ({
   createProxyMiddleware: (...args: unknown[]) => mockCreateProxyMiddleware(...(args as [])),
 }))
 
-// eslint-disable-next-line @typescript-eslint/no-require-imports
-const pluginFactory = require('../src/index') as (app: ServerAPI) => Plugin
+interface ServerAPIWithServer extends ServerAPI {
+  server?: Server
+}
 
-const mockApp = {} as ServerAPI
+// eslint-disable-next-line @typescript-eslint/no-require-imports
+const pluginFactory = require('../src/index') as (app: ServerAPIWithServer) => Plugin
+
+const mockApp = {} as ServerAPIWithServer
 
 describe('signalk-portainer plugin', () => {
   let plugin: Plugin
@@ -246,6 +254,72 @@ describe('signalk-portainer plugin', () => {
       registeredHandler!(mockReq, mockRes, mockNext)
 
       expect(mockRes.status).toHaveBeenCalledWith(503)
+    })
+  })
+
+  describe('WebSocket upgrade handling', () => {
+    let mockServer: EventEmitter
+    let dummyProxy: MockProxyMiddleware
+    let appWithServer: ServerAPIWithServer
+
+    beforeEach(() => {
+      mockServer = new EventEmitter()
+      appWithServer = { server: mockServer as unknown as Server } as ServerAPIWithServer
+      dummyProxy = jest.fn() as MockProxyMiddleware
+      dummyProxy.upgrade = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+    })
+
+    it('registers upgrade handler on server when server is available', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      expect(mockServer.listenerCount('upgrade')).toBe(1)
+    })
+
+    it('forwards upgrade requests matching plugin path to proxy', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const mockReq = { url: '/plugins/signalk-portainer/api/websocket/exec' } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+    })
+
+    it('ignores upgrade requests not matching plugin path', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const mockReq = { url: '/signalk/v1/stream' } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+    })
+
+    it('removes upgrade handler on stop', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      expect(mockServer.listenerCount('upgrade')).toBe(1)
+
+      void plugin.stop()
+
+      expect(mockServer.listenerCount('upgrade')).toBe(0)
+    })
+
+    it('does not register upgrade handler when server is not available', () => {
+      const plugin = pluginFactory(mockApp)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      // No error thrown, upgrade simply not wired
+      expect(dummyProxy.upgrade).not.toHaveBeenCalled()
     })
   })
 

@@ -4,7 +4,15 @@ import eslintConfigPrettier from 'eslint-config-prettier'
 
 export default tseslint.config(
   {
-    ignores: ['dist/', 'public/', 'coverage/', 'node_modules/', 'webpack.config.js'],
+    ignores: [
+      'dist/',
+      'public/',
+      'coverage/',
+      'node_modules/',
+      'webpack.config.js',
+      'eslint.config.mjs',
+      'jest.config.js',
+    ],
   },
   ...tseslint.configs.recommendedTypeChecked,
   {
