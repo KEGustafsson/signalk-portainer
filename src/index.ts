@@ -103,7 +103,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
       proxy = createProxyMiddleware({
         target,
         changeOrigin: true,
-        ws: true,
+        ws: false,
         secure: !(currentConfig.portainerScheme === 'https' && currentConfig.allowSelfSigned),
         on: {
           proxyReq(proxyReq, req): void {
