@@ -431,6 +431,31 @@ describe('signalk-portainer plugin', () => {
       expect(paths).toEqual(['/proxy', '/'])
     })
 
+    it('strips invalid header names before invoking the proxy', () => {
+      const dummyProxy: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler = registeredHandlers.get('/proxy')!
+      const mockReq = {
+        headers: {
+          'content-type': 'text/html',
+          'primus::req::backup': {},
+          'x-custom': 'ok',
+        },
+      } as unknown as Request
+      const mockRes = {} as Response
+      const mockNext = jest.fn()
+
+      handler(mockReq, mockRes, mockNext)
+
+      expect(mockReq.headers).not.toHaveProperty('primus::req::backup')
+      expect(mockReq.headers).toHaveProperty('content-type', 'text/html')
+      expect(mockReq.headers).toHaveProperty('x-custom', 'ok')
+    })
+
     it('returns 503 when plugin is not started', () => {
       plugin.registerWithRouter!(mockRouter)
 
@@ -549,6 +574,28 @@ describe('signalk-portainer plugin', () => {
 
       expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
       expect(mockReq.url).toBe('/')
+    })
+
+    it('strips invalid header names before forwarding upgrade requests', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-portainer/api/websocket/exec',
+        headers: {
+          upgrade: 'websocket',
+          'primus::req::backup': {},
+          connection: 'Upgrade',
+        },
+      } as unknown as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(mockReq.headers).not.toHaveProperty('primus::req::backup')
+      expect(mockReq.headers).toHaveProperty('upgrade', 'websocket')
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
     })
 
     it('ignores upgrade requests not matching plugin path', () => {
