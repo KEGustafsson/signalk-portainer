@@ -1,51 +1,197 @@
-import { render, screen } from '@testing-library/react'
+import { act, fireEvent, render, screen } from '@testing-library/react'
 import '@testing-library/jest-dom'
 import AppPanel from '../src/components/AppPanel'
 
+interface AppInfo {
+  index: number
+  name: string
+}
+
+function mockFetchApps(apps: AppInfo[]): void {
+  global.fetch = jest.fn().mockResolvedValue({
+    json: (): Promise<AppInfo[]> => Promise.resolve(apps),
+  })
+}
+
+function mockFetchError(): void {
+  global.fetch = jest.fn().mockRejectedValue(new Error('Network error'))
+}
+
 describe('AppPanel', () => {
-  it('renders an iframe element', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toBeInTheDocument()
-    expect(iframe.tagName).toBe('IFRAME')
+  afterEach(() => {
+    jest.restoreAllMocks()
   })
 
-  it('points to the correct proxy path', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveAttribute('src', '/plugins/signalk-portainer/proxy/')
+  describe('loading state', () => {
+    it('shows loading message while fetch is pending', () => {
+      // fetch never resolves during this test
+      global.fetch = jest.fn().mockReturnValue(new Promise(() => {}))
+      render(<AppPanel />)
+      expect(screen.getByText(/Loading/i)).toBeInTheDocument()
+    })
   })
 
-  it('has no border', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveStyle({ borderWidth: '0' })
+  describe('empty state', () => {
+    it('shows configure message when no apps are returned', async () => {
+      mockFetchApps([])
+      render(<AppPanel />)
+      expect(await screen.findByText(/No web applications configured/i)).toBeInTheDocument()
+    })
+
+    it('shows configure message when fetch fails', async () => {
+      mockFetchError()
+      render(<AppPanel />)
+      expect(await screen.findByText(/No web applications configured/i)).toBeInTheDocument()
+    })
   })
 
-  it('fills the available width', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveStyle({ width: '100%' })
+  describe('single app', () => {
+    const singleApp: AppInfo[] = [{ index: 0, name: 'Portainer CE' }]
+
+    it('auto-selects and renders iframe when only one app is configured', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toBeInTheDocument()
+      expect(iframe.tagName).toBe('IFRAME')
+    })
+
+    it('iframe points to the correct proxy path', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/0/')
+    })
+
+    it('does not render a dropdown for a single app', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      await screen.findByTitle('Portainer CE') // wait for load
+      expect(screen.queryByRole('combobox')).not.toBeInTheDocument()
+    })
+
+    it('iframe has sandbox attribute', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveAttribute(
+        'sandbox',
+        'allow-scripts allow-same-origin allow-forms allow-popups',
+      )
+    })
+
+    it('iframe has referrerPolicy attribute', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveAttribute('referrerPolicy', 'no-referrer')
+    })
+
+    it('iframe has no border', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveStyle({ borderWidth: '0' })
+    })
+
+    it('iframe fills available width', async () => {
+      mockFetchApps(singleApp)
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveStyle({ width: '100%' })
+    })
   })
 
-  it('has a title attribute for accessibility', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveAttribute('title', 'Portainer CE')
+  describe('multiple apps', () => {
+    const twoApps: AppInfo[] = [
+      { index: 0, name: 'Portainer CE' },
+      { index: 1, name: 'Grafana' },
+    ]
+
+    it('renders a dropdown when multiple apps are configured', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      expect(await screen.findByRole('combobox')).toBeInTheDocument()
+    })
+
+    it('dropdown lists all configured apps', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      await screen.findByRole('combobox')
+      expect(screen.getByRole('option', { name: 'Portainer CE' })).toBeInTheDocument()
+      expect(screen.getByRole('option', { name: 'Grafana' })).toBeInTheDocument()
+    })
+
+    it('does not render an iframe before an app is selected', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      await screen.findByRole('combobox')
+      expect(screen.queryByTitle('Portainer CE')).not.toBeInTheDocument()
+      expect(screen.queryByTitle('Grafana')).not.toBeInTheDocument()
+    })
+
+    it('shows select prompt before selection', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      expect(await screen.findByText(/Select an application above/i)).toBeInTheDocument()
+    })
+
+    it('renders iframe with correct src after selecting an app', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '1' } })
+      })
+
+      const iframe = screen.getByTitle('Grafana')
+      expect(iframe).toBeInTheDocument()
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/1/')
+    })
+
+    it('iframe title matches the selected app name', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+
+      expect(screen.getByTitle('Portainer CE')).toBeInTheDocument()
+    })
+
+    it('swaps iframe when a different app is selected', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+      expect(screen.getByTitle('Portainer CE')).toHaveAttribute(
+        'src',
+        '/plugins/signalk-web-proxy/proxy/0/',
+      )
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '1' } })
+      })
+      expect(screen.queryByTitle('Portainer CE')).not.toBeInTheDocument()
+      expect(screen.getByTitle('Grafana')).toHaveAttribute(
+        'src',
+        '/plugins/signalk-web-proxy/proxy/1/',
+      )
+    })
   })
 
-  it('has sandbox attribute for iframe security', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveAttribute(
-      'sandbox',
-      'allow-scripts allow-same-origin allow-forms allow-popups',
-    )
-  })
-
-  it('has referrerPolicy attribute for privacy', () => {
-    render(<AppPanel />)
-    const iframe = screen.getByTitle('Portainer CE')
-    expect(iframe).toHaveAttribute('referrerPolicy', 'no-referrer')
+  describe('fetch URL', () => {
+    it('fetches apps from the correct endpoint', async () => {
+      mockFetchApps([])
+      render(<AppPanel />)
+      await screen.findByText(/No web applications configured/i)
+      expect(global.fetch).toHaveBeenCalledWith('/plugins/signalk-web-proxy/apps')
+    })
   })
 })

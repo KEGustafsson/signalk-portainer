@@ -1,15 +1,14 @@
-# signalk-portainer
+# signalk-web-proxy
 
-SignalK embedded webapp plugin that integrates [Portainer CE](https://www.portainer.io/) container management into the SignalK admin UI.
+SignalK embedded webapp plugin that acts as a general reverse proxy, letting you embed any web application into the SignalK admin UI.
 
-Portainer CE runs in its own Docker container on the same machine as SignalK. This plugin reverse-proxies Portainer into SignalK, so you can manage your Docker containers directly from the SignalK admin interface without opening a separate port or browser tab.
+Configure one or more applications (Portainer CE, Grafana, Node-RED, etc.). A selector UI lets you switch between them directly from the SignalK webapp panel.
 
 ## Prerequisites
 
 - [SignalK server](https://github.com/SignalK/signalk-server) (v2.x or later)
-- [Docker](https://docs.docker.com/get-docker/) installed on the same host
-- [Portainer CE](https://docs.portainer.io/start/install-ce) running in a Docker container
 - Node.js >= 18
+- The web applications you want to embed, accessible from the SignalK host
 
 ## Installation
 
@@ -17,7 +16,7 @@ Portainer CE runs in its own Docker container on the same machine as SignalK. Th
 
 1. Open the SignalK admin UI
 2. Navigate to **Appstore** > **Available**
-3. Search for **Portainer CE**
+3. Search for **Web Application Proxy**
 4. Click **Install**
 5. Restart SignalK server
 
@@ -25,18 +24,93 @@ Portainer CE runs in its own Docker container on the same machine as SignalK. Th
 
 ```bash
 cd ~/.signalk
-npm install signalk-portainer
+npm install signalk-web-proxy
 ```
 
 Then restart the SignalK server.
 
-## Portainer Setup
+## Plugin Configuration
 
-If you don't already have Portainer CE running, start it with Docker:
+After installation, configure the plugin in the SignalK admin UI:
+
+1. Navigate to **Server** > **Plugin Config**
+2. Find **Web Application Proxy** in the plugin list
+3. Enable the plugin
+4. Add one or more applications under **Web Applications**:
+
+| Field                              | Description                                          | Default     |
+| ---------------------------------- | ---------------------------------------------------- | ----------- |
+| **Name**                           | Display name shown in the app selector               | `My App`    |
+| **Scheme**                         | Protocol (`http` or `https`)                         | `http`      |
+| **Host**                           | Hostname or IP address of the application            | `127.0.0.1` |
+| **Port**                           | Port number of the application                       | `80`        |
+| **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)            | `false`     |
+
+5. Click **Submit** to save
+
+### Example: Portainer CE + Grafana
+
+```json
+{
+  "apps": [
+    {
+      "name": "Portainer CE",
+      "scheme": "https",
+      "host": "127.0.0.1",
+      "port": 9443,
+      "allowSelfSigned": true
+    },
+    {
+      "name": "Grafana",
+      "scheme": "http",
+      "host": "127.0.0.1",
+      "port": 3000
+    }
+  ]
+}
+```
+
+## Usage
+
+Once the plugin is enabled and configured:
+
+1. Open the SignalK admin UI
+2. Navigate to **Webapps**
+3. Click **Web Application Proxy**
+4. If multiple apps are configured, select one from the dropdown
+5. The selected application loads embedded in the SignalK admin UI
+
+If only one application is configured, it loads automatically without requiring a selection.
+
+## Proxy URL structure
+
+Each application is accessible at:
+
+```
+/plugins/signalk-web-proxy/proxy/{index}/
+```
+
+Where `{index}` is the zero-based position of the app in the `apps` array.
+
+| App | Proxy URL |
+|-----|-----------|
+| First app (index 0)  | `/plugins/signalk-web-proxy/proxy/0/` |
+| Second app (index 1) | `/plugins/signalk-web-proxy/proxy/1/` |
+
+The list of configured apps (name + index) is also available as JSON:
+
+```
+GET /plugins/signalk-web-proxy/apps
+```
+
+## Application-specific setup notes
+
+### Portainer CE
+
+Portainer's frontend makes API calls using absolute paths (e.g. `POST /api/auth`). Without a base URL configured these bypass the proxy and fail. Start Portainer with the `--base-url` flag:
 
 ```bash
-docker volume create portainer_data
-
+# HTTPS (default for Portainer CE v2.9+)
 docker run -d \
   -p 9443:9443 \
   --name portainer \
@@ -44,15 +118,9 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
   portainer/portainer-ce:lts \
-  --base-url /plugins/signalk-portainer/proxy
-```
+  --base-url /plugins/signalk-web-proxy/proxy/0
 
-Portainer CE v2.9+ defaults to **HTTPS on port 9443** with a self-signed certificate. Configure the plugin with scheme `https`, port `9443`, and enable **Allow Self-Signed Certificates**.
-
-<details>
-<summary>Legacy HTTP setup (Portainer &lt; v2.9 or manually enabled HTTP)</summary>
-
-```bash
+# HTTP (legacy / manually enabled)
 docker run -d \
   -p 9000:9000 \
   --name portainer \
@@ -61,112 +129,39 @@ docker run -d \
   -v portainer_data:/data \
   portainer/portainer-ce:lts \
   --http-enabled \
-  --base-url /plugins/signalk-portainer/proxy
+  --base-url /plugins/signalk-web-proxy/proxy/0
 ```
 
-Use scheme `http` and port `9000` in the plugin configuration.
-
-</details>
-
-## Plugin Configuration
-
-After installation, configure the plugin in the SignalK admin UI:
-
-1. Navigate to **Server** > **Plugin Config**
-2. Find **Portainer CE** in the plugin list
-3. Enable the plugin
-4. Configure the settings:
-
-| Setting                            | Description                                          | Default     |
-| ---------------------------------- | ---------------------------------------------------- | ----------- |
-| **Portainer Scheme**               | Protocol to use (`http` or `https`)                  | `http`      |
-| **Portainer Host**                 | Hostname or IP address where Portainer is running    | `127.0.0.1` |
-| **Portainer Port**                 | Port number of the Portainer instance                | `9000`\*    |
-| **Allow Self-Signed Certificates** | Accept self-signed TLS certs (only applies to HTTPS) | `false`     |
-
-\*The plugin defaults to port 9000 for backward compatibility. Portainer CE v2.9+ defaults to HTTPS on port **9443** — set **Portainer Scheme** to `https` and **Portainer Port** to `9443` for newer installations.
-
-5. Click **Submit** to save
-
-### Common configurations
-
-**Portainer on the same host (default):**
-
-- Scheme: `http`
-- Host: `127.0.0.1`
-- Port: `9000`
-
-**Portainer on a different host:**
-
-- Host: `192.168.1.100` (the IP of the host running Portainer)
-- Port: `9000`
-
-**Portainer with HTTPS (e.g. self-signed cert):**
-
-- Scheme: `https`
-- Host: `127.0.0.1`
-- Port: `9443`
-- Allow Self-Signed Certificates: `true`
-
-## Usage
-
-Once the plugin is enabled and configured:
-
-1. Open the SignalK admin UI
-2. Navigate to **Webapps**
-3. Click **Portainer CE**
-4. Portainer loads embedded within the SignalK admin UI frame
-
-The first time you access Portainer, you will need to create an admin user through the Portainer setup wizard.
-
-### Features available through the proxy
-
-- Full Portainer CE web interface
-- Container management (start, stop, restart, remove)
-- Image management
-- Volume and network management
-- Container console/terminal access (WebSocket-based)
-- Container logs
-- Docker Compose / Stacks
+> Adjust `/proxy/0` to match the index of Portainer in your `apps` array.
 
 ## Troubleshooting
 
-### Portainer not loading (503 error)
+### Application not loading (503 error)
 
-- Ensure the Portainer container is running: `docker ps | grep portainer`
-- Verify the host and port settings match your Portainer deployment
+- Ensure the target application is running and reachable from the SignalK host
+- Verify the host, port, and scheme settings
 - Check that the plugin is enabled in SignalK Plugin Config
 
 ### Connection refused
 
-- If Portainer runs in Docker, ensure the port is mapped to the host (e.g. `-p 9443:9443`)
-- Check firewall rules if Portainer is on a different host
-- Verify connectivity:
-  - HTTP: `curl http://127.0.0.1:9000`
-  - HTTPS (self-signed): `curl -k https://127.0.0.1:9443`
-- Adjust host and port to match your Portainer deployment
+- Confirm the application port is bound on the host (e.g. `-p 9443:9443` for Docker)
+- Check firewall rules if the application runs on a different host
+- Test connectivity directly: `curl http://127.0.0.1:<port>`
 
-### Login fails or POST requests never get a response
+### Login or POST requests hang
 
-The Portainer login screen loads but clicking **Sign In** appears to hang with no response.
+The application's frontend is making API calls with absolute paths that bypass the proxy. Configure the application to use the proxy subpath as a base URL (see **Portainer CE** section above).
 
-**Cause**: Portainer's JavaScript makes API calls using absolute paths (e.g. `POST /api/auth`). Without a base URL configured, these go directly to the SignalK server instead of through the plugin's proxy.
+### Container console/terminal not working (WebSocket)
 
-**Fix**: Start Portainer with the `--base-url /plugins/signalk-portainer/proxy` flag (shown in the Docker commands above). This tells Portainer's frontend to prefix all API calls with the correct sub-path so they are routed through the proxy.
-
-If you already have Portainer running without this flag, recreate the container with `--base-url` added. The existing `portainer_data` volume is preserved.
-
-### Container console/terminal not working
-
-- WebSocket connections are proxied automatically
-- Ensure no additional reverse proxy between the browser and SignalK is stripping WebSocket headers
-- Check that the `Upgrade` and `Connection` headers are preserved
+- WebSocket upgrade connections are proxied automatically per app
+- Ensure no upstream reverse proxy is stripping `Upgrade` / `Connection` headers
 
 ### Blank page or assets not loading
 
 - Clear browser cache and reload
 - Check the browser developer console for errors
-- Ensure Portainer is fully started (it may take a few seconds after container start)
+- Ensure the application is fully started before accessing it
 
 ## Development
 
