@@ -92,7 +92,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         ws: true,
         secure: !(currentConfig.portainerScheme === 'https' && currentConfig.allowSelfSigned),
         on: {
-          error(_err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
+          error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
+            app.error(`Portainer proxy error: ${err.message}`)
             if (res instanceof Socket) {
               res.destroy()
               return

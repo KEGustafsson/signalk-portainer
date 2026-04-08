@@ -24,7 +24,8 @@ interface ServerAPIWithServer extends ServerAPI {
 // eslint-disable-next-line @typescript-eslint/no-require-imports
 const pluginFactory = require('../src/index') as (app: ServerAPIWithServer) => Plugin
 
-const mockApp = {} as ServerAPIWithServer
+const mockError = jest.fn()
+const mockApp = { error: mockError } as unknown as ServerAPIWithServer
 
 describe('signalk-portainer plugin', () => {
   let plugin: Plugin
@@ -462,6 +463,7 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('ECONNREFUSED'), mockReq, mockRes)
 
+      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: ECONNREFUSED')
       expect(mockRes.writeHead).toHaveBeenCalledWith(502, { 'Content-Type': 'application/json' })
       const body = JSON.parse((mockRes.end as jest.Mock).mock.calls[0][0] as string) as Record<
         string,
@@ -490,6 +492,7 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('timeout'), mockReq, mockRes)
 
+      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: timeout')
       expect(mockRes.writeHead).not.toHaveBeenCalled()
       expect(mockRes.end).toHaveBeenCalled()
     })
@@ -515,6 +518,7 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('ws error'), {} as Request, mockSocket)
 
+      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: ws error')
       expect(mockSocket.destroy).toHaveBeenCalled()
     })
   })
