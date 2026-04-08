@@ -65,7 +65,7 @@ describe('signalk-portainer plugin', () => {
       >
       expect(properties['portainerHost']).toBeDefined()
       expect(properties['portainerHost']!['type']).toBe('string')
-      expect(properties['portainerHost']!['default']).toBe('localhost')
+      expect(properties['portainerHost']!['default']).toBe('127.0.0.1')
     })
 
     it('defines portainerPort property with default and constraints', () => {
@@ -75,10 +75,33 @@ describe('signalk-portainer plugin', () => {
         Record<string, unknown>
       >
       expect(properties['portainerPort']).toBeDefined()
-      expect(properties['portainerPort']!['type']).toBe('number')
+      expect(properties['portainerPort']!['type']).toBe('integer')
       expect(properties['portainerPort']!['default']).toBe(9000)
       expect(properties['portainerPort']!['minimum']).toBe(1)
       expect(properties['portainerPort']!['maximum']).toBe(65535)
+    })
+
+    it('defines portainerScheme property with enum', () => {
+      const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
+      const properties = (schema as Record<string, unknown>)['properties'] as Record<
+        string,
+        Record<string, unknown>
+      >
+      expect(properties['portainerScheme']).toBeDefined()
+      expect(properties['portainerScheme']!['type']).toBe('string')
+      expect(properties['portainerScheme']!['default']).toBe('http')
+      expect(properties['portainerScheme']!['enum']).toEqual(['http', 'https'])
+    })
+
+    it('defines allowSelfSigned property with default false', () => {
+      const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
+      const properties = (schema as Record<string, unknown>)['properties'] as Record<
+        string,
+        Record<string, unknown>
+      >
+      expect(properties['allowSelfSigned']).toBeDefined()
+      expect(properties['allowSelfSigned']!['type']).toBe('boolean')
+      expect(properties['allowSelfSigned']!['default']).toBe(false)
     })
   })
 
@@ -113,7 +136,7 @@ describe('signalk-portainer plugin', () => {
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
+      expect(options['target']).toBe('http://127.0.0.1:9000')
     })
 
     it('uses default values for invalid config values', () => {
@@ -121,7 +144,7 @@ describe('signalk-portainer plugin', () => {
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
+      expect(options['target']).toBe('http://127.0.0.1:9000')
     })
 
     it('rejects hosts with URL metacharacters', () => {
@@ -129,7 +152,7 @@ describe('signalk-portainer plugin', () => {
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
+      expect(options['target']).toBe('http://127.0.0.1:9000')
     })
 
     it('rejects cloud metadata host addresses', () => {
@@ -137,11 +160,63 @@ describe('signalk-portainer plugin', () => {
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
+      expect(options['target']).toBe('http://127.0.0.1:9000')
     })
 
     it('rejects hosts with special characters', () => {
       plugin.start({ portainerHost: 'user:pass@evil.com', portainerPort: 9000 }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://127.0.0.1:9000')
+    })
+
+    it('uses https scheme when configured', () => {
+      plugin.start(
+        { portainerHost: 'localhost', portainerPort: 9443, portainerScheme: 'https' },
+        jest.fn(),
+      )
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('https://localhost:9443')
+      expect(options['secure']).toBe(true)
+    })
+
+    it('sets secure to false when allowSelfSigned is true with https', () => {
+      plugin.start(
+        {
+          portainerHost: 'localhost',
+          portainerPort: 9443,
+          portainerScheme: 'https',
+          allowSelfSigned: true,
+        },
+        jest.fn(),
+      )
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('https://localhost:9443')
+      expect(options['secure']).toBe(false)
+    })
+
+    it('ignores allowSelfSigned when scheme is http', () => {
+      plugin.start(
+        { portainerHost: 'localhost', portainerPort: 9000, allowSelfSigned: true },
+        jest.fn(),
+      )
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000')
+      expect(options['secure']).toBe(true)
+    })
+
+    it('falls back to http for invalid scheme values', () => {
+      plugin.start(
+        { portainerHost: 'localhost', portainerPort: 9000, portainerScheme: 'ftp' },
+        jest.fn(),
+      )
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>

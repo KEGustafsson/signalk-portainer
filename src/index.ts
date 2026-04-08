@@ -8,16 +8,22 @@ interface ServerAPIWithServer extends ServerAPI {
   server?: Server
 }
 
+type PortainerScheme = 'http' | 'https'
+
 interface PortainerPluginConfig {
   portainerHost: string
   portainerPort: number
+  portainerScheme: PortainerScheme
+  allowSelfSigned: boolean
 }
 
 const PLUGIN_ID = 'signalk-portainer'
 const PLUGIN_NAME = 'Portainer CE'
 
-const DEFAULT_HOST = 'localhost'
+const DEFAULT_HOST = '127.0.0.1'
 const DEFAULT_PORT = 9000
+const DEFAULT_SCHEME: PortainerScheme = 'http'
+const VALID_SCHEMES = new Set<string>(['http', 'https'])
 
 const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
 const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.internal'])
@@ -29,7 +35,9 @@ function isValidHost(host: string): boolean {
 }
 
 function buildTarget(config: PortainerPluginConfig): string {
-  const url = new URL(`http://${config.portainerHost}:${String(config.portainerPort)}`)
+  const url = new URL(
+    `${config.portainerScheme}://${config.portainerHost}:${String(config.portainerPort)}`,
+  )
   if (url.username || url.password || url.pathname !== '/') {
     throw new Error('Invalid Portainer host configuration')
   }
@@ -58,7 +66,13 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
       raw['portainerPort'] <= 65535
         ? raw['portainerPort']
         : DEFAULT_PORT
-    return { portainerHost: host, portainerPort: port }
+    const scheme =
+      typeof raw['portainerScheme'] === 'string' && VALID_SCHEMES.has(raw['portainerScheme'])
+        ? (raw['portainerScheme'] as PortainerScheme)
+        : DEFAULT_SCHEME
+    const allowSelfSigned =
+      typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
+    return { portainerHost: host, portainerPort: port, portainerScheme: scheme, allowSelfSigned }
   }
 
   const plugin: Plugin = {
@@ -74,6 +88,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         target,
         changeOrigin: true,
         ws: true,
+        secure: !(currentConfig.portainerScheme === 'https' && currentConfig.allowSelfSigned),
         on: {
           error(_err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
             if (res instanceof Socket) {
@@ -124,6 +139,13 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         title: 'Portainer CE Configuration',
         description: 'Configure the connection to your Portainer CE instance',
         properties: {
+          portainerScheme: {
+            type: 'string' as const,
+            title: 'Portainer Scheme',
+            description: 'Protocol to use when connecting to Portainer (http or https)',
+            default: DEFAULT_SCHEME,
+            enum: ['http', 'https'],
+          },
           portainerHost: {
             type: 'string' as const,
             title: 'Portainer Host',
@@ -131,12 +153,19 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
             default: DEFAULT_HOST,
           },
           portainerPort: {
-            type: 'number' as const,
+            type: 'integer' as const,
             title: 'Portainer Port',
             description: 'Port number of the Portainer instance',
             default: DEFAULT_PORT,
             minimum: 1,
             maximum: 65535,
+          },
+          allowSelfSigned: {
+            type: 'boolean' as const,
+            title: 'Allow Self-Signed Certificates',
+            description:
+              'Accept self-signed TLS certificates when connecting to Portainer over HTTPS',
+            default: false,
           },
         },
       }

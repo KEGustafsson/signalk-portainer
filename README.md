@@ -9,7 +9,7 @@ Portainer CE runs in its own Docker container on the same machine as SignalK. Th
 - [SignalK server](https://github.com/SignalK/signalk-server) (v2.x or later)
 - [Docker](https://docs.docker.com/get-docker/) installed on the same host
 - [Portainer CE](https://docs.portainer.io/start/install-ce) running in a Docker container
-- Node.js >= 24
+- Node.js >= 18
 
 ## Installation
 
@@ -57,10 +57,12 @@ After installation, configure the plugin in the SignalK admin UI:
 3. Enable the plugin
 4. Configure the settings:
 
-| Setting            | Description                                       | Default     |
-| ------------------ | ------------------------------------------------- | ----------- |
-| **Portainer Host** | Hostname or IP address where Portainer is running | `localhost` |
-| **Portainer Port** | Port number of the Portainer instance             | `9000`      |
+| Setting                            | Description                                          | Default     |
+| ---------------------------------- | ---------------------------------------------------- | ----------- |
+| **Portainer Scheme**               | Protocol to use (`http` or `https`)                  | `http`      |
+| **Portainer Host**                 | Hostname or IP address where Portainer is running    | `127.0.0.1` |
+| **Portainer Port**                 | Port number of the Portainer instance                | `9000`      |
+| **Allow Self-Signed Certificates** | Accept self-signed TLS certs (only applies to HTTPS) | `false`     |
 
 5. Click **Submit** to save
 
@@ -68,7 +70,8 @@ After installation, configure the plugin in the SignalK admin UI:
 
 **Portainer on the same host (default):**
 
-- Host: `localhost`
+- Scheme: `http`
+- Host: `127.0.0.1`
 - Port: `9000`
 
 **Portainer on a different host:**
@@ -76,10 +79,12 @@ After installation, configure the plugin in the SignalK admin UI:
 - Host: `192.168.1.100` (the IP of the host running Portainer)
 - Port: `9000`
 
-**Portainer on a custom port:**
+**Portainer with HTTPS (e.g. self-signed cert):**
 
-- Host: `localhost`
+- Scheme: `https`
+- Host: `127.0.0.1`
 - Port: `9443`
+- Allow Self-Signed Certificates: `true`
 
 ## Usage
 

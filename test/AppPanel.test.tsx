@@ -33,4 +33,19 @@ describe('AppPanel', () => {
     const iframe = screen.getByTitle('Portainer CE')
     expect(iframe).toHaveAttribute('title', 'Portainer CE')
   })
+
+  it('has sandbox attribute for iframe security', () => {
+    render(<AppPanel />)
+    const iframe = screen.getByTitle('Portainer CE')
+    expect(iframe).toHaveAttribute(
+      'sandbox',
+      'allow-scripts allow-same-origin allow-forms allow-popups',
+    )
+  })
+
+  it('has referrerPolicy attribute for privacy', () => {
+    render(<AppPanel />)
+    const iframe = screen.getByTitle('Portainer CE')
+    expect(iframe).toHaveAttribute('referrerPolicy', 'no-referrer')
+  })
 })
