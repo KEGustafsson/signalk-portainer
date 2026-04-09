@@ -2,7 +2,8 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
 import type { IncomingMessage, Server, ServerResponse } from 'http'
 import { Socket } from 'net'
-import { createProxyMiddleware, responseInterceptor, type RequestHandler } from 'http-proxy-middleware'
+import { createBrotliDecompress, createGunzip, createInflate } from 'zlib'
+import { createProxyMiddleware, type RequestHandler } from 'http-proxy-middleware'
 
 interface ServerAPIWithServer extends ServerAPI {
   server?: Server
@@ -257,6 +258,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           ws: false,
           secure: !(appConfig.scheme === 'https' && appConfig.allowSelfSigned),
           ...(appConfig.timeout > 0 ? { proxyTimeout: appConfig.timeout } : {}),
+          // selfHandleResponse is required so the proxyRes handler below can
+          // choose between streaming non-HTML responses and buffering HTML ones.
           ...(appConfig.rewritePaths ? { selfHandleResponse: true } : {}),
           on: {
             proxyReq(proxyReq, req): void {
@@ -275,17 +278,55 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
             },
             ...(appConfig.rewritePaths
               ? {
-                  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- responseInterceptor expects a Promise-returning callback
-                  proxyRes: responseInterceptor(
-                    async (responseBuffer, proxyRes): Promise<Buffer | string> => {
-                      await Promise.resolve() // satisfy require-await
-                      const ct = proxyRes.headers['content-type'] ?? ''
-                      if (!ct.includes('text/html')) return responseBuffer
-                      const html = responseBuffer.toString('utf-8')
+                  proxyRes(
+                    proxyRes: IncomingMessage,
+                    _req: IncomingMessage,
+                    res: ServerResponse,
+                  ): void {
+                    const ct = String(proxyRes.headers['content-type'] ?? '')
+                    const status = proxyRes.statusCode ?? 200
+
+                    if (!ct.includes('text/html')) {
+                      // Stream non-HTML (SSE, assets, API responses) directly without buffering.
+                      const headers = { ...proxyRes.headers }
+                      delete headers['transfer-encoding']
+                      res.writeHead(status, headers)
+                      proxyRes.pipe(res)
+                      return
+                    }
+
+                    // HTML: decompress if needed, inject path-rewriting script, then send.
+                    const encoding = String(
+                      proxyRes.headers['content-encoding'] ?? '',
+                    ).toLowerCase()
+                    const stream: NodeJS.ReadableStream =
+                      encoding === 'gzip' || encoding === 'x-gzip'
+                        ? proxyRes.pipe(createGunzip())
+                        : encoding === 'deflate'
+                          ? proxyRes.pipe(createInflate())
+                          : encoding === 'br'
+                            ? proxyRes.pipe(createBrotliDecompress())
+                            : proxyRes
+                    const chunks: Buffer[] = []
+                    stream.on('data', (chunk: Buffer) => {
+                      chunks.push(chunk)
+                    })
+                    stream.on('end', () => {
+                      const html = Buffer.concat(chunks).toString('utf-8')
                       const script = buildRewriteScript(proxyPathPrefix)
-                      return html.replace(/<head[^>]*>/i, (m) => m + script)
-                    },
-                  ),
+                      const rewritten = html.replace(/<head[^>]*>/i, (m) => m + script)
+                      const buf = Buffer.from(rewritten, 'utf-8')
+                      const headers = { ...proxyRes.headers }
+                      delete headers['content-encoding'] // we decompressed
+                      delete headers['transfer-encoding']
+                      headers['content-length'] = String(buf.length)
+                      res.writeHead(status, headers)
+                      res.end(buf)
+                    })
+                    stream.on('error', () => {
+                      res.end()
+                    })
+                  },
                 }
               : {}),
             error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
@@ -313,7 +354,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         // upgrades; we dispatch manually so only our plugin paths are affected.
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
           const prefix = `${PLUGIN_PATH_PREFIX}${PROXY_SUBPATH}/`
-          if (!req.url?.startsWith(prefix)) return
+          if (!req.url?.startsWith(prefix)) return // not our path — ignore
+          // URL matched our prefix; any failure from here closes the socket with 404.
+          const reject404 = (): void => {
+            socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n')
+            socket.end()
+          }
           const rest = req.url.substring(prefix.length) // e.g. "portainer/api/websocket/exec?token=x"
           const queryIdx = rest.indexOf('?')
           const pathPart = queryIdx >= 0 ? rest.substring(0, queryIdx) : rest
@@ -321,11 +367,11 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           const slash = pathPart.indexOf('/')
           const appId = slash >= 0 ? pathPart.substring(0, slash) : pathPart
           const index = resolveAppIndex(appId, currentApps)
-          if (index < 0 || index >= proxies.length) return
+          if (index < 0 || index >= proxies.length) { reject404(); return }
           const targetProxy = proxies[index]
-          if (!targetProxy) return
+          if (!targetProxy) { reject404(); return }
           const proxyUpgrade = targetProxy.upgrade
-          if (!proxyUpgrade) return
+          if (!proxyUpgrade) { reject404(); return }
           stripInvalidHeaders(req)
           req.url = (slash >= 0 ? pathPart.substring(slash) : '/') + queryString
           proxyUpgrade.call(targetProxy, req, socket, head)

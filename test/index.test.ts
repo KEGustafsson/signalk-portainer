@@ -13,13 +13,8 @@ interface MockProxyMiddleware {
 
 const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, [options: Record<string, unknown>]>()
 
-// responseInterceptor returns the callback itself — the real wrapping is
-// done inside http-proxy-middleware internals which we don't exercise here.
-const mockResponseInterceptor = jest.fn((cb: unknown) => cb)
-
 jest.mock('http-proxy-middleware', () => ({
   createProxyMiddleware: (options: Record<string, unknown>) => mockCreateProxyMiddleware(options),
-  responseInterceptor: (cb: unknown) => mockResponseInterceptor(cb),
 }))
 
 interface ServerAPIWithServer extends ServerAPI {
@@ -1037,34 +1032,44 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockReq.url).toBe('/api/websocket/exec')
     })
 
-    it('ignores upgrade requests with unknown appPath', () => {
+    it('returns 404 for upgrade requests with unknown appPath', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
         url: '/plugins/signalk-web-proxy/proxy/unknown/api/websocket/exec',
       } as IncomingMessage
-      const mockSocket = {} as Socket
+      const mockSocket = { write: jest.fn(), end: jest.fn() } as unknown as Socket
       const mockHead = Buffer.alloc(0)
 
       mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
 
+      const mockSocketAny = mockSocket as unknown as { write: jest.Mock; end: jest.Mock }
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+      expect(mockSocketAny.write).toHaveBeenCalledWith(
+        'HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n',
+      )
+      expect(mockSocketAny.end).toHaveBeenCalled()
     })
 
-    it('ignores upgrade requests with out-of-range index', () => {
+    it('returns 404 for upgrade requests with out-of-range index', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start(oneApp(), jest.fn()) // only 1 app → index 0 valid, index 1 invalid
 
       const mockReq = {
         url: '/plugins/signalk-web-proxy/proxy/1/api/websocket/exec',
       } as IncomingMessage
-      const mockSocket = {} as Socket
+      const mockSocket = { write: jest.fn(), end: jest.fn() } as unknown as Socket
       const mockHead = Buffer.alloc(0)
 
       mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
 
+      const mockSocketAny = mockSocket as unknown as { write: jest.Mock; end: jest.Mock }
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+      expect(mockSocketAny.write).toHaveBeenCalledWith(
+        'HTTP/1.1 404 Not Found\r\nConnection: close\r\n\r\n',
+      )
+      expect(mockSocketAny.end).toHaveBeenCalled()
     })
 
     it('removes upgrade handler on stop', () => {
