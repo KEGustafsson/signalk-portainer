@@ -324,7 +324,10 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                       res.end(buf)
                     })
                     stream.on('error', () => {
-                      res.end()
+                      if (!res.headersSent) {
+                        res.writeHead(502, { 'Content-Type': 'text/plain' })
+                      }
+                      res.end('Bad Gateway: decompression error')
                     })
                   },
                 }
