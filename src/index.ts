@@ -2,7 +2,7 @@ import type { Plugin, ServerAPI } from '@signalk/server-api'
 import type { IRouter, Request, Response } from 'express'
 import type { IncomingMessage, Server, ServerResponse } from 'http'
 import { Socket } from 'net'
-import { createProxyMiddleware, type RequestHandler } from 'http-proxy-middleware'
+import { createProxyMiddleware, responseInterceptor, type RequestHandler } from 'http-proxy-middleware'
 
 interface ServerAPIWithServer extends ServerAPI {
   server?: Server
@@ -19,6 +19,7 @@ interface AppConfig {
   allowSelfSigned: boolean
   timeout: number // proxy connection timeout in ms; 0 means no timeout
   appPath: string // custom proxy path identifier; empty means index-only
+  rewritePaths: boolean // inject script to rewrite absolute API paths through the proxy
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
@@ -134,6 +135,9 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
     }
   }
 
+  const rewritePaths =
+    typeof raw['rewritePaths'] === 'boolean' ? raw['rewritePaths'] : false
+
   return {
     name,
     scheme: scheme as AppScheme,
@@ -143,6 +147,7 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
     allowSelfSigned,
     timeout,
     appPath: rawAppPath,
+    rewritePaths,
   }
 }
 
@@ -179,6 +184,49 @@ function resolveAppIndex(appId: string, apps: AppConfig[]): number {
   return apps.findIndex((a) => a.appPath.toLowerCase() === appId.toLowerCase())
 }
 
+/**
+ * Build a <script> tag that patches fetch, XMLHttpRequest, and WebSocket so
+ * absolute paths (e.g. POST /api/auth) are routed through the proxy instead
+ * of hitting the SignalK server root.  Injected into HTML responses when
+ * rewritePaths is enabled.
+ */
+function buildRewriteScript(proxyPathPrefix: string): string {
+  const prefix = JSON.stringify(proxyPathPrefix)
+  return (
+    '<script data-signalk-web-proxy="path-rewrite">' +
+    '(function(){' +
+    `var P=${prefix};` +
+    // --- fetch ---
+    'var F=window.fetch;' +
+    'window.fetch=function(u){' +
+    "if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P)!==0){" +
+    'var a=[P+u];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);' +
+    'return F.apply(this,a)}' +
+    'return F.apply(this,arguments)};' +
+    // --- XMLHttpRequest ---
+    'var X=XMLHttpRequest.prototype.open;' +
+    'XMLHttpRequest.prototype.open=function(){' +
+    'var a=[].slice.call(arguments);' +
+    "if(typeof a[1]==='string'&&a[1].charAt(0)==='/'&&a[1].indexOf(P)!==0)" +
+    'a[1]=P+a[1];' +
+    'return X.apply(this,a)};' +
+    // --- WebSocket ---
+    'var W=window.WebSocket;if(W){' +
+    'window.WebSocket=function(u,p){' +
+    "if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P)!==0){" +
+    'var l=window.location;' +
+    "u=(l.protocol==='https:'?'wss:':'ws:')+'//'+l.host+P+u}" +
+    'return p!==undefined?new W(u,p):new W(u)};' +
+    'window.WebSocket.prototype=W.prototype;' +
+    'window.WebSocket.CONNECTING=W.CONNECTING;' +
+    'window.WebSocket.OPEN=W.OPEN;' +
+    'window.WebSocket.CLOSING=W.CLOSING;' +
+    'window.WebSocket.CLOSED=W.CLOSED}' +
+    '})()' +
+    '</script>'
+  )
+}
+
 module.exports = function (app: ServerAPIWithServer): Plugin {
   let proxies: RequestHandler[] = []
   let currentApps: AppConfig[] = []
@@ -201,13 +249,16 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         app.error(`Skipping app at config index ${i}: ${String(err)}`)
       })
 
-      proxies = currentApps.map((appConfig) =>
-        createProxyMiddleware({
+      proxies = currentApps.map((appConfig, appIndex) => {
+        const proxyPathPrefix = `${PLUGIN_PATH_PREFIX}${PROXY_SUBPATH}/${appConfig.appPath || String(appIndex)}`
+
+        return createProxyMiddleware({
           target: buildTarget(appConfig),
           changeOrigin: true,
           ws: false,
           secure: !(appConfig.scheme === 'https' && appConfig.allowSelfSigned),
           ...(appConfig.timeout > 0 ? { proxyTimeout: appConfig.timeout } : {}),
+          ...(appConfig.rewritePaths ? { selfHandleResponse: true } : {}),
           on: {
             proxyReq(proxyReq, req): void {
               const remoteAddress = req.socket?.remoteAddress ?? ''
@@ -223,6 +274,21 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                 ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
               proxyReq.setHeader('X-Forwarded-Proto', proto)
             },
+            ...(appConfig.rewritePaths
+              ? {
+                  // eslint-disable-next-line @typescript-eslint/no-misused-promises -- responseInterceptor expects a Promise-returning callback
+                  proxyRes: responseInterceptor(
+                    async (responseBuffer, proxyRes): Promise<Buffer | string> => {
+                      await Promise.resolve() // satisfy require-await
+                      const ct = proxyRes.headers['content-type'] ?? ''
+                      if (!ct.includes('text/html')) return responseBuffer
+                      const html = responseBuffer.toString('utf-8')
+                      const script = buildRewriteScript(proxyPathPrefix)
+                      return html.replace(/<head[^>]*>/i, (m) => m + script)
+                    },
+                  ),
+                }
+              : {}),
             error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
               app.error(`Web proxy error: ${err.message}`)
               if (res instanceof Socket) {
@@ -237,8 +303,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
               res.end(JSON.stringify({ error: 'Application is not reachable' }))
             },
           },
-        }),
-      )
+        })
+      })
 
       started = true
 
@@ -335,7 +401,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'string' as const,
                   title: 'Proxy Path',
                   description:
-                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-web-proxy/proxy/<appPath> in addition to its numeric index. For apps like Portainer that require --base-url, use /plugins/signalk-web-proxy/proxy/<appPath>. Must start with a letter; only letters, digits, and hyphens allowed.',
+                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-web-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
                 },
                 url: {
                   type: 'string' as const,
@@ -348,6 +414,13 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'boolean' as const,
                   title: 'Allow Self-Signed Certificates',
                   description: 'Accept self-signed TLS certificates (HTTPS only)',
+                  default: false,
+                },
+                rewritePaths: {
+                  type: 'boolean' as const,
+                  title: 'Rewrite Absolute Paths',
+                  description:
+                    'Inject a script into HTML responses that rewrites absolute API paths (e.g. /api/auth) so they route through the proxy. Enable this for SPAs like Portainer or Grafana whose frontend uses absolute paths — eliminates the need for --base-url on the target container.',
                   default: false,
                 },
                 timeout: {

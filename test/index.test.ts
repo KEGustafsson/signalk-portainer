@@ -13,8 +13,13 @@ interface MockProxyMiddleware {
 
 const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, [options: Record<string, unknown>]>()
 
+// responseInterceptor returns the callback itself — the real wrapping is
+// done inside http-proxy-middleware internals which we don't exercise here.
+const mockResponseInterceptor = jest.fn((cb: unknown) => cb)
+
 jest.mock('http-proxy-middleware', () => ({
   createProxyMiddleware: (options: Record<string, unknown>) => mockCreateProxyMiddleware(options),
+  responseInterceptor: (cb: unknown) => mockResponseInterceptor(cb),
 }))
 
 interface ServerAPIWithServer extends ServerAPI {
@@ -81,7 +86,7 @@ describe('signalk-web-proxy plugin', () => {
       expect(properties['apps']!['type']).toBe('array')
     })
 
-    it('apps items define name, appPath, url, allowSelfSigned, and timeout', () => {
+    it('apps items define name, appPath, url, allowSelfSigned, rewritePaths, and timeout', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
@@ -94,6 +99,8 @@ describe('signalk-web-proxy plugin', () => {
       expect(itemProps['url']!['type']).toBe('string')
       expect(itemProps['allowSelfSigned']!['type']).toBe('boolean')
       expect(itemProps['allowSelfSigned']!['default']).toBe(false)
+      expect(itemProps['rewritePaths']!['type']).toBe('boolean')
+      expect(itemProps['rewritePaths']!['default']).toBe(false)
       expect(itemProps['timeout']!['type']).toBe('number')
       expect(itemProps['timeout']!['default']).toBe(0)
     })
@@ -507,6 +514,46 @@ describe('signalk-web-proxy plugin', () => {
       )
 
       expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(2)
+    })
+
+    it('enables selfHandleResponse when rewritePaths is true', () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['selfHandleResponse']).toBe(true)
+      const on = options['on'] as Record<string, unknown>
+      expect(on['proxyRes']).toBeDefined()
+      expect(typeof on['proxyRes']).toBe('function')
+    })
+
+    it('does not enable selfHandleResponse when rewritePaths is false', () => {
+      plugin.start(oneApp(), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['selfHandleResponse']).toBeUndefined()
+      const on = options['on'] as Record<string, unknown>
+      expect(on['proxyRes']).toBeUndefined()
+    })
+
+    it('uses appPath in rewrite prefix when both appPath and rewritePaths are set', () => {
+      plugin.start(
+        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer', rewritePaths: true }] },
+        jest.fn(),
+      )
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['selfHandleResponse']).toBe(true)
+    })
+
+    it('defaults rewritePaths to false when not specified', () => {
+      plugin.start(oneApp(), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['selfHandleResponse']).toBeUndefined()
     })
   })
 
