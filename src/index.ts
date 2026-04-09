@@ -196,25 +196,24 @@ function buildRewriteScript(proxyPathPrefix: string): string {
     '<script data-signalk-web-proxy="path-rewrite">' +
     '(function(){' +
     `var P=${prefix};` +
+    // Helper: true for root-relative paths (/foo) but not protocol-relative (//host)
+    "function R(s){return typeof s==='string'&&s.charAt(0)==='/'&&s.charAt(1)!=='/'&&s.indexOf(P)!==0}" +
     // --- fetch ---
     'var F=window.fetch;' +
     'window.fetch=function(u){' +
-    "if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P)!==0){" +
-    'var a=[P+u];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);' +
+    'if(R(u)){var a=[P+u];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);' +
     'return F.apply(this,a)}' +
     'return F.apply(this,arguments)};' +
     // --- XMLHttpRequest ---
     'var X=XMLHttpRequest.prototype.open;' +
     'XMLHttpRequest.prototype.open=function(){' +
     'var a=[].slice.call(arguments);' +
-    "if(typeof a[1]==='string'&&a[1].charAt(0)==='/'&&a[1].indexOf(P)!==0)" +
-    'a[1]=P+a[1];' +
+    'if(R(a[1]))a[1]=P+a[1];' +
     'return X.apply(this,a)};' +
     // --- WebSocket ---
     'var W=window.WebSocket;if(W){' +
     'window.WebSocket=function(u,p){' +
-    "if(typeof u==='string'&&u.charAt(0)==='/'&&u.indexOf(P)!==0){" +
-    'var l=window.location;' +
+    'if(R(u)){var l=window.location;' +
     "u=(l.protocol==='https:'?'wss:':'ws:')+'//'+l.host+P+u}" +
     'return p!==undefined?new W(u,p):new W(u)};' +
     'window.WebSocket.prototype=W.prototype;' +
