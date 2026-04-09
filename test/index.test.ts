@@ -409,6 +409,20 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
     })
 
+    it('skips app when timeout is Infinity (e.g. 1e309 in JSON)', () => {
+      plugin.start(oneApp({ timeout: Infinity }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
+    })
+
+    it('skips app when timeout is NaN', () => {
+      plugin.start(oneApp({ timeout: NaN }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
+    })
+
     it('floors fractional timeout values', () => {
       plugin.start(oneApp({ timeout: 5500.9 }), jest.fn())
 

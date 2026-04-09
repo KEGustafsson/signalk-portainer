@@ -110,8 +110,11 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
   const rawTimeout = raw['timeout']
-  if (rawTimeout !== undefined && (typeof rawTimeout !== 'number' || rawTimeout < 0)) {
-    throw new Error(`Invalid timeout at index ${index}: must be a non-negative number`)
+  if (
+    rawTimeout !== undefined &&
+    (typeof rawTimeout !== 'number' || !Number.isFinite(rawTimeout) || rawTimeout < 0)
+  ) {
+    throw new Error(`Invalid timeout at index ${index}: must be a non-negative finite number`)
   }
   const timeout = typeof rawTimeout === 'number' ? Math.floor(rawTimeout) : 0
 
