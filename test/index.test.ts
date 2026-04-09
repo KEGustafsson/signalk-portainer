@@ -81,7 +81,7 @@ describe('signalk-web-proxy plugin', () => {
       expect(properties['apps']!['type']).toBe('array')
     })
 
-    it('apps items define name, url, allowSelfSigned, and timeout', () => {
+    it('apps items define name, appPath, url, allowSelfSigned, and timeout', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
@@ -90,6 +90,7 @@ describe('signalk-web-proxy plugin', () => {
       const items = properties['apps']!['items'] as Record<string, unknown>
       const itemProps = items['properties'] as Record<string, Record<string, unknown>>
       expect(itemProps['name']!['type']).toBe('string')
+      expect(itemProps['appPath']!['type']).toBe('string')
       expect(itemProps['url']!['type']).toBe('string')
       expect(itemProps['allowSelfSigned']!['type']).toBe('boolean')
       expect(itemProps['allowSelfSigned']!['default']).toBe(false)
@@ -430,6 +431,83 @@ describe('signalk-web-proxy plugin', () => {
       const options = callArgs[0] as Record<string, unknown>
       expect(options['proxyTimeout']).toBe(5500)
     })
+
+    it('accepts a valid appPath', () => {
+      plugin.start(oneApp({ appPath: 'portainer' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(1)
+    })
+
+    it('accepts appPath with letters, digits, and hyphens', () => {
+      plugin.start(oneApp({ appPath: 'my-app-2' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(1)
+    })
+
+    it('skips app when appPath starts with a digit', () => {
+      plugin.start(oneApp({ appPath: '0abc' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('appPath'))
+    })
+
+    it('skips app when appPath contains invalid characters', () => {
+      plugin.start(oneApp({ appPath: 'my_app' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('appPath'))
+    })
+
+    it('skips app when appPath contains slashes', () => {
+      plugin.start(oneApp({ appPath: 'my/app' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('appPath'))
+    })
+
+    it('skips second app when appPath is duplicated', () => {
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://localhost:9000', appPath: 'portainer' },
+            { name: 'B', url: 'http://localhost:3000', appPath: 'portainer' },
+          ],
+        },
+        jest.fn(),
+      )
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(1)
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('Duplicate appPath'))
+    })
+
+    it('detects duplicate appPath case-insensitively', () => {
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://localhost:9000', appPath: 'Portainer' },
+            { name: 'B', url: 'http://localhost:3000', appPath: 'portainer' },
+          ],
+        },
+        jest.fn(),
+      )
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(1)
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('Duplicate appPath'))
+    })
+
+    it('treats empty appPath as no custom path (no conflict)', () => {
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://localhost:9000' },
+            { name: 'B', url: 'http://localhost:3000' },
+          ],
+        },
+        jest.fn(),
+      )
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(2)
+    })
   })
 
   describe('statusMessage', () => {
@@ -509,7 +587,7 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(
         {
           apps: [
-            { name: 'Portainer', url: 'http://localhost:9000' },
+            { name: 'Portainer', url: 'http://localhost:9000', appPath: 'portainer' },
             { name: 'Grafana', url: 'http://localhost:3000' },
           ],
         },
@@ -520,16 +598,14 @@ describe('signalk-web-proxy plugin', () => {
       const mockRes = { json: jest.fn() } as unknown as Response
       handler({} as Request, mockRes)
       expect(mockRes.json).toHaveBeenCalledWith([
-        { index: 0, name: 'Portainer' },
+        { index: 0, name: 'Portainer', appPath: 'portainer' },
         { index: 1, name: 'Grafana' },
       ])
     })
 
-    it('registers /proxy/0 through /proxy/15 routes', () => {
+    it('registers parameterized /proxy/:appId route', () => {
       plugin.registerWithRouter!(mockRouter)
-      for (let i = 0; i < 16; i++) {
-        expect(mockRouter.use).toHaveBeenCalledWith(`/proxy/${i}`, expect.any(Function))
-      }
+      expect(mockRouter.use).toHaveBeenCalledWith('/proxy/:appId', expect.any(Function))
     })
 
     it('strips invalid header names before invoking the proxy', () => {
@@ -539,8 +615,9 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy/0')!
+      const handler = registeredHandlers.get('/proxy/:appId')!
       const mockReq = {
+        params: { appId: '0' },
         headers: {
           'content-type': 'text/html',
           'primus::req::backup': {},
@@ -560,8 +637,8 @@ describe('signalk-web-proxy plugin', () => {
     it('returns 503 when plugin is not started', () => {
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy/0')!
-      const mockReq = {} as Request
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: '0' } } as unknown as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
         json: jest.fn().mockReturnThis(),
@@ -581,8 +658,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy/0')!
-      const mockReq = {} as Request
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: '0' } } as unknown as Request
       const mockRes = {} as Response
       const mockNext = jest.fn()
 
@@ -607,26 +684,26 @@ describe('signalk-web-proxy plugin', () => {
       )
       plugin.registerWithRouter!(mockRouter)
 
-      const handler1 = registeredHandlers.get('/proxy/1')!
-      const mockReq = {} as Request
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: '1' } } as unknown as Request
       const mockRes = {} as Response
       const mockNext = jest.fn()
 
-      handler1(mockReq, mockRes, mockNext)
+      handler(mockReq, mockRes, mockNext)
 
       expect(proxy1).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
       expect(proxy0).not.toHaveBeenCalled()
     })
 
-    it('/proxy/1 returns 404 when only one app is configured', () => {
+    it('returns 404 for out-of-range numeric index', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
       plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy/1')!
-      const mockReq = {} as Request
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: '1' } } as unknown as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
         json: jest.fn().mockReturnThis(),
@@ -636,7 +713,61 @@ describe('signalk-web-proxy plugin', () => {
       handler(mockReq, mockRes, mockNext)
 
       expect(mockRes.status).toHaveBeenCalledWith(404)
-      expect(mockRes.json).toHaveBeenCalledWith({ error: 'No app configured at slot 1' })
+      expect(mockRes.json).toHaveBeenCalledWith({ error: 'No app found for "1"' })
+    })
+
+    it('delegates via appPath when configured', () => {
+      const dummyProxy: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+
+      plugin.start({ apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer' }] }, jest.fn())
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: 'portainer' } } as unknown as Request
+      const mockRes = {} as Response
+      const mockNext = jest.fn()
+
+      handler(mockReq, mockRes, mockNext)
+
+      expect(dummyProxy).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
+    })
+
+    it('appPath resolution is case-insensitive', () => {
+      const dummyProxy: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+
+      plugin.start({ apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'Portainer' }] }, jest.fn())
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: 'portainer' } } as unknown as Request
+      const mockRes = {} as Response
+      const mockNext = jest.fn()
+
+      handler(mockReq, mockRes, mockNext)
+
+      expect(dummyProxy).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
+    })
+
+    it('returns 404 for unknown appPath', () => {
+      const dummyProxy: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+
+      plugin.start(oneApp(), jest.fn())
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: 'unknown' } } as unknown as Request
+      const mockRes = {
+        status: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+      } as unknown as Response
+      const mockNext = jest.fn()
+
+      handler(mockReq, mockRes, mockNext)
+
+      expect(mockRes.status).toHaveBeenCalledWith(404)
     })
 
     it('returns 503 after plugin is stopped', () => {
@@ -647,8 +778,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.registerWithRouter!(mockRouter)
       void plugin.stop()
 
-      const handler = registeredHandlers.get('/proxy/0')!
-      const mockReq = {} as Request
+      const handler = registeredHandlers.get('/proxy/:appId')!
+      const mockReq = { params: { appId: '0' } } as unknown as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
         json: jest.fn().mockReturnThis(),
@@ -785,12 +916,32 @@ describe('signalk-web-proxy plugin', () => {
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
     })
 
-    it('ignores upgrade requests with non-numeric index', () => {
+    it('routes upgrade via appPath', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(
+        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer' }] },
+        jest.fn(),
+      )
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/portainer/api/websocket/exec',
+        headers: {},
+      } as unknown as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/api/websocket/exec')
+    })
+
+    it('ignores upgrade requests with unknown appPath', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-web-proxy/proxy/0abc/api/websocket/exec',
+        url: '/plugins/signalk-web-proxy/proxy/unknown/api/websocket/exec',
       } as IncomingMessage
       const mockSocket = {} as Socket
       const mockHead = Buffer.alloc(0)

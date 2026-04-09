@@ -9,6 +9,7 @@ const ADMIN_HEADER_HEIGHT = 64
 interface AppInfo {
   index: number
   name: string
+  appPath?: string
 }
 
 const msgStyle: React.CSSProperties = {
@@ -81,7 +82,7 @@ const AppPanel: React.FC = () => {
       {selectedApp !== null ? (
         <iframe
           key={selected}
-          src={`${PLUGIN_PATH}/proxy/${selected}/`}
+          src={`${PLUGIN_PATH}/proxy/${selectedApp.appPath ?? selected}/`}
           style={{ flex: 1, width: '100%', borderWidth: 0 }}
           title={selectedApp.name}
           // allow-same-origin lets cookie/session auth work in proxied apps (e.g. Portainer).

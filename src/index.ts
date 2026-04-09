@@ -18,6 +18,7 @@ interface AppConfig {
   path: string // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
   timeout: number // proxy connection timeout in ms; 0 means no timeout
+  appPath: string // custom proxy path identifier; empty means index-only
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
@@ -31,9 +32,12 @@ const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.intern
 // RFC 7230 §3.2.6 — characters valid in a header field name (HTTP token)
 const HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 
-// Maximum number of app slots registered with the router at startup.
-// Slots beyond the configured app count return 503.
+// Maximum number of apps accepted from configuration.
 const MAX_APP_SLOTS = 16
+
+// Pattern for custom app path identifiers — must start with a letter so it
+// cannot be confused with a numeric index.
+const APP_PATH_PATTERN = /^[a-zA-Z][a-zA-Z0-9-]*$/
 
 const PROXY_SUBPATH = '/proxy'
 const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}`
@@ -118,7 +122,28 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   }
   const timeout = typeof rawTimeout === 'number' ? Math.floor(rawTimeout) : 0
 
-  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned, timeout }
+  const rawAppPath = typeof raw['appPath'] === 'string' ? raw['appPath'].trim() : ''
+  if (rawAppPath.length > 0) {
+    if (!APP_PATH_PATTERN.test(rawAppPath)) {
+      throw new Error(
+        `Invalid appPath at index ${index}: must start with a letter and contain only letters, digits, and hyphens`,
+      )
+    }
+    if (rawAppPath.length > 64) {
+      throw new Error(`appPath at index ${index} exceeds 64 characters`)
+    }
+  }
+
+  return {
+    name,
+    scheme: scheme as AppScheme,
+    host,
+    port,
+    path,
+    allowSelfSigned,
+    timeout,
+    appPath: rawAppPath,
+  }
 }
 
 function parseConfig(config: object, onSkip: (index: number, err: unknown) => void): AppConfig[] {
@@ -128,14 +153,30 @@ function parseConfig(config: object, onSkip: (index: number, err: unknown) => vo
     .filter((a): a is Record<string, unknown> => typeof a === 'object' && a !== null)
     .slice(0, MAX_APP_SLOTS)
   const results: AppConfig[] = []
+  const seenPaths = new Set<string>()
   for (let i = 0; i < validObjects.length; i++) {
     try {
-      results.push(parseAppConfig(validObjects[i]!, i))
+      const appConfig = parseAppConfig(validObjects[i]!, i)
+      if (appConfig.appPath.length > 0) {
+        const lower = appConfig.appPath.toLowerCase()
+        if (seenPaths.has(lower)) {
+          throw new Error(`Duplicate appPath "${appConfig.appPath}" at index ${i}`)
+        }
+        seenPaths.add(lower)
+      }
+      results.push(appConfig)
     } catch (err) {
       onSkip(i, err)
     }
   }
   return results
+}
+
+function resolveAppIndex(appId: string, apps: AppConfig[]): number {
+  if (/^\d+$/.test(appId)) {
+    return Number(appId)
+  }
+  return apps.findIndex((a) => a.appPath.toLowerCase() === appId.toLowerCase())
 }
 
 module.exports = function (app: ServerAPIWithServer): Plugin {
@@ -208,12 +249,11 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
           const prefix = `${PLUGIN_PATH_PREFIX}${PROXY_SUBPATH}/`
           if (!req.url?.startsWith(prefix)) return
-          const rest = req.url.substring(prefix.length) // e.g. "0/api/websocket/exec"
+          const rest = req.url.substring(prefix.length) // e.g. "portainer/api/websocket/exec" or "0/api/websocket/exec"
           const slash = rest.indexOf('/')
-          const indexStr = slash >= 0 ? rest.substring(0, slash) : rest
-          if (!/^\d+$/.test(indexStr)) return
-          const index = Number(indexStr)
-          if (index >= proxies.length) return
+          const appId = slash >= 0 ? rest.substring(0, slash) : rest
+          const index = resolveAppIndex(appId, currentApps)
+          if (index < 0 || index >= proxies.length) return
           const targetProxy = proxies[index]
           if (!targetProxy) return
           const proxyUpgrade = targetProxy.upgrade
@@ -239,31 +279,35 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     registerWithRouter(router: IRouter): void {
       // List configured apps — consumed by the React UI on load.
       router.get('/apps', (_req: Request, res: Response): void => {
-        const list = currentApps.map((a, i) => ({ index: i, name: a.name }))
+        const list = currentApps.map((a, i) => ({
+          index: i,
+          name: a.name,
+          ...(a.appPath ? { appPath: a.appPath } : {}),
+        }))
         res.json(list)
       })
 
-      // Register a fixed set of per-app proxy slots.
-      // SignalK calls registerWithRouter once at server start (before start()),
-      // so we pre-register MAX_APP_SLOTS slots; slots without a running proxy
-      // return 503 until start() is called with matching config.
-      for (let i = 0; i < MAX_APP_SLOTS; i++) {
-        const idx = i
-        router.use(
-          `${PROXY_SUBPATH}/${idx}`,
-          (req: Request, res: Response, next: () => void): void => {
-            stripInvalidHeaders(req as unknown as IncomingMessage)
-            const proxy = proxies[idx]
-            if (proxy) {
-              ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
-            } else if (started) {
-              res.status(404).json({ error: `No app configured at slot ${idx}` })
-            } else {
-              res.status(503).json({ error: 'Plugin is not started' })
-            }
-          },
-        )
-      }
+      // Single parameterized route handles both numeric indices (e.g. /proxy/0)
+      // and custom appPath identifiers (e.g. /proxy/portainer).
+      router.use(
+        `${PROXY_SUBPATH}/:appId`,
+        (req: Request, res: Response, next: () => void): void => {
+          stripInvalidHeaders(req as unknown as IncomingMessage)
+          const rawAppId = req.params['appId']
+          const appId = typeof rawAppId === 'string' ? rawAppId : (rawAppId?.[0] ?? '')
+          if (!started) {
+            res.status(503).json({ error: 'Plugin is not started' })
+            return
+          }
+          const idx = resolveAppIndex(appId, currentApps)
+          const proxy = idx >= 0 && idx < proxies.length ? proxies[idx] : undefined
+          if (proxy) {
+            ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
+          } else {
+            res.status(404).json({ error: `No app found for "${appId}"` })
+          }
+        },
+      )
     },
 
     schema() {
@@ -286,6 +330,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   title: 'Name',
                   description: 'Display name shown in the app selector',
                   default: 'My App',
+                },
+                appPath: {
+                  type: 'string' as const,
+                  title: 'Proxy Path',
+                  description:
+                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-web-proxy/proxy/<appPath> in addition to its numeric index. For apps like Portainer that require --base-url, use /plugins/signalk-web-proxy/proxy/<appPath>. Must start with a letter; only letters, digits, and hyphens allowed.',
                 },
                 url: {
                   type: 'string' as const,
