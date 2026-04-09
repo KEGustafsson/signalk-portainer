@@ -314,9 +314,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
           const prefix = `${PLUGIN_PATH_PREFIX}${PROXY_SUBPATH}/`
           if (!req.url?.startsWith(prefix)) return
-          const rest = req.url.substring(prefix.length) // e.g. "portainer/api/websocket/exec" or "0/api/websocket/exec"
-          const slash = rest.indexOf('/')
-          const appId = slash >= 0 ? rest.substring(0, slash) : rest
+          const rest = req.url.substring(prefix.length) // e.g. "portainer/api/websocket/exec?token=x"
+          const queryIdx = rest.indexOf('?')
+          const pathPart = queryIdx >= 0 ? rest.substring(0, queryIdx) : rest
+          const queryString = queryIdx >= 0 ? rest.substring(queryIdx) : ''
+          const slash = pathPart.indexOf('/')
+          const appId = slash >= 0 ? pathPart.substring(0, slash) : pathPart
           const index = resolveAppIndex(appId, currentApps)
           if (index < 0 || index >= proxies.length) return
           const targetProxy = proxies[index]
@@ -324,7 +327,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           const proxyUpgrade = targetProxy.upgrade
           if (!proxyUpgrade) return
           stripInvalidHeaders(req)
-          req.url = slash >= 0 ? rest.substring(slash) : '/'
+          req.url = (slash >= 0 ? pathPart.substring(slash) : '/') + queryString
           proxyUpgrade.call(targetProxy, req, socket, head)
         }
         app.server.on('upgrade', upgradeHandler)

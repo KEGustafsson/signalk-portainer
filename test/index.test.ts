@@ -928,6 +928,60 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockReq.url).toBe('/')
     })
 
+    it('preserves query string on upgrade path', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0/api/websocket/exec?token=abc&endpointId=1',
+        headers: {},
+      } as unknown as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/api/websocket/exec?token=abc&endpointId=1')
+    })
+
+    it('resolves appId correctly when query string is on appId segment', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0?token=abc',
+        headers: {},
+      } as unknown as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/?token=abc')
+    })
+
+    it('resolves appPath correctly when query string is present', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(
+        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer' }] },
+        jest.fn(),
+      )
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/portainer?token=abc',
+        headers: {},
+      } as unknown as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(mockReq.url).toBe('/?token=abc')
+    })
+
     it('strips invalid header names before forwarding upgrade requests', () => {
       const plugin = pluginFactory(appWithServer)
       plugin.start(oneApp(), jest.fn())
