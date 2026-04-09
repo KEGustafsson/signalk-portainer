@@ -42,7 +42,9 @@ export default tseslint.config(
   {
     files: ['test/**/*.ts', 'test/**/*.tsx'],
     rules: {
+      // jest mock functions bind 'this' non-standardly (e.g. mockReturnValue)
       '@typescript-eslint/unbound-method': 'off',
+      // mock.calls entries are implicitly typed as any[]
       '@typescript-eslint/no-unsafe-assignment': 'off',
       '@typescript-eslint/no-unsafe-member-access': 'off',
     },

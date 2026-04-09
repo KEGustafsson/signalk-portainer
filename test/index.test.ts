@@ -32,6 +32,14 @@ function oneApp(overrides: Record<string, unknown> = {}): object {
   return { apps: [{ name: 'Test App', url: 'http://localhost:9000', ...overrides }] }
 }
 
+type ProxyReqFn = (proxyReq: { setHeader: jest.Mock }, req: unknown) => void
+
+/** Extracts the proxyReq handler from the most recent createProxyMiddleware call. */
+function extractProxyReqHandler(): ProxyReqFn {
+  const options = (mockCreateProxyMiddleware.mock.calls[0] as [Record<string, unknown>])[0]
+  return ((options['on'] as Record<string, unknown>)['proxyReq']) as ProxyReqFn
+}
+
 describe('signalk-web-proxy plugin', () => {
   let plugin: Plugin
 
@@ -73,7 +81,7 @@ describe('signalk-web-proxy plugin', () => {
       expect(properties['apps']!['type']).toBe('array')
     })
 
-    it('apps items define name, url, and allowSelfSigned', () => {
+    it('apps items define name, url, allowSelfSigned, and timeout', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
@@ -85,6 +93,8 @@ describe('signalk-web-proxy plugin', () => {
       expect(itemProps['url']!['type']).toBe('string')
       expect(itemProps['allowSelfSigned']!['type']).toBe('boolean')
       expect(itemProps['allowSelfSigned']!['default']).toBe(false)
+      expect(itemProps['timeout']!['type']).toBe('number')
+      expect(itemProps['timeout']!['default']).toBe(0)
     })
   })
 
@@ -206,6 +216,13 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
+    it('skips app when host is an IPv6 address and reports a clear error', () => {
+      plugin.start(oneApp({ url: 'http://[::1]:9000' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('IPv6'))
+    })
+
     it('skips app when host is a cloud metadata IP', () => {
       plugin.start(oneApp({ url: 'http://169.254.169.254:9000' }), jest.fn())
 
@@ -273,16 +290,9 @@ describe('signalk-web-proxy plugin', () => {
 
       plugin.start(oneApp(), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      const on = options['on'] as Record<string, unknown>
-      expect(on['proxyReq']).toBeDefined()
-      expect(typeof on['proxyReq']).toBe('function')
-
-      const proxyReqHandler = on['proxyReq'] as (
-        proxyReq: { setHeader: jest.Mock },
-        req: unknown,
-      ) => void
+      const proxyReqHandler = extractProxyReqHandler()
+      expect(proxyReqHandler).toBeDefined()
+      expect(typeof proxyReqHandler).toBe('function')
 
       const mockProxyReq = { setHeader: jest.fn() }
       const mockReq = {
@@ -304,13 +314,7 @@ describe('signalk-web-proxy plugin', () => {
 
       plugin.start(oneApp(), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      const on = options['on'] as Record<string, unknown>
-      const proxyReqHandler = on['proxyReq'] as (
-        proxyReq: { setHeader: jest.Mock },
-        req: unknown,
-      ) => void
+      const proxyReqHandler = extractProxyReqHandler()
 
       const mockProxyReq = { setHeader: jest.fn() }
       const mockReq = {
@@ -331,13 +335,7 @@ describe('signalk-web-proxy plugin', () => {
 
       plugin.start(oneApp(), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      const on = options['on'] as Record<string, unknown>
-      const proxyReqHandler = on['proxyReq'] as (
-        proxyReq: { setHeader: jest.Mock },
-        req: unknown,
-      ) => void
+      const proxyReqHandler = extractProxyReqHandler()
 
       const mockProxyReq = { setHeader: jest.fn() }
       const mockReq = {
@@ -357,13 +355,7 @@ describe('signalk-web-proxy plugin', () => {
 
       plugin.start(oneApp(), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      const on = options['on'] as Record<string, unknown>
-      const proxyReqHandler = on['proxyReq'] as (
-        proxyReq: { setHeader: jest.Mock },
-        req: unknown,
-      ) => void
+      const proxyReqHandler = extractProxyReqHandler()
 
       const mockProxyReq = { setHeader: jest.fn() }
       const mockReq = {
@@ -392,6 +384,30 @@ describe('signalk-web-proxy plugin', () => {
       void plugin.stop()
 
       expect(plugin.statusMessage?.()).toBe('Not started')
+    })
+
+    it('passes proxyTimeout to middleware when timeout is configured', () => {
+      plugin.start(oneApp({ timeout: 30000 }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['proxyTimeout']).toBe(30000)
+    })
+
+    it('does not set proxyTimeout when timeout is 0', () => {
+      plugin.start(oneApp(), jest.fn()) // oneApp has no timeout field → defaults to 0
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['proxyTimeout']).toBeUndefined()
+    })
+
+    it('floors fractional timeout values', () => {
+      plugin.start(oneApp({ timeout: 5500.9 }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['proxyTimeout']).toBe(5500)
     })
   })
 
@@ -798,11 +814,22 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockServer.listenerCount('upgrade')).toBe(0)
     })
 
-    it('does not register upgrade handler when server is not available', () => {
+    it('does not invoke proxy upgrade when app.server is unavailable', () => {
+      // mockApp has no server property; no listener is registered so upgrade is never dispatched
       const plugin = pluginFactory(mockApp)
       plugin.start(oneApp(), jest.fn())
 
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+    })
+
+    it('re-starting replaces the upgrade listener instead of leaking the previous one', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn())
+      expect(mockServer.listenerCount('upgrade')).toBe(1)
+
+      // Second start (e.g. config save) must not accumulate listeners
+      plugin.start(oneApp(), jest.fn())
+      expect(mockServer.listenerCount('upgrade')).toBe(1)
     })
   })
 
@@ -869,7 +896,7 @@ describe('signalk-web-proxy plugin', () => {
 
       expect(mockError).toHaveBeenCalledWith('Web proxy error: timeout')
       expect(mockRes.writeHead).not.toHaveBeenCalled()
-      expect(mockRes.end).toHaveBeenCalled()
+      expect(mockRes.end).toHaveBeenCalledWith() // no body — avoids corrupting partial response
     })
 
     it('error handler destroys socket for WebSocket errors', () => {

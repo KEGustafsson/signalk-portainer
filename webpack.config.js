@@ -1,6 +1,8 @@
 const path = require('path')
 const { ModuleFederationPlugin } = require('webpack').container
 const { WatchIgnorePlugin } = require('webpack')
+// Registers shared webpack dependencies (React singleton, etc.) for Module Federation.
+// Required for its side effects even though the return value is unused.
 require('@signalk/server-admin-ui-dependencies')
 const packageJson = require('./package.json')
 

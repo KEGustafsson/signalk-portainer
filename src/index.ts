@@ -17,6 +17,7 @@ interface AppConfig {
   port: number
   path: string          // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
+  timeout: number       // proxy connection timeout in ms; 0 means no timeout
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
@@ -88,6 +89,11 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
     throw new Error(`URL must not contain credentials at index ${index}`)
   }
 
+  // Reject IPv6 — the URL API strips brackets and returns the bare address (e.g. "::1")
+  if (parsed.hostname.includes(':')) {
+    throw new Error(`IPv6 addresses are not supported at index ${index}`)
+  }
+
   // Validate hostname (blocks cloud-metadata IPs and unusual characters)
   if (!isValidHost(parsed.hostname)) {
     throw new Error(`Invalid host at index ${index}: "${parsed.hostname}"`)
@@ -97,14 +103,17 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   // URL.port is '' when the URL omits the port; fall back to the scheme default
   const port = parsed.port ? Number(parsed.port) : (scheme === 'https' ? 443 : 80)
 
-  const path = parsed.pathname || '/'
+  const path = parsed.pathname
 
   const allowSelfSigned =
     typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
+  const rawTimeout = raw['timeout']
+  const timeout =
+    typeof rawTimeout === 'number' && rawTimeout >= 0 ? Math.floor(rawTimeout) : 0
 
-  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned }
+  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned, timeout }
 }
 
 function parseConfig(
@@ -139,10 +148,15 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     description: 'General reverse proxy — embed any web application as a webapp in SignalK',
 
     start(config: object, _restart: (newConfiguration: object) => void): void {
+      // Remove any previous upgrade listener (handles plugin restart without an explicit stop)
+      if (upgradeHandler && app.server) {
+        app.server.removeListener('upgrade', upgradeHandler)
+        upgradeHandler = null
+      }
+
       currentApps = parseConfig(config, (i, err) => {
         app.error(`Skipping app at config index ${i}: ${String(err)}`)
       })
-      started = true
 
       proxies = currentApps.map((appConfig) =>
         createProxyMiddleware({
@@ -150,6 +164,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           changeOrigin: true,
           ws: false,
           secure: !(appConfig.scheme === 'https' && appConfig.allowSelfSigned),
+          ...(appConfig.timeout > 0 ? { proxyTimeout: appConfig.timeout } : {}),
           on: {
             proxyReq(proxyReq, req): void {
               const remoteAddress = req.socket?.remoteAddress ?? ''
@@ -175,14 +190,18 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                 res.destroy()
                 return
               }
-              if (!res.headersSent) {
-                res.writeHead(502, { 'Content-Type': 'application/json' })
+              if (res.headersSent) {
+                res.end()
+                return
               }
+              res.writeHead(502, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: 'Application is not reachable' }))
             },
           },
         }),
       )
+
+      started = true
 
       if (app.server && proxies.length > 0) {
         // Forward WebSocket upgrades to the correct per-app proxy.
@@ -282,6 +301,13 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   title: 'Allow Self-Signed Certificates',
                   description: 'Accept self-signed TLS certificates (HTTPS only)',
                   default: false,
+                },
+                timeout: {
+                  type: 'number' as const,
+                  title: 'Proxy Timeout',
+                  description:
+                    'Milliseconds to wait for the target to respond before returning a 502. 0 disables the timeout.',
+                  default: 0,
                 },
               },
             },
