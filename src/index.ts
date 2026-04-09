@@ -274,8 +274,8 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'string' as const,
                   title: 'Application URL',
                   description:
-                    'Full URL of the application including protocol, host, port, and optional base path — e.g. http://192.168.1.100:9000 or https://myapp.local:8443/admin',
-                  default: 'http://127.0.0.1:80',
+                    'URL of the application — protocol and host are required, port is optional (defaults to 80 for http, 443 for https), base path is optional — e.g. http://192.168.1.100:9000 or https://myapp.local/admin',
+                  default: 'http://127.0.0.1',
                 },
                 allowSelfSigned: {
                   type: 'boolean' as const,

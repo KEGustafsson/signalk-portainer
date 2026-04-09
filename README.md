@@ -41,7 +41,7 @@ After installation, configure the plugin in the SignalK admin UI:
 | Field                              | Description                                                                          | Default              |
 | ---------------------------------- | ------------------------------------------------------------------------------------ | -------------------- |
 | **Name**                           | Display name shown in the app selector                                               | `My App`             |
-| **Application URL**                | Full URL including protocol, host, port, and optional base path (e.g. `http://192.168.1.100:9000` or `https://myapp.local:8443/admin`) | `http://127.0.0.1:80` |
+| **Application URL**                | URL with protocol and host required; port is optional (defaults to `80` for http, `443` for https); base path is optional — e.g. `http://192.168.1.100:9000`, `https://myapp.local/admin` | `http://127.0.0.1` |
 | **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)                                            | `false`              |
 
 5. Click **Submit** to save
@@ -132,7 +132,7 @@ docker run -d \
 
 - **Only proxy trusted internal applications.** The plugin performs no authentication of its own; any app reachable at the configured host:port will be forwarded to anyone with access to the SignalK UI.
 - **iframe same-origin access.** The embedded iframe uses `allow-same-origin` in its sandbox so that cookie and session-based authentication works in proxied apps (e.g. Portainer). This means proxied content runs at the SignalK admin origin and can access admin-origin cookies. Only configure apps you fully trust.
-- **Invalid host or port values are rejected at start-up.** A host or port that is explicitly provided but fails validation causes the app entry to be skipped (logged via `app.error`); the plugin does not silently fall back to `127.0.0.1:80`. Absent or empty values still use the defaults.
+- **Port is optional.** If omitted from the URL, the port defaults to `80` for `http` and `443` for `https`. An invalid host causes the app entry to be skipped and logged via `app.error`.
 - **Cloud metadata endpoints are blocked.** Hosts `169.254.169.254` and `metadata.google.internal` (and case/dot variants) are rejected to prevent SSRF against cloud instance metadata APIs.
 
 ## Troubleshooting
