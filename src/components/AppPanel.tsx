@@ -74,6 +74,8 @@ const AppPanel: React.FC = () => {
           src={`${PLUGIN_PATH}/proxy/${selected}/`}
           style={{ flex: 1, width: '100%', borderWidth: 0 }}
           title={selectedApp.name}
+          // allow-same-origin lets cookie/session auth work in proxied apps (e.g. Portainer).
+          // Trade-off: proxied content runs at the SignalK admin origin. Only proxy trusted apps.
           sandbox="allow-scripts allow-same-origin allow-forms allow-popups"
           referrerPolicy="no-referrer"
         />

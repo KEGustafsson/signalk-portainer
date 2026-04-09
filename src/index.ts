@@ -70,17 +70,29 @@ function buildTarget(appConfig: AppConfig): string {
 }
 
 function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig {
+  // Host: absent/empty → DEFAULT_HOST; non-empty but invalid → throw
   const rawHost = typeof raw['host'] === 'string' ? raw['host'] : ''
   const normalizedHost = normalizeHost(rawHost)
-  const host =
-    normalizedHost.length > 0 && isValidHost(rawHost) ? normalizedHost : DEFAULT_HOST
-  const port =
-    typeof raw['port'] === 'number' &&
-    Number.isInteger(raw['port']) &&
-    raw['port'] >= 1 &&
-    raw['port'] <= 65535
-      ? raw['port']
-      : DEFAULT_PORT
+  let host: string
+  if (normalizedHost.length === 0) {
+    host = DEFAULT_HOST
+  } else if (!isValidHost(rawHost)) {
+    throw new Error(`Invalid host at index ${index}: "${rawHost}"`)
+  } else {
+    host = normalizedHost
+  }
+
+  // Port: absent/wrong type → DEFAULT_PORT; number but invalid range → throw
+  const rawPort = raw['port']
+  let port: number
+  if (rawPort === undefined || rawPort === null || typeof rawPort !== 'number') {
+    port = DEFAULT_PORT
+  } else if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
+    throw new Error(`Invalid port at index ${index}: ${String(rawPort)}`)
+  } else {
+    port = rawPort
+  }
+
   const scheme =
     typeof raw['scheme'] === 'string' && VALID_SCHEMES.has(raw['scheme'])
       ? (raw['scheme'] as AppScheme)
@@ -92,12 +104,24 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   return { name, host, port, scheme, allowSelfSigned }
 }
 
-function parseConfig(config: object): AppConfig[] {
+function parseConfig(
+  config: object,
+  onSkip: (index: number, err: unknown) => void,
+): AppConfig[] {
   const raw = config as Record<string, unknown>
   const apps = Array.isArray(raw['apps']) ? raw['apps'] : []
-  return apps
+  const validObjects = apps
     .filter((a): a is Record<string, unknown> => typeof a === 'object' && a !== null)
-    .map((a, i) => parseAppConfig(a, i))
+    .slice(0, MAX_APP_SLOTS)
+  const results: AppConfig[] = []
+  for (let i = 0; i < validObjects.length; i++) {
+    try {
+      results.push(parseAppConfig(validObjects[i]!, i))
+    } catch (err) {
+      onSkip(i, err)
+    }
+  }
+  return results
 }
 
 module.exports = function (app: ServerAPIWithServer): Plugin {
@@ -112,7 +136,9 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     description: 'General reverse proxy — embed any web application as a webapp in SignalK',
 
     start(config: object, _restart: (newConfiguration: object) => void): void {
-      currentApps = parseConfig(config)
+      currentApps = parseConfig(config, (i, err) => {
+        app.error(`Skipping app at config index ${i}: ${String(err)}`)
+      })
       started = true
 
       proxies = currentApps.map((appConfig) =>
