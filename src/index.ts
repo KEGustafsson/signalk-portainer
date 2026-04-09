@@ -275,6 +275,10 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                 rawProto.split(',')[0]?.trim() ||
                 ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
               proxyReq.setHeader('X-Forwarded-Proto', proto)
+              if (appConfig.rewritePaths) {
+                // Only advertise encodings we can decompress for HTML script injection.
+                proxyReq.setHeader('Accept-Encoding', 'gzip, deflate, br, identity')
+              }
             },
             ...(appConfig.rewritePaths
               ? {
@@ -453,6 +457,9 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   title: 'Proxy Path',
                   description:
                     'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-web-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
+                  pattern: '^[a-zA-Z][a-zA-Z0-9-]*$',
+                  minLength: 1,
+                  maxLength: 64,
                 },
                 url: {
                   type: 'string' as const,
