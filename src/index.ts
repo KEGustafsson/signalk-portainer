@@ -15,9 +15,9 @@ interface AppConfig {
   scheme: AppScheme
   host: string
   port: number
-  path: string          // base path from URL, e.g. '/' or '/admin'
+  path: string // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
-  timeout: number       // proxy connection timeout in ms; 0 means no timeout
+  timeout: number // proxy connection timeout in ms; 0 means no timeout
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
@@ -101,7 +101,7 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   const host = normalizeHost(parsed.hostname)
 
   // URL.port is '' when the URL omits the port; fall back to the scheme default
-  const port = parsed.port ? Number(parsed.port) : (scheme === 'https' ? 443 : 80)
+  const port = parsed.port ? Number(parsed.port) : scheme === 'https' ? 443 : 80
 
   const path = parsed.pathname
 
@@ -110,16 +110,12 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
   const rawTimeout = raw['timeout']
-  const timeout =
-    typeof rawTimeout === 'number' && rawTimeout >= 0 ? Math.floor(rawTimeout) : 0
+  const timeout = typeof rawTimeout === 'number' && rawTimeout >= 0 ? Math.floor(rawTimeout) : 0
 
   return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned, timeout }
 }
 
-function parseConfig(
-  config: object,
-  onSkip: (index: number, err: unknown) => void,
-): AppConfig[] {
+function parseConfig(config: object, onSkip: (index: number, err: unknown) => void): AppConfig[] {
   const raw = config as Record<string, unknown>
   const apps = Array.isArray(raw['apps']) ? raw['apps'] : []
   const validObjects = apps
@@ -170,15 +166,11 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
               const remoteAddress = req.socket?.remoteAddress ?? ''
               proxyReq.setHeader('X-Real-IP', remoteAddress)
               const existing = req.headers['x-forwarded-for']
-              const forwarded = existing
-                ? `${String(existing)}, ${remoteAddress}`
-                : remoteAddress
+              const forwarded = existing ? `${String(existing)}, ${remoteAddress}` : remoteAddress
               proxyReq.setHeader('X-Forwarded-For', forwarded)
               const incomingProto = req.headers['x-forwarded-proto']
               const rawProto =
-                typeof incomingProto === 'string'
-                  ? incomingProto
-                  : (incomingProto?.[0] ?? '')
+                typeof incomingProto === 'string' ? incomingProto : (incomingProto?.[0] ?? '')
               const proto =
                 rawProto.split(',')[0]?.trim() ||
                 ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')

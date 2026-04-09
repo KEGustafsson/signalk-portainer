@@ -37,7 +37,7 @@ type ProxyReqFn = (proxyReq: { setHeader: jest.Mock }, req: unknown) => void
 /** Extracts the proxyReq handler from the most recent createProxyMiddleware call. */
 function extractProxyReqHandler(): ProxyReqFn {
   const options = (mockCreateProxyMiddleware.mock.calls[0] as [Record<string, unknown>])[0]
-  return ((options['on'] as Record<string, unknown>)['proxyReq']) as ProxyReqFn
+  return (options['on'] as Record<string, unknown>)['proxyReq'] as ProxyReqFn
 }
 
 describe('signalk-web-proxy plugin', () => {
@@ -463,12 +463,10 @@ describe('signalk-web-proxy plugin', () => {
           registeredHandlers.set(path, handler)
           return mockRouter
         }),
-        get: jest.fn(
-          (path: string, handler: (req: Request, res: Response) => void) => {
-            registeredGetHandlers.set(path, handler)
-            return mockRouter
-          },
-        ),
+        get: jest.fn((path: string, handler: (req: Request, res: Response) => void) => {
+          registeredGetHandlers.set(path, handler)
+          return mockRouter
+        }),
       } as unknown as IRouter
     })
 

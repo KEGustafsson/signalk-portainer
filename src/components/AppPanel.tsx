@@ -53,7 +53,13 @@ const AppPanel: React.FC = () => {
   const selectedApp = apps.find((a) => a.index === selected) ?? null
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: `calc(100vh - ${ADMIN_HEADER_HEIGHT}px)` }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: `calc(100vh - ${ADMIN_HEADER_HEIGHT}px)`,
+      }}
+    >
       {apps.length > 1 && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid #ddd' }}>
           <select
