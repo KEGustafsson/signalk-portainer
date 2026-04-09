@@ -2,6 +2,10 @@ import React from 'react'
 
 const PLUGIN_PATH = '/plugins/signalk-web-proxy'
 
+// Height in pixels of the SignalK admin UI top navigation bar.
+// The panel fills the remaining viewport height below it.
+const ADMIN_HEADER_HEIGHT = 64
+
 interface AppInfo {
   index: number
   name: string
@@ -49,7 +53,13 @@ const AppPanel: React.FC = () => {
   const selectedApp = apps.find((a) => a.index === selected) ?? null
 
   return (
-    <div style={{ display: 'flex', flexDirection: 'column', height: 'calc(100vh - 64px)' }}>
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        height: `calc(100vh - ${ADMIN_HEADER_HEIGHT}px)`,
+      }}
+    >
       {apps.length > 1 && (
         <div style={{ padding: '8px 12px', borderBottom: '1px solid #ddd' }}>
           <select

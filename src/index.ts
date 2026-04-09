@@ -15,8 +15,9 @@ interface AppConfig {
   scheme: AppScheme
   host: string
   port: number
-  path: string          // base path from URL, e.g. '/' or '/admin'
+  path: string // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
+  timeout: number // proxy connection timeout in ms; 0 means no timeout
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
@@ -88,6 +89,11 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
     throw new Error(`URL must not contain credentials at index ${index}`)
   }
 
+  // Reject IPv6 — the URL API strips brackets and returns the bare address (e.g. "::1")
+  if (parsed.hostname.includes(':')) {
+    throw new Error(`IPv6 addresses are not supported at index ${index}`)
+  }
+
   // Validate hostname (blocks cloud-metadata IPs and unusual characters)
   if (!isValidHost(parsed.hostname)) {
     throw new Error(`Invalid host at index ${index}: "${parsed.hostname}"`)
@@ -95,22 +101,27 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   const host = normalizeHost(parsed.hostname)
 
   // URL.port is '' when the URL omits the port; fall back to the scheme default
-  const port = parsed.port ? Number(parsed.port) : (scheme === 'https' ? 443 : 80)
+  const port = parsed.port ? Number(parsed.port) : scheme === 'https' ? 443 : 80
 
-  const path = parsed.pathname || '/'
+  const path = parsed.pathname
 
   const allowSelfSigned =
     typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
+  const rawTimeout = raw['timeout']
+  if (
+    rawTimeout !== undefined &&
+    (typeof rawTimeout !== 'number' || !Number.isFinite(rawTimeout) || rawTimeout < 0)
+  ) {
+    throw new Error(`Invalid timeout at index ${index}: must be a non-negative finite number`)
+  }
+  const timeout = typeof rawTimeout === 'number' ? Math.floor(rawTimeout) : 0
 
-  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned }
+  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned, timeout }
 }
 
-function parseConfig(
-  config: object,
-  onSkip: (index: number, err: unknown) => void,
-): AppConfig[] {
+function parseConfig(config: object, onSkip: (index: number, err: unknown) => void): AppConfig[] {
   const raw = config as Record<string, unknown>
   const apps = Array.isArray(raw['apps']) ? raw['apps'] : []
   const validObjects = apps
@@ -139,10 +150,15 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     description: 'General reverse proxy — embed any web application as a webapp in SignalK',
 
     start(config: object, _restart: (newConfiguration: object) => void): void {
+      // Remove any previous upgrade listener (handles plugin restart without an explicit stop)
+      if (upgradeHandler && app.server) {
+        app.server.removeListener('upgrade', upgradeHandler)
+        upgradeHandler = null
+      }
+
       currentApps = parseConfig(config, (i, err) => {
         app.error(`Skipping app at config index ${i}: ${String(err)}`)
       })
-      started = true
 
       proxies = currentApps.map((appConfig) =>
         createProxyMiddleware({
@@ -150,20 +166,17 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           changeOrigin: true,
           ws: false,
           secure: !(appConfig.scheme === 'https' && appConfig.allowSelfSigned),
+          ...(appConfig.timeout > 0 ? { proxyTimeout: appConfig.timeout } : {}),
           on: {
             proxyReq(proxyReq, req): void {
               const remoteAddress = req.socket?.remoteAddress ?? ''
               proxyReq.setHeader('X-Real-IP', remoteAddress)
               const existing = req.headers['x-forwarded-for']
-              const forwarded = existing
-                ? `${String(existing)}, ${remoteAddress}`
-                : remoteAddress
+              const forwarded = existing ? `${String(existing)}, ${remoteAddress}` : remoteAddress
               proxyReq.setHeader('X-Forwarded-For', forwarded)
               const incomingProto = req.headers['x-forwarded-proto']
               const rawProto =
-                typeof incomingProto === 'string'
-                  ? incomingProto
-                  : (incomingProto?.[0] ?? '')
+                typeof incomingProto === 'string' ? incomingProto : (incomingProto?.[0] ?? '')
               const proto =
                 rawProto.split(',')[0]?.trim() ||
                 ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
@@ -175,14 +188,18 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                 res.destroy()
                 return
               }
-              if (!res.headersSent) {
-                res.writeHead(502, { 'Content-Type': 'application/json' })
+              if (res.headersSent) {
+                res.end()
+                return
               }
+              res.writeHead(502, { 'Content-Type': 'application/json' })
               res.end(JSON.stringify({ error: 'Application is not reachable' }))
             },
           },
         }),
       )
+
+      started = true
 
       if (app.server && proxies.length > 0) {
         // Forward WebSocket upgrades to the correct per-app proxy.
@@ -274,14 +291,22 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'string' as const,
                   title: 'Application URL',
                   description:
-                    'Full URL of the application including protocol, host, port, and optional base path — e.g. http://192.168.1.100:9000 or https://myapp.local:8443/admin',
-                  default: 'http://127.0.0.1:80',
+                    'URL of the application — protocol and host are required, port is optional (defaults to 80 for http, 443 for https), base path is optional — e.g. http://192.168.1.100:9000 or https://myapp.local/admin',
+                  default: 'http://127.0.0.1',
                 },
                 allowSelfSigned: {
                   type: 'boolean' as const,
                   title: 'Allow Self-Signed Certificates',
                   description: 'Accept self-signed TLS certificates (HTTPS only)',
                   default: false,
+                },
+                timeout: {
+                  type: 'number' as const,
+                  title: 'Proxy Timeout',
+                  description:
+                    'Milliseconds to wait for the target to respond before returning a 502. 0 disables the timeout.',
+                  default: 0,
+                  minimum: 0,
                 },
               },
             },
