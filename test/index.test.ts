@@ -1386,5 +1386,138 @@ describe('signalk-web-proxy plugin', () => {
 
       expect(mockRes.writeHead).toHaveBeenCalledWith(200, expect.any(Object))
     })
+
+    it('includes history pushState and replaceState interception in injected script', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      expect(body.toString()).toContain('pushState')
+      expect(body.toString()).toContain('replaceState')
+    })
+
+    it('includes location.assign and location.replace interception in injected script', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      const scriptContent = body.toString()
+      expect(scriptContent).toContain('L.assign')
+      expect(scriptContent).toContain('L.replace')
+    })
+
+    it('does not double-prefix attributes when app url has a base path', async () => {
+      plugin.start(
+        {
+          apps: [
+            {
+              name: 'Grafana',
+              url: 'http://localhost:3000/grafana',
+              appPath: 'grafana',
+              rewritePaths: true,
+            },
+          ],
+        },
+        jest.fn(),
+      )
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(
+        handler,
+        '<html><head></head><body><script src="/grafana/public/build/app.js"></script></body></html>',
+      )
+
+      const out = body.toString()
+      // base path /grafana stripped before prepending proxy prefix
+      expect(out).toContain('src="/plugins/signalk-web-proxy/proxy/grafana/public/build/app.js"')
+      expect(out).not.toContain('/grafana/grafana/')
+    })
+
+    it('rewrites attributes that do not start with app base path normally', async () => {
+      plugin.start(
+        {
+          apps: [
+            {
+              name: 'Grafana',
+              url: 'http://localhost:3000/grafana',
+              appPath: 'grafana',
+              rewritePaths: true,
+            },
+          ],
+        },
+        jest.fn(),
+      )
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(
+        handler,
+        '<html><head></head><body><script src="/other/asset.js"></script></body></html>',
+      )
+
+      expect(body.toString()).toContain(
+        'src="/plugins/signalk-web-proxy/proxy/grafana/other/asset.js"',
+      )
+    })
+
+    it('strips app base path exactly (not a partial prefix match)', async () => {
+      plugin.start(
+        {
+          apps: [
+            {
+              name: 'Grafana',
+              url: 'http://localhost:3000/grafana',
+              appPath: 'grafana',
+              rewritePaths: true,
+            },
+          ],
+        },
+        jest.fn(),
+      )
+      const handler = extractProxyResHandler()
+
+      // /grafanaextra/... must NOT have /grafana stripped
+      const { body } = await runHtmlProxyRes(
+        handler,
+        '<html><head></head><body><script src="/grafanaextra/app.js"></script></body></html>',
+      )
+
+      expect(body.toString()).toContain(
+        'src="/plugins/signalk-web-proxy/proxy/grafana/grafanaextra/app.js"',
+      )
+    })
+
+    it('includes base path variable in injected script when app url has a path', async () => {
+      plugin.start(
+        {
+          apps: [
+            {
+              name: 'Grafana',
+              url: 'http://localhost:3000/grafana',
+              appPath: 'grafana',
+              rewritePaths: true,
+            },
+          ],
+        },
+        jest.fn(),
+      )
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      // The injected script should embed the base path for runtime normalisation
+      expect(body.toString()).toContain('"/grafana"')
+    })
+
+    it('sets empty base path variable in injected script when app url has no path', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      // No base path — variable should be the empty string
+      expect(body.toString()).toContain('B=""')
+    })
   })
 })
