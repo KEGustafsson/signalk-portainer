@@ -27,7 +27,12 @@ const pluginFactory = require('../src/index') as (app: ServerAPIWithServer) => P
 const mockError = jest.fn()
 const mockApp = { error: mockError } as unknown as ServerAPIWithServer
 
-describe('signalk-portainer plugin', () => {
+/** Minimal valid config with one app entry */
+function oneApp(overrides: Record<string, unknown> = {}): object {
+  return { apps: [{ name: 'Test App', url: 'http://localhost:9000', ...overrides }] }
+}
+
+describe('signalk-web-proxy plugin', () => {
   let plugin: Plugin
 
   beforeEach(() => {
@@ -37,11 +42,11 @@ describe('signalk-portainer plugin', () => {
 
   describe('metadata', () => {
     it('has the correct plugin id', () => {
-      expect(plugin.id).toBe('signalk-portainer')
+      expect(plugin.id).toBe('signalk-web-proxy')
     })
 
     it('has the correct plugin name', () => {
-      expect(plugin.name).toBe('Portainer CE')
+      expect(plugin.name).toBe('Web Application Proxy')
     })
 
     it('has a description', () => {
@@ -58,51 +63,28 @@ describe('signalk-portainer plugin', () => {
       expect(schema).toHaveProperty('properties')
     })
 
-    it('defines portainerHost property with default', () => {
+    it('defines an apps array property', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
         Record<string, unknown>
       >
-      expect(properties['portainerHost']).toBeDefined()
-      expect(properties['portainerHost']!['type']).toBe('string')
-      expect(properties['portainerHost']!['default']).toBe('127.0.0.1')
+      expect(properties['apps']).toBeDefined()
+      expect(properties['apps']!['type']).toBe('array')
     })
 
-    it('defines portainerPort property with default and constraints', () => {
+    it('apps items define name, url, and allowSelfSigned', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
         Record<string, unknown>
       >
-      expect(properties['portainerPort']).toBeDefined()
-      expect(properties['portainerPort']!['type']).toBe('integer')
-      expect(properties['portainerPort']!['default']).toBe(9000)
-      expect(properties['portainerPort']!['minimum']).toBe(1)
-      expect(properties['portainerPort']!['maximum']).toBe(65535)
-    })
-
-    it('defines portainerScheme property with enum', () => {
-      const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
-      const properties = (schema as Record<string, unknown>)['properties'] as Record<
-        string,
-        Record<string, unknown>
-      >
-      expect(properties['portainerScheme']).toBeDefined()
-      expect(properties['portainerScheme']!['type']).toBe('string')
-      expect(properties['portainerScheme']!['default']).toBe('http')
-      expect(properties['portainerScheme']!['enum']).toEqual(['http', 'https'])
-    })
-
-    it('defines allowSelfSigned property with default false', () => {
-      const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
-      const properties = (schema as Record<string, unknown>)['properties'] as Record<
-        string,
-        Record<string, unknown>
-      >
-      expect(properties['allowSelfSigned']).toBeDefined()
-      expect(properties['allowSelfSigned']!['type']).toBe('boolean')
-      expect(properties['allowSelfSigned']!['default']).toBe(false)
+      const items = properties['apps']!['items'] as Record<string, unknown>
+      const itemProps = items['properties'] as Record<string, Record<string, unknown>>
+      expect(itemProps['name']!['type']).toBe('string')
+      expect(itemProps['url']!['type']).toBe('string')
+      expect(itemProps['allowSelfSigned']!['type']).toBe('boolean')
+      expect(itemProps['allowSelfSigned']!['default']).toBe(false)
     })
   })
 
@@ -114,7 +96,7 @@ describe('signalk-portainer plugin', () => {
     })
 
     it('creates proxy middleware with correct target on start', () => {
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(1)
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
@@ -124,91 +106,152 @@ describe('signalk-portainer plugin', () => {
       expect(options['ws']).toBe(false)
     })
 
-    it('uses custom host and port from config', () => {
-      plugin.start({ portainerHost: '192.168.1.100', portainerPort: 9443 }, jest.fn())
+    it('creates one proxy per configured app', () => {
+      plugin.start(
+        {
+          apps: [
+            { name: 'App A', url: 'http://localhost:9000' },
+            { name: 'App B', url: 'http://192.168.1.1:3000' },
+          ],
+        },
+        jest.fn(),
+      )
+
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(2)
+      const targets = (mockCreateProxyMiddleware.mock.calls as unknown[][]).map(
+        (c) => (c[0] as Record<string, unknown>)['target'],
+      )
+      expect(targets).toContain('http://localhost:9000')
+      expect(targets).toContain('http://192.168.1.1:3000')
+    })
+
+    it('uses custom host and port from URL', () => {
+      plugin.start(oneApp({ url: 'http://192.168.1.100:9443' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://192.168.1.100:9443')
     })
 
-    it('uses default values when config is empty', () => {
+    it('includes base path from URL in target', () => {
+      plugin.start(oneApp({ url: 'http://localhost:9000/admin' }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000/admin')
+    })
+
+    it('creates no proxies when apps array is empty', () => {
+      plugin.start({ apps: [] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('reports no apps configured when started with empty apps', () => {
+      plugin.start({ apps: [] }, jest.fn())
+
+      expect(plugin.statusMessage?.()).toBe('No apps configured')
+    })
+
+    it('skips app when url field is absent', () => {
+      plugin.start({ apps: [{ name: 'X' }] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('index 0'))
+    })
+
+    it('skips app when url is an empty string', () => {
+      plugin.start({ apps: [{ name: 'X', url: '' }] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('skips app when url is not parseable', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'not a url' }] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('infers port 80 when http URL omits the port', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'http://localhost' }] }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:80')
+    })
+
+    it('infers port 443 when https URL omits the port', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'https://myapp.local' }] }, jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('https://myapp.local:443')
+    })
+
+    it('creates no proxies when apps key is missing', () => {
       plugin.start({}, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('uses default values for invalid config values', () => {
-      plugin.start({ portainerHost: '', portainerPort: -1 }, jest.fn())
+    it('skips app when URL scheme is not http or https', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'ftp://localhost:9000' }] }, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('rejects hosts with URL metacharacters', () => {
-      plugin.start({ portainerHost: 'evil.com/path', portainerPort: 9000 }, jest.fn())
+    it('skips app when URL contains embedded credentials', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'http://user:pass@evil.com:9000' }] }, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('rejects cloud metadata host addresses', () => {
-      plugin.start({ portainerHost: '169.254.169.254', portainerPort: 9000 }, jest.fn())
+    it('skips app when host is a cloud metadata IP', () => {
+      plugin.start(oneApp({ url: 'http://169.254.169.254:9000' }), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('rejects hosts with special characters', () => {
-      plugin.start({ portainerHost: 'user:pass@evil.com', portainerPort: 9000 }, jest.fn())
+    it('skips app when host is cloud metadata with trailing dot', () => {
+      plugin.start(oneApp({ url: 'http://169.254.169.254.:9000' }), jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('skips app when host is cloud metadata with mixed case', () => {
+      plugin.start(oneApp({ url: 'http://Metadata.Google.Internal:9000' }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
     it('normalizes host to lowercase', () => {
-      plugin.start({ portainerHost: 'MyHost.Local', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp({ url: 'http://MyHost.Local:9000' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://myhost.local:9000')
     })
 
-    it('strips trailing dots from host', () => {
-      plugin.start({ portainerHost: 'myhost.local.', portainerPort: 9000 }, jest.fn())
+    it('strips trailing dot from host', () => {
+      plugin.start(oneApp({ url: 'http://myhost.local.:9000' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://myhost.local:9000')
     })
 
-    it('rejects cloud metadata host with trailing dot', () => {
-      plugin.start({ portainerHost: '169.254.169.254.', portainerPort: 9000 }, jest.fn())
+    it('caps apps at MAX_APP_SLOTS and ignores entries beyond the limit', () => {
+      const manyApps = Array.from({ length: 20 }, (_, i) => ({
+        name: `App ${i}`,
+        url: `http://localhost:${9000 + i}`,
+      }))
+      plugin.start({ apps: manyApps }, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(16)
     })
 
-    it('rejects cloud metadata host with mixed case', () => {
-      plugin.start({ portainerHost: 'Metadata.Google.Internal', portainerPort: 9000 }, jest.fn())
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
-    })
-
-    it('uses https scheme when configured', () => {
-      plugin.start(
-        { portainerHost: 'localhost', portainerPort: 9443, portainerScheme: 'https' },
-        jest.fn(),
-      )
+    it('uses https scheme when URL uses https', () => {
+      plugin.start(oneApp({ url: 'https://localhost:9443' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -217,15 +260,7 @@ describe('signalk-portainer plugin', () => {
     })
 
     it('sets secure to false when allowSelfSigned is true with https', () => {
-      plugin.start(
-        {
-          portainerHost: 'localhost',
-          portainerPort: 9443,
-          portainerScheme: 'https',
-          allowSelfSigned: true,
-        },
-        jest.fn(),
-      )
+      plugin.start(oneApp({ url: 'https://localhost:9443', allowSelfSigned: true }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -236,7 +271,7 @@ describe('signalk-portainer plugin', () => {
     it('configures a proxyReq handler that sets forwarding headers', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -267,7 +302,7 @@ describe('signalk-portainer plugin', () => {
     it('appends to existing X-Forwarded-For header', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -294,7 +329,7 @@ describe('signalk-portainer plugin', () => {
     it('passes through upstream x-forwarded-proto when present', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -305,7 +340,6 @@ describe('signalk-portainer plugin', () => {
       ) => void
 
       const mockProxyReq = { setHeader: jest.fn() }
-      // socket is NOT encrypted but upstream already set x-forwarded-proto: https
       const mockReq = {
         socket: { remoteAddress: '10.0.0.3', encrypted: false },
         headers: { 'x-forwarded-proto': 'https' },
@@ -321,7 +355,7 @@ describe('signalk-portainer plugin', () => {
     it('takes the first value when x-forwarded-proto is comma-separated', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -345,10 +379,7 @@ describe('signalk-portainer plugin', () => {
     })
 
     it('ignores allowSelfSigned when scheme is http', () => {
-      plugin.start(
-        { portainerHost: 'localhost', portainerPort: 9000, allowSelfSigned: true },
-        jest.fn(),
-      )
+      plugin.start(oneApp({ allowSelfSigned: true }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -356,27 +387,8 @@ describe('signalk-portainer plugin', () => {
       expect(options['secure']).toBe(true)
     })
 
-    it('falls back to http for invalid scheme values', () => {
-      plugin.start(
-        { portainerHost: 'localhost', portainerPort: 9000, portainerScheme: 'ftp' },
-        jest.fn(),
-      )
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
-    })
-
-    it('rejects non-integer port numbers', () => {
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000.5 }, jest.fn())
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
-    })
-
     it('cleans up on stop', () => {
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
       void plugin.stop()
 
       expect(plugin.statusMessage?.()).toBe('Not started')
@@ -392,13 +404,31 @@ describe('signalk-portainer plugin', () => {
       expect(plugin.statusMessage?.()).toBe('Not started')
     })
 
-    it('returns target info after start', () => {
-      plugin.start({ portainerHost: 'myhost', portainerPort: 8080 }, jest.fn())
-      expect(plugin.statusMessage?.()).toBe('Proxying to http://myhost:8080')
+    it('returns target info after start with one app', () => {
+      plugin.start(oneApp({ url: 'http://myhost:8080' }), jest.fn())
+      expect(plugin.statusMessage?.()).toBe('Proxying to: http://myhost:8080')
+    })
+
+    it('returns target info including base path when url has a path', () => {
+      plugin.start(oneApp({ url: 'http://myhost:8080/admin' }), jest.fn())
+      expect(plugin.statusMessage?.()).toBe('Proxying to: http://myhost:8080/admin')
+    })
+
+    it('returns all targets after start with multiple apps', () => {
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
+          ],
+        },
+        jest.fn(),
+      )
+      expect(plugin.statusMessage?.()).toBe('Proxying to: http://host-a:8080, http://host-b:3000')
     })
 
     it('returns not started after stop', () => {
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
       void plugin.stop()
       expect(plugin.statusMessage?.()).toBe('Not started')
     })
@@ -407,38 +437,74 @@ describe('signalk-portainer plugin', () => {
   describe('registerWithRouter', () => {
     let mockRouter: IRouter
     let registeredHandlers: Map<string, MiddlewareFn>
+    let registeredGetHandlers: Map<string, (req: Request, res: Response) => void>
 
     beforeEach(() => {
       registeredHandlers = new Map()
+      registeredGetHandlers = new Map()
       mockRouter = {
         use: jest.fn((path: string, handler: MiddlewareFn) => {
           registeredHandlers.set(path, handler)
           return mockRouter
         }),
+        get: jest.fn(
+          (path: string, handler: (req: Request, res: Response) => void) => {
+            registeredGetHandlers.set(path, handler)
+            return mockRouter
+          },
+        ),
       } as unknown as IRouter
     })
 
-    it('registers middleware on /proxy and / routes', () => {
+    it('registers /apps GET route', () => {
       plugin.registerWithRouter!(mockRouter)
-      expect(mockRouter.use).toHaveBeenCalledWith('/proxy', expect.any(Function))
-      expect(mockRouter.use).toHaveBeenCalledWith('/', expect.any(Function))
+      expect(mockRouter.get).toHaveBeenCalledWith('/apps', expect.any(Function))
     })
 
-    it('registers /proxy before / to take priority', () => {
+    it('/apps returns empty list when plugin not started', () => {
       plugin.registerWithRouter!(mockRouter)
-      const calls = (mockRouter.use as jest.Mock).mock.calls as [string, MiddlewareFn][]
-      const paths = calls.map((c) => c[0])
-      expect(paths).toEqual(['/proxy', '/'])
+      const handler = registeredGetHandlers.get('/apps')!
+      const mockRes = { json: jest.fn() } as unknown as Response
+      handler({} as Request, mockRes)
+      expect(mockRes.json).toHaveBeenCalledWith([])
+    })
+
+    it('/apps returns configured app list after start', () => {
+      mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
+      plugin.start(
+        {
+          apps: [
+            { name: 'Portainer', url: 'http://localhost:9000' },
+            { name: 'Grafana', url: 'http://localhost:3000' },
+          ],
+        },
+        jest.fn(),
+      )
+      plugin.registerWithRouter!(mockRouter)
+      const handler = registeredGetHandlers.get('/apps')!
+      const mockRes = { json: jest.fn() } as unknown as Response
+      handler({} as Request, mockRes)
+      expect(mockRes.json).toHaveBeenCalledWith([
+        { index: 0, name: 'Portainer' },
+        { index: 1, name: 'Grafana' },
+      ])
+    })
+
+    it('registers /proxy/0 through /proxy/15 routes', () => {
+      plugin.registerWithRouter!(mockRouter)
+      for (let i = 0; i < 16; i++) {
+        expect(mockRouter.use).toHaveBeenCalledWith(`/proxy/${i}`, expect.any(Function))
+      }
     })
 
     it('strips invalid header names before invoking the proxy', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy')!
+      const handler = registeredHandlers.get('/proxy/0')!
       const mockReq = {
         headers: {
           'content-type': 'text/html',
@@ -459,7 +525,7 @@ describe('signalk-portainer plugin', () => {
     it('returns 503 when plugin is not started', () => {
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy')!
+      const handler = registeredHandlers.get('/proxy/0')!
       const mockReq = {} as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
@@ -473,14 +539,14 @@ describe('signalk-portainer plugin', () => {
       expect(mockRes.json).toHaveBeenCalledWith({ error: 'Plugin is not started' })
     })
 
-    it('delegates to proxy when plugin is started', () => {
+    it('delegates /proxy/0 to proxies[0] when started with one app', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
 
-      const handler = registeredHandlers.get('/proxy')!
+      const handler = registeredHandlers.get('/proxy/0')!
       const mockReq = {} as Request
       const mockRes = {} as Response
       const mockNext = jest.fn()
@@ -490,15 +556,63 @@ describe('signalk-portainer plugin', () => {
       expect(dummyProxy).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
     })
 
+    it('delegates /proxy/1 to proxies[1] when started with two apps', () => {
+      const proxy0: MockProxyMiddleware = jest.fn()
+      const proxy1: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValueOnce(proxy0).mockReturnValueOnce(proxy1)
+
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
+          ],
+        },
+        jest.fn(),
+      )
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler1 = registeredHandlers.get('/proxy/1')!
+      const mockReq = {} as Request
+      const mockRes = {} as Response
+      const mockNext = jest.fn()
+
+      handler1(mockReq, mockRes, mockNext)
+
+      expect(proxy1).toHaveBeenCalledWith(mockReq, mockRes, mockNext)
+      expect(proxy0).not.toHaveBeenCalled()
+    })
+
+    it('/proxy/1 returns 404 when only one app is configured', () => {
+      const dummyProxy: MockProxyMiddleware = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
+
+      plugin.start(oneApp(), jest.fn())
+      plugin.registerWithRouter!(mockRouter)
+
+      const handler = registeredHandlers.get('/proxy/1')!
+      const mockReq = {} as Request
+      const mockRes = {
+        status: jest.fn().mockReturnThis(),
+        json: jest.fn().mockReturnThis(),
+      } as unknown as Response
+      const mockNext = jest.fn()
+
+      handler(mockReq, mockRes, mockNext)
+
+      expect(mockRes.status).toHaveBeenCalledWith(404)
+      expect(mockRes.json).toHaveBeenCalledWith({ error: 'No app configured at slot 1' })
+    })
+
     it('returns 503 after plugin is stopped', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
       plugin.registerWithRouter!(mockRouter)
       void plugin.stop()
 
-      const handler = registeredHandlers.get('/proxy')!
+      const handler = registeredHandlers.get('/proxy/0')!
       const mockReq = {} as Request
       const mockRes = {
         status: jest.fn().mockReturnThis(),
@@ -519,7 +633,10 @@ describe('signalk-portainer plugin', () => {
 
     beforeEach(() => {
       mockServer = new EventEmitter()
-      appWithServer = { server: mockServer as unknown as Server } as ServerAPIWithServer
+      appWithServer = {
+        server: mockServer as unknown as Server,
+        error: jest.fn(),
+      } as unknown as ServerAPIWithServer
       dummyProxy = jest.fn() as MockProxyMiddleware
       dummyProxy.upgrade = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
@@ -527,16 +644,19 @@ describe('signalk-portainer plugin', () => {
 
     it('registers upgrade handler on server when server is available', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       expect(mockServer.listenerCount('upgrade')).toBe(1)
     })
 
     it('forwards upgrade requests matching plugin path and strips prefix', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
-      const mockReq = { url: '/plugins/signalk-portainer/api/websocket/exec' } as IncomingMessage
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0/api/websocket/exec',
+        headers: {},
+      } as unknown as IncomingMessage
       const mockSocket = {} as Socket
       const mockHead = Buffer.alloc(0)
 
@@ -546,27 +666,46 @@ describe('signalk-portainer plugin', () => {
       expect(mockReq.url).toBe('/api/websocket/exec')
     })
 
-    it('strips /proxy subpath from upgrade requests', () => {
+    it('routes upgrade to correct proxy by index', () => {
+      const proxy0: MockProxyMiddleware = jest.fn()
+      proxy0.upgrade = jest.fn()
+      const proxy1: MockProxyMiddleware = jest.fn()
+      proxy1.upgrade = jest.fn()
+      mockCreateProxyMiddleware.mockReturnValueOnce(proxy0).mockReturnValueOnce(proxy1)
+
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(
+        {
+          apps: [
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
+          ],
+        },
+        jest.fn(),
+      )
 
       const mockReq = {
-        url: '/plugins/signalk-portainer/proxy/api/websocket/exec',
-      } as IncomingMessage
+        url: '/plugins/signalk-web-proxy/proxy/1/api/websocket/exec',
+        headers: {},
+      } as unknown as IncomingMessage
       const mockSocket = {} as Socket
       const mockHead = Buffer.alloc(0)
 
       mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
 
-      expect(dummyProxy.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(proxy1.upgrade).toHaveBeenCalledWith(mockReq, mockSocket, mockHead)
+      expect(proxy0.upgrade).not.toHaveBeenCalled()
       expect(mockReq.url).toBe('/api/websocket/exec')
     })
 
     it('sets url to / when upgrade request matches only prefix', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
-      const mockReq = { url: '/plugins/signalk-portainer/proxy' } as IncomingMessage
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0',
+        headers: {},
+      } as unknown as IncomingMessage
       const mockSocket = {} as Socket
       const mockHead = Buffer.alloc(0)
 
@@ -578,10 +717,10 @@ describe('signalk-portainer plugin', () => {
 
     it('strips invalid header names before forwarding upgrade requests', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-portainer/api/websocket/exec',
+        url: '/plugins/signalk-web-proxy/proxy/0/api/websocket/exec',
         headers: {
           upgrade: 'websocket',
           'primus::req::backup': {},
@@ -600,7 +739,7 @@ describe('signalk-portainer plugin', () => {
 
     it('ignores upgrade requests not matching plugin path', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const mockReq = { url: '/signalk/v1/stream' } as IncomingMessage
       const mockSocket = {} as Socket
@@ -611,9 +750,39 @@ describe('signalk-portainer plugin', () => {
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
     })
 
+    it('ignores upgrade requests with non-numeric index', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn())
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/0abc/api/websocket/exec',
+      } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+    })
+
+    it('ignores upgrade requests with out-of-range index', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start(oneApp(), jest.fn()) // only 1 app → index 0 valid, index 1 invalid
+
+      const mockReq = {
+        url: '/plugins/signalk-web-proxy/proxy/1/api/websocket/exec',
+      } as IncomingMessage
+      const mockSocket = {} as Socket
+      const mockHead = Buffer.alloc(0)
+
+      mockServer.emit('upgrade', mockReq, mockSocket, mockHead)
+
+      expect(dummyProxy.upgrade).not.toHaveBeenCalled()
+    })
+
     it('removes upgrade handler on stop', () => {
       const plugin = pluginFactory(appWithServer)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       expect(mockServer.listenerCount('upgrade')).toBe(1)
 
@@ -622,11 +791,17 @@ describe('signalk-portainer plugin', () => {
       expect(mockServer.listenerCount('upgrade')).toBe(0)
     })
 
+    it('does not register upgrade handler when no apps are configured', () => {
+      const plugin = pluginFactory(appWithServer)
+      plugin.start({ apps: [] }, jest.fn())
+
+      expect(mockServer.listenerCount('upgrade')).toBe(0)
+    })
+
     it('does not register upgrade handler when server is not available', () => {
       const plugin = pluginFactory(mockApp)
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
-      // No error thrown, upgrade simply not wired
       expect(dummyProxy.upgrade).not.toHaveBeenCalled()
     })
   })
@@ -635,7 +810,7 @@ describe('signalk-portainer plugin', () => {
     it('configures an error handler on the proxy', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -647,7 +822,7 @@ describe('signalk-portainer plugin', () => {
     it('error handler returns 502 without leaking details', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -663,20 +838,20 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('ECONNREFUSED'), mockReq, mockRes)
 
-      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: ECONNREFUSED')
+      expect(mockError).toHaveBeenCalledWith('Web proxy error: ECONNREFUSED')
       expect(mockRes.writeHead).toHaveBeenCalledWith(502, { 'Content-Type': 'application/json' })
       const body = JSON.parse((mockRes.end as jest.Mock).mock.calls[0][0] as string) as Record<
         string,
         unknown
       >
-      expect(body['error']).toBe('Portainer is not reachable')
+      expect(body['error']).toBe('Application is not reachable')
       expect(body).not.toHaveProperty('detail')
     })
 
     it('error handler does not write headers if already sent', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -692,7 +867,7 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('timeout'), mockReq, mockRes)
 
-      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: timeout')
+      expect(mockError).toHaveBeenCalledWith('Web proxy error: timeout')
       expect(mockRes.writeHead).not.toHaveBeenCalled()
       expect(mockRes.end).toHaveBeenCalled()
     })
@@ -700,7 +875,7 @@ describe('signalk-portainer plugin', () => {
     it('error handler destroys socket for WebSocket errors', () => {
       mockCreateProxyMiddleware.mockReturnValue(jest.fn() as unknown as MockProxyMiddleware)
 
-      plugin.start({ portainerHost: 'localhost', portainerPort: 9000 }, jest.fn())
+      plugin.start(oneApp(), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -718,7 +893,7 @@ describe('signalk-portainer plugin', () => {
 
       errorHandler(new Error('ws error'), {} as Request, mockSocket)
 
-      expect(mockError).toHaveBeenCalledWith('Portainer proxy error: ws error')
+      expect(mockError).toHaveBeenCalledWith('Web proxy error: ws error')
       expect(mockSocket.destroy).toHaveBeenCalled()
     })
   })

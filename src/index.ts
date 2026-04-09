@@ -8,21 +8,20 @@ interface ServerAPIWithServer extends ServerAPI {
   server?: Server
 }
 
-type PortainerScheme = 'http' | 'https'
+type AppScheme = 'http' | 'https'
 
-interface PortainerPluginConfig {
-  portainerHost: string
-  portainerPort: number
-  portainerScheme: PortainerScheme
+interface AppConfig {
+  name: string
+  scheme: AppScheme
+  host: string
+  port: number
+  path: string          // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
 }
 
-const PLUGIN_ID = 'signalk-portainer'
-const PLUGIN_NAME = 'Portainer CE'
+const PLUGIN_ID = 'signalk-web-proxy'
+const PLUGIN_NAME = 'Web Application Proxy'
 
-const DEFAULT_HOST = '127.0.0.1'
-const DEFAULT_PORT = 9000
-const DEFAULT_SCHEME: PortainerScheme = 'http'
 const VALID_SCHEMES = new Set<string>(['http', 'https'])
 
 const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -31,11 +30,17 @@ const CLOUD_METADATA_HOSTS = new Set(['169.254.169.254', 'metadata.google.intern
 // RFC 7230 §3.2.6 — characters valid in a header field name (HTTP token)
 const HTTP_TOKEN_RE = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/
 
+// Maximum number of app slots registered with the router at startup.
+// Slots beyond the configured app count return 503.
+const MAX_APP_SLOTS = 16
+
+const PROXY_SUBPATH = '/proxy'
+const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}`
+
 function stripInvalidHeaders(req: IncomingMessage): void {
   if (!req.headers) return
   for (const key of Object.keys(req.headers)) {
     if (!HTTP_TOKEN_RE.test(key)) {
-      // eslint-disable-next-line @typescript-eslint/no-dynamic-delete
       delete req.headers[key]
     }
   }
@@ -52,102 +57,153 @@ function isValidHost(host: string): boolean {
   return true
 }
 
-function buildTarget(config: PortainerPluginConfig): string {
-  const url = new URL(
-    `${config.portainerScheme}://${config.portainerHost}:${String(config.portainerPort)}`,
-  )
-  if (url.username || url.password || url.pathname !== '/') {
-    throw new Error('Invalid Portainer host configuration')
-  }
-  return url.origin
+function buildTarget(appConfig: AppConfig): string {
+  // Strip trailing slash from path so node-http-proxy doesn't produce double-slashes.
+  // A root path '/' becomes '' so the target is scheme://host:port with no path suffix.
+  const path = appConfig.path.replace(/\/$/, '')
+  return `${appConfig.scheme}://${appConfig.host}:${String(appConfig.port)}${path}`
 }
 
-const PROXY_SUBPATH = '/proxy'
-const PLUGIN_PATH_PREFIX = `/plugins/${PLUGIN_ID}`
+function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig {
+  const rawUrl = typeof raw['url'] === 'string' ? raw['url'].trim() : ''
+  if (rawUrl.length === 0) {
+    throw new Error(`Missing URL at index ${index}`)
+  }
+
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error(`Invalid URL at index ${index}: "${rawUrl}"`)
+  }
+
+  // Only http and https are supported
+  const scheme = parsed.protocol.replace(/:$/, '')
+  if (!VALID_SCHEMES.has(scheme)) {
+    throw new Error(`Unsupported scheme at index ${index}: "${scheme}"`)
+  }
+
+  // Reject embedded credentials — they would be forwarded to the target
+  if (parsed.username || parsed.password) {
+    throw new Error(`URL must not contain credentials at index ${index}`)
+  }
+
+  // Validate hostname (blocks cloud-metadata IPs and unusual characters)
+  if (!isValidHost(parsed.hostname)) {
+    throw new Error(`Invalid host at index ${index}: "${parsed.hostname}"`)
+  }
+  const host = normalizeHost(parsed.hostname)
+
+  // URL.port is '' when the URL omits the port; fall back to the scheme default
+  const port = parsed.port ? Number(parsed.port) : (scheme === 'https' ? 443 : 80)
+
+  const path = parsed.pathname || '/'
+
+  const allowSelfSigned =
+    typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
+  const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
+  const name = rawName.length > 0 ? rawName : `App ${index}`
+
+  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned }
+}
+
+function parseConfig(
+  config: object,
+  onSkip: (index: number, err: unknown) => void,
+): AppConfig[] {
+  const raw = config as Record<string, unknown>
+  const apps = Array.isArray(raw['apps']) ? raw['apps'] : []
+  const validObjects = apps
+    .filter((a): a is Record<string, unknown> => typeof a === 'object' && a !== null)
+    .slice(0, MAX_APP_SLOTS)
+  const results: AppConfig[] = []
+  for (let i = 0; i < validObjects.length; i++) {
+    try {
+      results.push(parseAppConfig(validObjects[i]!, i))
+    } catch (err) {
+      onSkip(i, err)
+    }
+  }
+  return results
+}
 
 module.exports = function (app: ServerAPIWithServer): Plugin {
-  let proxy: RequestHandler | null = null
-  let currentConfig: PortainerPluginConfig | null = null
+  let proxies: RequestHandler[] = []
+  let currentApps: AppConfig[] = []
+  let started = false
   let upgradeHandler: ((req: IncomingMessage, socket: Socket, head: Buffer) => void) | null = null
-
-  function parseConfig(config: object): PortainerPluginConfig {
-    const raw = config as Record<string, unknown>
-    const rawHost = typeof raw['portainerHost'] === 'string' ? raw['portainerHost'] : ''
-    const normalized = normalizeHost(rawHost)
-    const host = normalized.length > 0 && isValidHost(rawHost) ? normalized : DEFAULT_HOST
-    const port =
-      typeof raw['portainerPort'] === 'number' &&
-      Number.isInteger(raw['portainerPort']) &&
-      raw['portainerPort'] >= 1 &&
-      raw['portainerPort'] <= 65535
-        ? raw['portainerPort']
-        : DEFAULT_PORT
-    const scheme =
-      typeof raw['portainerScheme'] === 'string' && VALID_SCHEMES.has(raw['portainerScheme'])
-        ? (raw['portainerScheme'] as PortainerScheme)
-        : DEFAULT_SCHEME
-    const allowSelfSigned =
-      typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
-    return { portainerHost: host, portainerPort: port, portainerScheme: scheme, allowSelfSigned }
-  }
 
   const plugin: Plugin = {
     id: PLUGIN_ID,
     name: PLUGIN_NAME,
-    description: 'Embeds Portainer CE container management as a webapp in SignalK',
+    description: 'General reverse proxy — embed any web application as a webapp in SignalK',
 
     start(config: object, _restart: (newConfiguration: object) => void): void {
-      currentConfig = parseConfig(config)
-      const target = buildTarget(currentConfig)
-
-      proxy = createProxyMiddleware({
-        target,
-        changeOrigin: true,
-        ws: false,
-        secure: !(currentConfig.portainerScheme === 'https' && currentConfig.allowSelfSigned),
-        on: {
-          proxyReq(proxyReq, req): void {
-            const httpReq = req as IncomingMessage
-            const remoteAddress = httpReq.socket?.remoteAddress ?? ''
-            proxyReq.setHeader('X-Real-IP', remoteAddress)
-            const existing = httpReq.headers['x-forwarded-for']
-            const forwarded = existing ? `${String(existing)}, ${remoteAddress}` : remoteAddress
-            proxyReq.setHeader('X-Forwarded-For', forwarded)
-            const incomingProto = httpReq.headers['x-forwarded-proto']
-            const rawProto = typeof incomingProto === 'string' ? incomingProto : (incomingProto?.[0] ?? '')
-            const proto =
-              rawProto.split(',')[0]?.trim() ||
-              ((httpReq.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
-            proxyReq.setHeader('X-Forwarded-Proto', proto)
-          },
-          error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
-            app.error(`Portainer proxy error: ${err.message}`)
-            if (res instanceof Socket) {
-              res.destroy()
-              return
-            }
-            if (!res.headersSent) {
-              res.writeHead(502, { 'Content-Type': 'application/json' })
-            }
-            res.end(JSON.stringify({ error: 'Portainer is not reachable' }))
-          },
-        },
+      currentApps = parseConfig(config, (i, err) => {
+        app.error(`Skipping app at config index ${i}: ${String(err)}`)
       })
+      started = true
 
-      if (app.server && proxy.upgrade) {
-        const proxyUpgrade = proxy.upgrade.bind(proxy)
+      proxies = currentApps.map((appConfig) =>
+        createProxyMiddleware({
+          target: buildTarget(appConfig),
+          changeOrigin: true,
+          ws: false,
+          secure: !(appConfig.scheme === 'https' && appConfig.allowSelfSigned),
+          on: {
+            proxyReq(proxyReq, req): void {
+              const remoteAddress = req.socket?.remoteAddress ?? ''
+              proxyReq.setHeader('X-Real-IP', remoteAddress)
+              const existing = req.headers['x-forwarded-for']
+              const forwarded = existing
+                ? `${String(existing)}, ${remoteAddress}`
+                : remoteAddress
+              proxyReq.setHeader('X-Forwarded-For', forwarded)
+              const incomingProto = req.headers['x-forwarded-proto']
+              const rawProto =
+                typeof incomingProto === 'string'
+                  ? incomingProto
+                  : (incomingProto?.[0] ?? '')
+              const proto =
+                rawProto.split(',')[0]?.trim() ||
+                ((req.socket as { encrypted?: boolean }).encrypted ? 'https' : 'http')
+              proxyReq.setHeader('X-Forwarded-Proto', proto)
+            },
+            error(err: Error, _req: IncomingMessage, res: ServerResponse | Socket): void {
+              app.error(`Web proxy error: ${err.message}`)
+              if (res instanceof Socket) {
+                res.destroy()
+                return
+              }
+              if (!res.headersSent) {
+                res.writeHead(502, { 'Content-Type': 'application/json' })
+              }
+              res.end(JSON.stringify({ error: 'Application is not reachable' }))
+            },
+          },
+        }),
+      )
+
+      if (app.server && proxies.length > 0) {
+        // Forward WebSocket upgrades to the correct per-app proxy.
+        // ws:false above means http-proxy-middleware does NOT auto-intercept
+        // upgrades; we dispatch manually so only our plugin paths are affected.
         upgradeHandler = (req: IncomingMessage, socket: Socket, head: Buffer): void => {
-          if (req.url?.startsWith(PLUGIN_PATH_PREFIX)) {
-            stripInvalidHeaders(req)
-            // Strip plugin path prefix (and optional /proxy subpath) so
-            // the upstream server receives the correct resource path.
-            let path = req.url.substring(PLUGIN_PATH_PREFIX.length)
-            if (path.startsWith(PROXY_SUBPATH)) {
-              path = path.substring(PROXY_SUBPATH.length)
-            }
-            req.url = path || '/'
-            proxyUpgrade(req, socket, head)
-          }
+          const prefix = `${PLUGIN_PATH_PREFIX}${PROXY_SUBPATH}/`
+          if (!req.url?.startsWith(prefix)) return
+          const rest = req.url.substring(prefix.length) // e.g. "0/api/websocket/exec"
+          const slash = rest.indexOf('/')
+          const indexStr = slash >= 0 ? rest.substring(0, slash) : rest
+          if (!/^\d+$/.test(indexStr)) return
+          const index = Number(indexStr)
+          if (index >= proxies.length) return
+          const targetProxy = proxies[index]
+          if (!targetProxy) return
+          const proxyUpgrade = targetProxy.upgrade
+          if (!proxyUpgrade) return
+          stripInvalidHeaders(req)
+          req.url = slash >= 0 ? rest.substring(slash) : '/'
+          proxyUpgrade.call(targetProxy, req, socket, head)
         }
         app.server.on('upgrade', upgradeHandler)
       }
@@ -158,71 +214,87 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
         app.server.removeListener('upgrade', upgradeHandler)
       }
       upgradeHandler = null
-      proxy = null
-      currentConfig = null
+      proxies = []
+      currentApps = []
+      started = false
     },
 
     registerWithRouter(router: IRouter): void {
-      const handler = (req: Request, res: Response, next: () => void): void => {
-        stripInvalidHeaders(req as unknown as IncomingMessage)
-        if (proxy) {
-          ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
-        } else {
-          res.status(503).json({ error: 'Plugin is not started' })
-        }
+      // List configured apps — consumed by the React UI on load.
+      router.get('/apps', (_req: Request, res: Response): void => {
+        const list = currentApps.map((a, i) => ({ index: i, name: a.name }))
+        res.json(list)
+      })
+
+      // Register a fixed set of per-app proxy slots.
+      // SignalK calls registerWithRouter once at server start (before start()),
+      // so we pre-register MAX_APP_SLOTS slots; slots without a running proxy
+      // return 503 until start() is called with matching config.
+      for (let i = 0; i < MAX_APP_SLOTS; i++) {
+        const idx = i
+        router.use(
+          `${PROXY_SUBPATH}/${idx}`,
+          (req: Request, res: Response, next: () => void): void => {
+            stripInvalidHeaders(req as unknown as IncomingMessage)
+            const proxy = proxies[idx]
+            if (proxy) {
+              ;(proxy as (req: Request, res: Response, next: () => void) => void)(req, res, next)
+            } else if (started) {
+              res.status(404).json({ error: `No app configured at slot ${idx}` })
+            } else {
+              res.status(503).json({ error: 'Plugin is not started' })
+            }
+          },
+        )
       }
-      // Mount at /proxy first — the iframe loads from here to avoid
-      // the reserved GET /plugins/<id> endpoint.  Express strips the
-      // /proxy prefix automatically so the proxy sees the correct path.
-      router.use(PROXY_SUBPATH, handler)
-      // Catch-all for sub-resource requests (CSS, JS, API calls) that
-      // Portainer references with paths relative to the plugin root.
-      router.use('/', handler)
     },
 
     schema() {
       return {
         type: 'object' as const,
-        title: 'Portainer CE Configuration',
-        description: 'Configure the connection to your Portainer CE instance',
+        title: 'Web Application Proxy Configuration',
+        description: 'Configure one or more web applications to embed in SignalK',
         properties: {
-          portainerScheme: {
-            type: 'string' as const,
-            title: 'Portainer Scheme',
-            description: 'Protocol to use when connecting to Portainer (http or https)',
-            default: DEFAULT_SCHEME,
-            enum: ['http', 'https'],
-          },
-          portainerHost: {
-            type: 'string' as const,
-            title: 'Portainer Host',
-            description: 'Hostname or IP address of the Portainer instance',
-            default: DEFAULT_HOST,
-          },
-          portainerPort: {
-            type: 'integer' as const,
-            title: 'Portainer Port',
-            description: 'Port number of the Portainer instance',
-            default: DEFAULT_PORT,
-            minimum: 1,
-            maximum: 65535,
-          },
-          allowSelfSigned: {
-            type: 'boolean' as const,
-            title: 'Allow Self-Signed Certificates',
-            description:
-              'Accept self-signed TLS certificates when connecting to Portainer over HTTPS',
-            default: false,
+          apps: {
+            type: 'array' as const,
+            title: 'Web Applications',
+            description: 'List of web applications to proxy',
+            items: {
+              type: 'object' as const,
+              title: 'Application',
+              required: ['url'] as const,
+              properties: {
+                name: {
+                  type: 'string' as const,
+                  title: 'Name',
+                  description: 'Display name shown in the app selector',
+                  default: 'My App',
+                },
+                url: {
+                  type: 'string' as const,
+                  title: 'Application URL',
+                  description:
+                    'Full URL of the application including protocol, host, port, and optional base path — e.g. http://192.168.1.100:9000 or https://myapp.local:8443/admin',
+                  default: 'http://127.0.0.1:80',
+                },
+                allowSelfSigned: {
+                  type: 'boolean' as const,
+                  title: 'Allow Self-Signed Certificates',
+                  description: 'Accept self-signed TLS certificates (HTTPS only)',
+                  default: false,
+                },
+              },
+            },
           },
         },
       }
     },
 
     statusMessage(): string {
-      if (currentConfig) {
-        return `Proxying to ${buildTarget(currentConfig)}`
-      }
-      return 'Not started'
+      if (!started) return 'Not started'
+      if (currentApps.length === 0) return 'No apps configured'
+      const targets = currentApps.map((a) => buildTarget(a)).join(', ')
+      return `Proxying to: ${targets}`
     },
   }
 

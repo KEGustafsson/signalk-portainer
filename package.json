@@ -1,18 +1,17 @@
 {
-  "name": "signalk-portainer",
+  "name": "signalk-web-proxy",
   "version": "1.0.0",
-  "description": "SignalK embedded webapp plugin for Portainer CE container management",
+  "description": "SignalK embedded webapp plugin — general reverse proxy for web applications",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "signalk": {
-    "displayName": "Portainer CE"
+    "displayName": "Web Application Proxy"
   },
   "keywords": [
     "signalk-node-server-plugin",
     "signalk-embeddable-webapp",
-    "docker",
-    "portainer",
-    "containers"
+    "proxy",
+    "webapp"
   ],
   "scripts": {
     "build": "npm run build:plugin && npm run build:ui",
