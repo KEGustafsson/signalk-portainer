@@ -318,7 +318,14 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                     stream.on('end', () => {
                       const html = Buffer.concat(chunks).toString('utf-8')
                       const script = buildRewriteScript(proxyPathPrefix)
-                      const rewritten = html.replace(/<head[^>]*>/i, (m) => m + script)
+                      const injected = html.replace(/<head[^>]*>/i, (m) => m + script)
+                      // Rewrite absolute-path src/href/action attributes so static assets
+                      // and form actions route through the proxy instead of hitting the
+                      // host root.  Protocol-relative URLs (//…) are left untouched.
+                      const rewritten = injected.replace(
+                        /((?:src|href|action)=["'])\/(?!\/)/gi,
+                        `$1${proxyPathPrefix}/`,
+                      )
                       const buf = Buffer.from(rewritten, 'utf-8')
                       const headers = { ...proxyRes.headers }
                       delete headers['content-encoding'] // we decompressed
