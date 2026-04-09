@@ -36,7 +36,7 @@ type ProxyReqFn = (proxyReq: { setHeader: jest.Mock }, req: unknown) => void
 
 /** Extracts the proxyReq handler from the most recent createProxyMiddleware call. */
 function extractProxyReqHandler(): ProxyReqFn {
-  const options = (mockCreateProxyMiddleware.mock.calls[0] as [Record<string, unknown>])[0]
+  const options = (mockCreateProxyMiddleware.mock.calls.at(-1) as [Record<string, unknown>])[0]
   return (options['on'] as Record<string, unknown>)['proxyReq'] as ProxyReqFn
 }
 
@@ -395,11 +395,18 @@ describe('signalk-web-proxy plugin', () => {
     })
 
     it('does not set proxyTimeout when timeout is 0', () => {
-      plugin.start(oneApp(), jest.fn()) // oneApp has no timeout field → defaults to 0
+      plugin.start(oneApp({ timeout: 0 }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['proxyTimeout']).toBeUndefined()
+    })
+
+    it('skips app when timeout is negative', () => {
+      plugin.start(oneApp({ timeout: -100 }), jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('timeout'))
     })
 
     it('floors fractional timeout values', () => {

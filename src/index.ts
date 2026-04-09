@@ -110,7 +110,10 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
   const rawTimeout = raw['timeout']
-  const timeout = typeof rawTimeout === 'number' && rawTimeout >= 0 ? Math.floor(rawTimeout) : 0
+  if (rawTimeout !== undefined && (typeof rawTimeout !== 'number' || rawTimeout < 0)) {
+    throw new Error(`Invalid timeout at index ${index}: must be a non-negative number`)
+  }
+  const timeout = typeof rawTimeout === 'number' ? Math.floor(rawTimeout) : 0
 
   return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned, timeout }
 }
@@ -300,6 +303,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   description:
                     'Milliseconds to wait for the target to respond before returning a 502. 0 disables the timeout.',
                   default: 0,
+                  minimum: 0,
                 },
               },
             },

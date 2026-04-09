@@ -43,6 +43,7 @@ After installation, configure the plugin in the SignalK admin UI:
 | **Name**                           | Display name shown in the app selector                                               | `My App`             |
 | **Application URL**                | URL with protocol and host required; port is optional (defaults to `80` for http, `443` for https); base path is optional — e.g. `http://192.168.1.100:9000`, `https://myapp.local/admin` | `http://127.0.0.1` |
 | **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)                                            | `false`              |
+| **Timeout (ms)**                   | `apps[].timeout` — milliseconds to wait for the target before returning a 502. `0` disables the timeout. E.g. `5000` for 5 s. | `0` |
 
 5. Click **Submit** to save
 
