@@ -12,18 +12,16 @@ type AppScheme = 'http' | 'https'
 
 interface AppConfig {
   name: string
+  scheme: AppScheme
   host: string
   port: number
-  scheme: AppScheme
+  path: string          // base path from URL, e.g. '/' or '/admin'
   allowSelfSigned: boolean
 }
 
 const PLUGIN_ID = 'signalk-web-proxy'
 const PLUGIN_NAME = 'Web Application Proxy'
 
-const DEFAULT_HOST = '127.0.0.1'
-const DEFAULT_PORT = 80
-const DEFAULT_SCHEME: AppScheme = 'http'
 const VALID_SCHEMES = new Set<string>(['http', 'https'])
 
 const HOST_PATTERN = /^[a-zA-Z0-9._-]+$/
@@ -60,48 +58,53 @@ function isValidHost(host: string): boolean {
 }
 
 function buildTarget(appConfig: AppConfig): string {
-  // Validate via URL constructor, then rebuild explicitly so the port is
-  // always present (url.origin strips default ports like 80 and 443).
-  const url = new URL(`${appConfig.scheme}://${appConfig.host}:${String(appConfig.port)}`)
-  if (url.username || url.password || url.pathname !== '/') {
-    throw new Error('Invalid app host configuration')
-  }
-  return `${url.protocol}//${url.hostname}:${String(appConfig.port)}`
+  // Strip trailing slash from path so node-http-proxy doesn't produce double-slashes.
+  // A root path '/' becomes '' so the target is scheme://host:port with no path suffix.
+  const path = appConfig.path.replace(/\/$/, '')
+  return `${appConfig.scheme}://${appConfig.host}:${String(appConfig.port)}${path}`
 }
 
 function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig {
-  // Host: absent/empty → DEFAULT_HOST; non-empty but invalid → throw
-  const rawHost = typeof raw['host'] === 'string' ? raw['host'] : ''
-  const normalizedHost = normalizeHost(rawHost)
-  let host: string
-  if (normalizedHost.length === 0) {
-    host = DEFAULT_HOST
-  } else if (!isValidHost(rawHost)) {
-    throw new Error(`Invalid host at index ${index}: "${rawHost}"`)
-  } else {
-    host = normalizedHost
+  const rawUrl = typeof raw['url'] === 'string' ? raw['url'].trim() : ''
+  if (rawUrl.length === 0) {
+    throw new Error(`Missing URL at index ${index}`)
   }
 
-  // Port: absent/wrong type → DEFAULT_PORT; number but invalid range → throw
-  const rawPort = raw['port']
-  let port: number
-  if (rawPort === undefined || rawPort === null || typeof rawPort !== 'number') {
-    port = DEFAULT_PORT
-  } else if (!Number.isInteger(rawPort) || rawPort < 1 || rawPort > 65535) {
-    throw new Error(`Invalid port at index ${index}: ${String(rawPort)}`)
-  } else {
-    port = rawPort
+  let parsed: URL
+  try {
+    parsed = new URL(rawUrl)
+  } catch {
+    throw new Error(`Invalid URL at index ${index}: "${rawUrl}"`)
   }
 
-  const scheme =
-    typeof raw['scheme'] === 'string' && VALID_SCHEMES.has(raw['scheme'])
-      ? (raw['scheme'] as AppScheme)
-      : DEFAULT_SCHEME
+  // Only http and https are supported
+  const scheme = parsed.protocol.replace(/:$/, '')
+  if (!VALID_SCHEMES.has(scheme)) {
+    throw new Error(`Unsupported scheme at index ${index}: "${scheme}"`)
+  }
+
+  // Reject embedded credentials — they would be forwarded to the target
+  if (parsed.username || parsed.password) {
+    throw new Error(`URL must not contain credentials at index ${index}`)
+  }
+
+  // Validate hostname (blocks cloud-metadata IPs and unusual characters)
+  if (!isValidHost(parsed.hostname)) {
+    throw new Error(`Invalid host at index ${index}: "${parsed.hostname}"`)
+  }
+  const host = normalizeHost(parsed.hostname)
+
+  // URL.port is '' when the URL omits the port; fall back to the scheme default
+  const port = parsed.port ? Number(parsed.port) : (scheme === 'https' ? 443 : 80)
+
+  const path = parsed.pathname || '/'
+
   const allowSelfSigned =
     typeof raw['allowSelfSigned'] === 'boolean' ? raw['allowSelfSigned'] : false
   const rawName = typeof raw['name'] === 'string' ? raw['name'].trim() : ''
   const name = rawName.length > 0 ? rawName : `App ${index}`
-  return { name, host, port, scheme, allowSelfSigned }
+
+  return { name, scheme: scheme as AppScheme, host, port, path, allowSelfSigned }
 }
 
 function parseConfig(
@@ -259,6 +262,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
             items: {
               type: 'object' as const,
               title: 'Application',
+              required: ['url'] as const,
               properties: {
                 name: {
                   type: 'string' as const,
@@ -266,26 +270,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   description: 'Display name shown in the app selector',
                   default: 'My App',
                 },
-                scheme: {
+                url: {
                   type: 'string' as const,
-                  title: 'Scheme',
-                  description: 'Protocol to use when connecting to the application',
-                  default: DEFAULT_SCHEME,
-                  enum: ['http', 'https'],
-                },
-                host: {
-                  type: 'string' as const,
-                  title: 'Host',
-                  description: 'Hostname or IP address of the application',
-                  default: DEFAULT_HOST,
-                },
-                port: {
-                  type: 'integer' as const,
-                  title: 'Port',
-                  description: 'Port number of the application',
-                  default: DEFAULT_PORT,
-                  minimum: 1,
-                  maximum: 65535,
+                  title: 'Application URL',
+                  description:
+                    'Full URL of the application including protocol, host, port, and optional base path — e.g. http://192.168.1.100:9000 or https://myapp.local:8443/admin',
+                  default: 'http://127.0.0.1:80',
                 },
                 allowSelfSigned: {
                   type: 'boolean' as const,

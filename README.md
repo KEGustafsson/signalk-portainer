@@ -38,13 +38,11 @@ After installation, configure the plugin in the SignalK admin UI:
 3. Enable the plugin
 4. Add one or more applications under **Web Applications**:
 
-| Field                              | Description                                          | Default     |
-| ---------------------------------- | ---------------------------------------------------- | ----------- |
-| **Name**                           | Display name shown in the app selector               | `My App`    |
-| **Scheme**                         | Protocol (`http` or `https`)                         | `http`      |
-| **Host**                           | Hostname or IP address of the application            | `127.0.0.1` |
-| **Port**                           | Port number of the application                       | `80`        |
-| **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)            | `false`     |
+| Field                              | Description                                                                          | Default              |
+| ---------------------------------- | ------------------------------------------------------------------------------------ | -------------------- |
+| **Name**                           | Display name shown in the app selector                                               | `My App`             |
+| **Application URL**                | Full URL including protocol, host, port, and optional base path (e.g. `http://192.168.1.100:9000` or `https://myapp.local:8443/admin`) | `http://127.0.0.1:80` |
+| **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)                                            | `false`              |
 
 5. Click **Submit** to save
 
@@ -55,16 +53,12 @@ After installation, configure the plugin in the SignalK admin UI:
   "apps": [
     {
       "name": "Portainer CE",
-      "scheme": "https",
-      "host": "127.0.0.1",
-      "port": 9443,
+      "url": "https://127.0.0.1:9443",
       "allowSelfSigned": true
     },
     {
       "name": "Grafana",
-      "scheme": "http",
-      "host": "127.0.0.1",
-      "port": 3000
+      "url": "http://127.0.0.1:3000"
     }
   ]
 }
@@ -146,7 +140,7 @@ docker run -d \
 ### Application not loading (503 error)
 
 - Ensure the target application is running and reachable from the SignalK host
-- Verify the host, port, and scheme settings
+- Verify the application URL in the plugin settings
 - Check that the plugin is enabled in SignalK Plugin Config
 
 ### Connection refused

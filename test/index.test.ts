@@ -29,7 +29,7 @@ const mockApp = { error: mockError } as unknown as ServerAPIWithServer
 
 /** Minimal valid config with one app entry */
 function oneApp(overrides: Record<string, unknown> = {}): object {
-  return { apps: [{ name: 'Test App', host: 'localhost', port: 9000, ...overrides }] }
+  return { apps: [{ name: 'Test App', url: 'http://localhost:9000', ...overrides }] }
 }
 
 describe('signalk-web-proxy plugin', () => {
@@ -73,7 +73,7 @@ describe('signalk-web-proxy plugin', () => {
       expect(properties['apps']!['type']).toBe('array')
     })
 
-    it('apps items define name, scheme, host, port, and allowSelfSigned', () => {
+    it('apps items define name, url, and allowSelfSigned', () => {
       const schema = typeof plugin.schema === 'function' ? plugin.schema() : plugin.schema
       const properties = (schema as Record<string, unknown>)['properties'] as Record<
         string,
@@ -82,12 +82,7 @@ describe('signalk-web-proxy plugin', () => {
       const items = properties['apps']!['items'] as Record<string, unknown>
       const itemProps = items['properties'] as Record<string, Record<string, unknown>>
       expect(itemProps['name']!['type']).toBe('string')
-      expect(itemProps['scheme']!['enum']).toEqual(['http', 'https'])
-      expect(itemProps['host']!['type']).toBe('string')
-      expect(itemProps['host']!['default']).toBe('127.0.0.1')
-      expect(itemProps['port']!['type']).toBe('integer')
-      expect(itemProps['port']!['minimum']).toBe(1)
-      expect(itemProps['port']!['maximum']).toBe(65535)
+      expect(itemProps['url']!['type']).toBe('string')
       expect(itemProps['allowSelfSigned']!['type']).toBe('boolean')
       expect(itemProps['allowSelfSigned']!['default']).toBe(false)
     })
@@ -115,8 +110,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(
         {
           apps: [
-            { name: 'App A', host: 'localhost', port: 9000 },
-            { name: 'App B', host: '192.168.1.1', port: 3000 },
+            { name: 'App A', url: 'http://localhost:9000' },
+            { name: 'App B', url: 'http://192.168.1.1:3000' },
           ],
         },
         jest.fn(),
@@ -130,12 +125,20 @@ describe('signalk-web-proxy plugin', () => {
       expect(targets).toContain('http://192.168.1.1:3000')
     })
 
-    it('uses custom host and port from config', () => {
-      plugin.start(oneApp({ host: '192.168.1.100', port: 9443 }), jest.fn())
+    it('uses custom host and port from URL', () => {
+      plugin.start(oneApp({ url: 'http://192.168.1.100:9443' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://192.168.1.100:9443')
+    })
+
+    it('includes base path from URL in target', () => {
+      plugin.start(oneApp({ url: 'http://localhost:9000/admin' }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://localhost:9000/admin')
     })
 
     it('creates no proxies when apps array is empty', () => {
@@ -150,35 +153,39 @@ describe('signalk-web-proxy plugin', () => {
       expect(plugin.statusMessage?.()).toBe('No apps configured')
     })
 
-    it('uses DEFAULT_HOST when host field is absent', () => {
-      plugin.start({ apps: [{ name: 'X', port: 9000 }] }, jest.fn())
+    it('skips app when url field is absent', () => {
+      plugin.start({ apps: [{ name: 'X' }] }, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('index 0'))
     })
 
-    it('uses DEFAULT_HOST when host is an empty string', () => {
-      plugin.start({ apps: [{ name: 'X', host: '', port: 9000 }] }, jest.fn())
+    it('skips app when url is an empty string', () => {
+      plugin.start({ apps: [{ name: 'X', url: '' }] }, jest.fn())
 
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://127.0.0.1:9000')
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('uses DEFAULT_PORT when port field is absent', () => {
-      plugin.start({ apps: [{ name: 'X', host: 'localhost' }] }, jest.fn())
+    it('skips app when url is not parseable', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'not a url' }] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('infers port 80 when http URL omits the port', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'http://localhost' }] }, jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
       expect(options['target']).toBe('http://localhost:80')
     })
 
-    it('skips app and logs error when port is out of range', () => {
-      plugin.start({ apps: [{ name: 'X', host: 'localhost', port: -1 }] }, jest.fn())
+    it('infers port 443 when https URL omits the port', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'https://myapp.local' }] }, jest.fn())
 
-      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
-      expect(mockError).toHaveBeenCalledWith(expect.stringContaining('index 0'))
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('https://myapp.local:443')
     })
 
     it('creates no proxies when apps key is missing', () => {
@@ -187,65 +194,64 @@ describe('signalk-web-proxy plugin', () => {
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
-    it('skips app when host has URL metacharacters', () => {
-      plugin.start(oneApp({ host: 'evil.com/path' }), jest.fn())
+    it('skips app when URL scheme is not http or https', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'ftp://localhost:9000' }] }, jest.fn())
+
+      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('skips app when URL contains embedded credentials', () => {
+      plugin.start({ apps: [{ name: 'X', url: 'http://user:pass@evil.com:9000' }] }, jest.fn())
 
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
     it('skips app when host is a cloud metadata IP', () => {
-      plugin.start(oneApp({ host: '169.254.169.254' }), jest.fn())
+      plugin.start(oneApp({ url: 'http://169.254.169.254:9000' }), jest.fn())
 
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
-    })
-
-    it('skips app when host has auth credentials', () => {
-      plugin.start(oneApp({ host: 'user:pass@evil.com' }), jest.fn())
-
-      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
-    })
-
-    it('normalizes host to lowercase', () => {
-      plugin.start(oneApp({ host: 'MyHost.Local' }), jest.fn())
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://myhost.local:9000')
-    })
-
-    it('strips trailing dots from host', () => {
-      plugin.start(oneApp({ host: 'myhost.local.' }), jest.fn())
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://myhost.local:9000')
     })
 
     it('skips app when host is cloud metadata with trailing dot', () => {
-      plugin.start(oneApp({ host: '169.254.169.254.' }), jest.fn())
+      plugin.start(oneApp({ url: 'http://169.254.169.254.:9000' }), jest.fn())
 
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
     })
 
     it('skips app when host is cloud metadata with mixed case', () => {
-      plugin.start(oneApp({ host: 'Metadata.Google.Internal' }), jest.fn())
+      plugin.start(oneApp({ url: 'http://Metadata.Google.Internal:9000' }), jest.fn())
 
       expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
+    })
+
+    it('normalizes host to lowercase', () => {
+      plugin.start(oneApp({ url: 'http://MyHost.Local:9000' }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://myhost.local:9000')
+    })
+
+    it('strips trailing dot from host', () => {
+      plugin.start(oneApp({ url: 'http://myhost.local.:9000' }), jest.fn())
+
+      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
+      const options = callArgs[0] as Record<string, unknown>
+      expect(options['target']).toBe('http://myhost.local:9000')
     })
 
     it('caps apps at MAX_APP_SLOTS and ignores entries beyond the limit', () => {
       const manyApps = Array.from({ length: 20 }, (_, i) => ({
         name: `App ${i}`,
-        host: 'localhost',
-        port: 9000 + i,
+        url: `http://localhost:${9000 + i}`,
       }))
       plugin.start({ apps: manyApps }, jest.fn())
 
       expect(mockCreateProxyMiddleware).toHaveBeenCalledTimes(16)
     })
 
-    it('uses https scheme when configured', () => {
-      plugin.start(oneApp({ port: 9443, scheme: 'https' }), jest.fn())
+    it('uses https scheme when URL uses https', () => {
+      plugin.start(oneApp({ url: 'https://localhost:9443' }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -254,7 +260,7 @@ describe('signalk-web-proxy plugin', () => {
     })
 
     it('sets secure to false when allowSelfSigned is true with https', () => {
-      plugin.start(oneApp({ port: 9443, scheme: 'https', allowSelfSigned: true }), jest.fn())
+      plugin.start(oneApp({ url: 'https://localhost:9443', allowSelfSigned: true }), jest.fn())
 
       const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
       const options = callArgs[0] as Record<string, unknown>
@@ -381,20 +387,6 @@ describe('signalk-web-proxy plugin', () => {
       expect(options['secure']).toBe(true)
     })
 
-    it('falls back to http for invalid scheme values', () => {
-      plugin.start(oneApp({ scheme: 'ftp' }), jest.fn())
-
-      const callArgs = mockCreateProxyMiddleware.mock.calls[0] as unknown[]
-      const options = callArgs[0] as Record<string, unknown>
-      expect(options['target']).toBe('http://localhost:9000')
-    })
-
-    it('skips app when port is a non-integer number', () => {
-      plugin.start(oneApp({ port: 9000.5 }), jest.fn())
-
-      expect(mockCreateProxyMiddleware).not.toHaveBeenCalled()
-    })
-
     it('cleans up on stop', () => {
       plugin.start(oneApp(), jest.fn())
       void plugin.stop()
@@ -413,16 +405,21 @@ describe('signalk-web-proxy plugin', () => {
     })
 
     it('returns target info after start with one app', () => {
-      plugin.start(oneApp({ host: 'myhost', port: 8080 }), jest.fn())
+      plugin.start(oneApp({ url: 'http://myhost:8080' }), jest.fn())
       expect(plugin.statusMessage?.()).toBe('Proxying to: http://myhost:8080')
+    })
+
+    it('returns target info including base path when url has a path', () => {
+      plugin.start(oneApp({ url: 'http://myhost:8080/admin' }), jest.fn())
+      expect(plugin.statusMessage?.()).toBe('Proxying to: http://myhost:8080/admin')
     })
 
     it('returns all targets after start with multiple apps', () => {
       plugin.start(
         {
           apps: [
-            { name: 'A', host: 'host-a', port: 8080 },
-            { name: 'B', host: 'host-b', port: 3000 },
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
           ],
         },
         jest.fn(),
@@ -477,8 +474,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(
         {
           apps: [
-            { name: 'Portainer', host: 'localhost', port: 9000 },
-            { name: 'Grafana', host: 'localhost', port: 3000 },
+            { name: 'Portainer', url: 'http://localhost:9000' },
+            { name: 'Grafana', url: 'http://localhost:3000' },
           ],
         },
         jest.fn(),
@@ -567,8 +564,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(
         {
           apps: [
-            { name: 'A', host: 'host-a', port: 8080 },
-            { name: 'B', host: 'host-b', port: 3000 },
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
           ],
         },
         jest.fn(),
@@ -636,7 +633,10 @@ describe('signalk-web-proxy plugin', () => {
 
     beforeEach(() => {
       mockServer = new EventEmitter()
-      appWithServer = { server: mockServer as unknown as Server } as ServerAPIWithServer
+      appWithServer = {
+        server: mockServer as unknown as Server,
+        error: jest.fn(),
+      } as unknown as ServerAPIWithServer
       dummyProxy = jest.fn() as MockProxyMiddleware
       dummyProxy.upgrade = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
@@ -677,8 +677,8 @@ describe('signalk-web-proxy plugin', () => {
       plugin.start(
         {
           apps: [
-            { name: 'A', host: 'host-a', port: 8080 },
-            { name: 'B', host: 'host-b', port: 3000 },
+            { name: 'A', url: 'http://host-a:8080' },
+            { name: 'B', url: 'http://host-b:3000' },
           ],
         },
         jest.fn(),
