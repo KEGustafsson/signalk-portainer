@@ -5,6 +5,7 @@ import AppPanel from '../src/components/AppPanel'
 interface AppInfo {
   index: number
   name: string
+  appPath?: string
 }
 
 function mockFetchApps(apps: AppInfo[]): void {
@@ -96,6 +97,13 @@ describe('AppPanel', () => {
       render(<AppPanel />)
       const iframe = await screen.findByTitle('Portainer CE')
       expect(iframe).toHaveAttribute('referrerPolicy', 'no-referrer')
+    })
+
+    it('iframe uses appPath in src when available', async () => {
+      mockFetchApps([{ index: 0, name: 'Portainer CE', appPath: 'portainer' }])
+      render(<AppPanel />)
+      const iframe = await screen.findByTitle('Portainer CE')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/portainer/')
     })
 
     it('iframe has no border', async () => {

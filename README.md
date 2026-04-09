@@ -41,8 +41,10 @@ After installation, configure the plugin in the SignalK admin UI:
 | Field                              | Description                                                                          | Default              |
 | ---------------------------------- | ------------------------------------------------------------------------------------ | -------------------- |
 | **Name**                           | Display name shown in the app selector                                               | `My App`             |
+| **Proxy Path**                     | Custom path identifier (e.g. `portainer`). When set, the app is also accessible at `/plugins/signalk-web-proxy/proxy/<appPath>`. Must start with a letter; only letters, digits, and hyphens allowed. | _(none)_ |
 | **Application URL**                | URL with protocol and host required; port is optional (defaults to `80` for http, `443` for https); base path is optional — e.g. `http://192.168.1.100:9000`, `https://myapp.local/admin` | `http://127.0.0.1` |
 | **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)                                            | `false`              |
+| **Rewrite Absolute Paths**         | Inject a script into HTML responses that rewrites absolute API paths (e.g. `/api/auth`) so they route through the proxy. Enable for SPAs like Portainer or Grafana — eliminates the need for `--base-url` on the target container. | `false` |
 | **Timeout (ms)**                   | `apps[].timeout` — milliseconds to wait for the target before returning a 502. `0` disables the timeout. E.g. `5000` for 5 s. | `0` |
 
 5. Click **Submit** to save
@@ -54,12 +56,15 @@ After installation, configure the plugin in the SignalK admin UI:
   "apps": [
     {
       "name": "Portainer CE",
+      "appPath": "portainer",
       "url": "https://127.0.0.1:9443",
-      "allowSelfSigned": true
+      "allowSelfSigned": true,
+      "rewritePaths": true
     },
     {
       "name": "Grafana",
-      "url": "http://127.0.0.1:3000"
+      "url": "http://127.0.0.1:3000",
+      "rewritePaths": true
     }
   ]
 }
@@ -79,20 +84,24 @@ If only one application is configured, it loads automatically without requiring 
 
 ## Proxy URL structure
 
-Each application is accessible at:
+Each application is accessible by its numeric index:
 
 ```text
 /plugins/signalk-web-proxy/proxy/{index}/
 ```
 
-Where `{index}` is the zero-based position of the app in the `apps` array.
+If an `appPath` is configured, the app is also accessible at:
 
-| App | Proxy URL |
+```text
+/plugins/signalk-web-proxy/proxy/{appPath}/
+```
+
+| App | Proxy URLs |
 |-----|-----------|
-| First app (index 0)  | `/plugins/signalk-web-proxy/proxy/0/` |
-| Second app (index 1) | `/plugins/signalk-web-proxy/proxy/1/` |
+| First app (index 0, appPath `portainer`)  | `/plugins/signalk-web-proxy/proxy/0/` or `/plugins/signalk-web-proxy/proxy/portainer/` |
+| Second app (index 1, no appPath) | `/plugins/signalk-web-proxy/proxy/1/` |
 
-The list of configured apps (name + index) is also available as JSON:
+The list of configured apps (name, index, appPath) is also available as JSON:
 
 ```http
 GET /plugins/signalk-web-proxy/apps
@@ -102,7 +111,9 @@ GET /plugins/signalk-web-proxy/apps
 
 ### Portainer CE
 
-Portainer's frontend makes API calls using absolute paths (e.g. `POST /api/auth`). Without a base URL configured these bypass the proxy and fail. Start Portainer with the `--base-url` flag:
+Portainer's frontend makes API calls using absolute paths (e.g. `POST /api/auth`). Without path rewriting these requests bypass the proxy and hit the SignalK server, causing login to fail silently.
+
+**Fix:** Enable **Rewrite Absolute Paths** (`rewritePaths: true`) in the plugin config. The proxy automatically injects a script into HTML responses that rewrites absolute API paths through the proxy. No `--base-url` flag is needed on the Portainer container.
 
 ```bash
 # HTTPS (default for Portainer CE v2.9+)
@@ -112,8 +123,7 @@ docker run -d \
   --restart=always \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
-  portainer/portainer-ce:lts \
-  --base-url /plugins/signalk-web-proxy/proxy/0
+  portainer/portainer-ce:lts
 
 # HTTP (legacy / manually enabled)
 docker run -d \
@@ -123,11 +133,10 @@ docker run -d \
   -v /var/run/docker.sock:/var/run/docker.sock \
   -v portainer_data:/data \
   portainer/portainer-ce:lts \
-  --http-enabled \
-  --base-url /plugins/signalk-web-proxy/proxy/0
+  --http-enabled
 ```
 
-> Adjust `/proxy/0` to match the index of Portainer in your `apps` array.
+> The same applies to other SPAs like Grafana that use absolute API paths. Enable `rewritePaths` for any application where login or POST requests fail silently.
 
 ## Security considerations
 
@@ -152,7 +161,7 @@ docker run -d \
 
 ### Login or POST requests hang
 
-The application's frontend is making API calls with absolute paths that bypass the proxy. Configure the application to use the proxy subpath as a base URL (see **Portainer CE** section above).
+The application's frontend is making API calls with absolute paths that bypass the proxy. Enable **Rewrite Absolute Paths** (`rewritePaths: true`) in the plugin config for that app. This injects a script that rewrites `/api/...` calls to go through the proxy. See the **Portainer CE** section above.
 
 ### Container console/terminal not working (WebSocket)
 
