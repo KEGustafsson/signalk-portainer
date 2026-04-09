@@ -186,42 +186,69 @@ function resolveAppIndex(appId: string, apps: AppConfig[]): number {
 }
 
 /**
- * Build a <script> tag that patches fetch, XMLHttpRequest, and WebSocket so
- * absolute paths (e.g. POST /api/auth) are routed through the proxy instead
- * of hitting the SignalK server root.  Injected into HTML responses when
- * rewritePaths is enabled.
+ * Build a <script> tag that patches fetch, XMLHttpRequest, WebSocket,
+ * history.pushState/replaceState, and location.assign/replace so absolute
+ * paths (e.g. POST /api/auth, history.push('/dashboard')) are routed through
+ * the proxy instead of hitting the SignalK server root.  Injected into HTML
+ * responses when rewritePaths is enabled.
+ *
+ * appBasePath is the app's configured URL path (e.g. "/grafana" or "/").
+ * When the proxied app generates absolute URLs that include its own base path
+ * (e.g. "/grafana/d/..."), the normaliser strips that prefix before prepending
+ * the proxy path prefix — preventing double-prefixing like "/proxy/grafana/grafana/d/...".
  */
-function buildRewriteScript(proxyPathPrefix: string): string {
+function buildRewriteScript(proxyPathPrefix: string, appBasePath: string): string {
   const prefix = JSON.stringify(proxyPathPrefix)
+  // Normalise: strip trailing slash; "/" becomes "" (no stripping needed).
+  const base = appBasePath === '/' ? '' : appBasePath.replace(/\/$/, '')
+  const baseJson = JSON.stringify(base)
   return (
     '<script data-signalk-web-proxy="path-rewrite">' +
     '(function(){' +
     `var P=${prefix};` +
-    // Helper: true for root-relative paths (/foo) but not protocol-relative (//host)
+    `var B=${baseJson};` +
+    // N: strip app base path prefix so we don't double-prefix (e.g. /grafana/d/... → /d/...)
+    'function N(s){if(B){if(s.indexOf(B+"/")===0)return s.slice(B.length);if(s===B)return "/"}return s}' +
+    // R: true for root-relative paths (/foo) but not protocol-relative (//host) or already-proxied
     "function R(s){return typeof s==='string'&&s.charAt(0)==='/'&&s.charAt(1)!=='/'&&s.indexOf(P)!==0}" +
     // --- fetch ---
     'var F=window.fetch;' +
     'window.fetch=function(u){' +
-    'if(R(u)){var a=[P+u];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);' +
+    'if(R(u)){var a=[P+N(u)];for(var i=1;i<arguments.length;i++)a.push(arguments[i]);' +
     'return F.apply(this,a)}' +
     'return F.apply(this,arguments)};' +
     // --- XMLHttpRequest ---
     'var X=XMLHttpRequest.prototype.open;' +
     'XMLHttpRequest.prototype.open=function(){' +
     'var a=[].slice.call(arguments);' +
-    'if(R(a[1]))a[1]=P+a[1];' +
+    'if(R(a[1]))a[1]=P+N(a[1]);' +
     'return X.apply(this,a)};' +
     // --- WebSocket ---
     'var W=window.WebSocket;if(W){' +
     'window.WebSocket=function(u,p){' +
     'if(R(u)){var l=window.location;' +
-    "u=(l.protocol==='https:'?'wss:':'ws:')+'//'+l.host+P+u}" +
+    "u=(l.protocol==='https:'?'wss:':'ws:')+'//'+l.host+P+N(u)}" +
     'return p!==undefined?new W(u,p):new W(u)};' +
     'window.WebSocket.prototype=W.prototype;' +
     'window.WebSocket.CONNECTING=W.CONNECTING;' +
     'window.WebSocket.OPEN=W.OPEN;' +
     'window.WebSocket.CLOSING=W.CLOSING;' +
     'window.WebSocket.CLOSED=W.CLOSED}' +
+    // --- history.pushState / replaceState ---
+    // Intercept SPA navigation so URL bar reflects the proxied path, not the
+    // bare app path.  Without this, pushState('/d/dashboard') would change the
+    // iframe URL to /d/dashboard on the SignalK origin — causing "Cannot GET".
+    'var H=window.history;if(H&&H.pushState){' +
+    'var OP=H.pushState.bind(H);' +
+    'var OR=H.replaceState.bind(H);' +
+    'H.pushState=function(s,t,u){if(R(u))u=P+N(u);return OP(s,t,u)};' +
+    'H.replaceState=function(s,t,u){if(R(u))u=P+N(u);return OR(s,t,u)};}' +
+    // --- window.location.assign / replace ---
+    // Catch hard-redirect style navigation (location.assign('/login')).
+    'try{var L=window.location;' +
+    'var LA=L.assign.bind(L);var LR=L.replace.bind(L);' +
+    'L.assign=function(u){if(R(u))u=P+N(u);return LA(u)};' +
+    'L.replace=function(u){if(R(u))u=P+N(u);return LR(u)};}catch(e){}' +
     '})()' +
     '</script>'
   )
@@ -317,14 +344,30 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                     })
                     stream.on('end', () => {
                       const html = Buffer.concat(chunks).toString('utf-8')
-                      const script = buildRewriteScript(proxyPathPrefix)
+                      const script = buildRewriteScript(proxyPathPrefix, appConfig.path)
                       const injected = html.replace(/<head[^>]*>/i, (m) => m + script)
                       // Rewrite absolute-path src/href/action attributes so static assets
                       // and form actions route through the proxy instead of hitting the
                       // host root.  Protocol-relative URLs (//…) are left untouched.
+                      // When the app has a configured base path (e.g. /grafana), strip it
+                      // from matching URLs before prepending the proxy prefix to prevent
+                      // double-prefixing (e.g. /grafana/d/... → /proxy/grafana/d/..., not
+                      // /proxy/grafana/grafana/d/...).
+                      const appPathBase =
+                        appConfig.path === '/' ? '' : appConfig.path.replace(/\/$/, '')
                       const rewritten = injected.replace(
-                        /((?:src|href|action)=["'])\/(?!\/)/gi,
-                        `$1${proxyPathPrefix}/`,
+                        /((?:src|href|action)=["'])(\/[^"']*)/gi,
+                        (match, attr: string, url: string) => {
+                          if (url.startsWith('//')) return match // protocol-relative
+                          if (url.startsWith(proxyPathPrefix)) return match // already proxied
+                          const normalizedUrl =
+                            appPathBase && url.startsWith(appPathBase + '/')
+                              ? url.slice(appPathBase.length)
+                              : appPathBase && url === appPathBase
+                                ? '/'
+                                : url
+                          return `${attr}${proxyPathPrefix}${normalizedUrl}`
+                        },
                       )
                       const buf = Buffer.from(rewritten, 'utf-8')
                       const headers = { ...proxyRes.headers }
