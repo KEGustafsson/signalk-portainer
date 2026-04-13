@@ -3,7 +3,11 @@ import type { IRouter, Request, Response } from 'express'
 import type { IncomingMessage, Server, ServerResponse } from 'http'
 import { Socket } from 'net'
 import { createBrotliDecompress, createGunzip, createInflate } from 'zlib'
-import { createProxyMiddleware, type RequestHandler } from 'http-proxy-middleware'
+import {
+  createProxyMiddleware,
+  fixRequestBody,
+  type RequestHandler,
+} from 'http-proxy-middleware'
 
 interface ServerAPIWithServer extends ServerAPI {
   server?: Server
@@ -249,6 +253,39 @@ function buildRewriteScript(proxyPathPrefix: string, appBasePath: string): strin
     'var LA=L.assign.bind(L);var LR=L.replace.bind(L);' +
     'L.assign=function(u){if(R(u))u=P+N(u);return LA(u)};' +
     'L.replace=function(u){if(R(u))u=P+N(u);return LR(u)};}catch(e){}' +
+    // --- Location.prototype.href setter ---
+    // Intercept location.href = '/path' so it navigates through the proxy.
+    // The getter is NOT overridden — Angular and other frameworks need the
+    // real pathname/href to match the rewritten <base> tag.
+    'try{var LP=Location.prototype;' +
+    'var hD=Object.getOwnPropertyDescriptor(LP,"href");' +
+    'if(hD&&hD.set){var hS=hD.set;' +
+    'Object.defineProperty(LP,"href",{get:hD.get,' +
+    'set:function(v){if(R(v))v=P+N(v);return hS.call(this,v)},' +
+    'configurable:true,enumerable:true})}' +
+    '}catch(e){}' +
+    // --- DOM MutationObserver ---
+    // Rewrite href/src/action attributes on dynamically added elements so
+    // frameworks (Angular, React) see proxy-prefixed URLs that match the
+    // rewritten <base> tag.  Without this, links rendered from JS data
+    // (e.g. navTree "/grafana/dashboards") escape the proxy.
+    // R() returns false for already-proxied values, preventing infinite loops
+    // when setAttribute triggers a new attribute mutation.
+    'function RW(el){' +
+    'if(el.nodeType!==1)return;' +
+    'var aa=["href","src","action"];' +
+    'for(var i=0;i<aa.length;i++){var v=el.getAttribute(aa[i]);if(v&&R(v))el.setAttribute(aa[i],P+N(v))}' +
+    'var ch=el.querySelectorAll?el.querySelectorAll("[href],[src],[action]"):[];' +
+    'for(var j=0;j<ch.length;j++){' +
+    'for(var k=0;k<aa.length;k++){var w=ch[j].getAttribute(aa[k]);if(w&&R(w))ch[j].setAttribute(aa[k],P+N(w))}' +
+    '}}' +
+    'var MO=window.MutationObserver;if(MO){' +
+    'new MO(function(ms){for(var i=0;i<ms.length;i++){var m=ms[i];' +
+    'if(m.type==="childList"){for(var j=0;j<m.addedNodes.length;j++)RW(m.addedNodes[j])}' +
+    'else if(m.type==="attributes"){var v=m.target.getAttribute(m.attributeName);' +
+    'if(v&&R(v))m.target.setAttribute(m.attributeName,P+N(v))}' +
+    '}}).observe(document.documentElement,{childList:true,subtree:true,' +
+    'attributes:true,attributeFilter:["href","src","action"]})}' +
     '})()' +
     '</script>'
   )
@@ -290,6 +327,12 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           ...(appConfig.rewritePaths ? { selfHandleResponse: true } : {}),
           on: {
             proxyReq(proxyReq, req): void {
+              // Re-stream the request body when an upstream body-parser
+              // (e.g. SignalK's global bodyParser.json()) has already
+              // consumed the raw body.  Without this, POST/PUT/PATCH
+              // requests (like Portainer's /api/auth login) arrive at
+              // the target with an empty body.
+              fixRequestBody(proxyReq, req)
               const remoteAddress = req.socket?.remoteAddress ?? ''
               proxyReq.setHeader('X-Real-IP', remoteAddress)
               const existing = req.headers['x-forwarded-for']
@@ -316,6 +359,25 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   ): void {
                     const ct = String(proxyRes.headers['content-type'] ?? '')
                     const status = proxyRes.statusCode ?? 200
+
+                    // Rewrite Location headers on redirects so the browser
+                    // follows through the proxy instead of hitting the host root.
+                    // e.g. "Location: /grafana/login" → "Location: /plugins/signalk-web-proxy/proxy/grafana/login"
+                    if (proxyRes.headers['location']) {
+                      const loc = String(proxyRes.headers['location'])
+                      // Only rewrite root-relative paths (not absolute URLs or protocol-relative)
+                      if (loc.charAt(0) === '/' && loc.charAt(1) !== '/' && !loc.startsWith(proxyPathPrefix)) {
+                        const appPathBase =
+                          appConfig.path === '/' ? '' : appConfig.path.replace(/\/$/, '')
+                        const normalizedLoc =
+                          appPathBase && loc.startsWith(appPathBase + '/')
+                            ? loc.slice(appPathBase.length)
+                            : appPathBase && loc === appPathBase
+                              ? '/'
+                              : loc
+                        proxyRes.headers['location'] = `${proxyPathPrefix}${normalizedLoc}`
+                      }
+                    }
 
                     if (!ct.includes('text/html')) {
                       // Stream non-HTML (SSE, assets, API responses) directly without buffering.

@@ -15,6 +15,7 @@ const mockCreateProxyMiddleware = jest.fn<MockProxyMiddleware, [options: Record<
 
 jest.mock('http-proxy-middleware', () => ({
   createProxyMiddleware: (options: Record<string, unknown>) => mockCreateProxyMiddleware(options),
+  fixRequestBody: jest.fn(),
 }))
 
 interface ServerAPIWithServer extends ServerAPI {
@@ -1364,6 +1365,115 @@ describe('signalk-web-proxy plugin', () => {
       )
     })
 
+    it('rewrites root-relative Location header on redirect responses', () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PassThrough } = require('stream') as typeof import('stream')
+      const proxyResStream = new PassThrough()
+      const headers: Record<string, string> = {
+        'content-type': 'text/html',
+        location: '/login',
+      }
+      Object.assign(proxyResStream, { headers, statusCode: 302 })
+      const mockRes = new PassThrough() as unknown as {
+        writeHead: jest.Mock
+        headersSent: boolean
+      }
+      mockRes.writeHead = jest.fn()
+      Object.assign(mockRes, { headersSent: false })
+
+      handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
+
+      expect(headers['location']).toBe('/plugins/signalk-web-proxy/proxy/0/login')
+    })
+
+    it('strips app base path from Location header before prepending proxy prefix', () => {
+      plugin.start(
+        {
+          apps: [
+            {
+              name: 'Grafana',
+              url: 'http://localhost:3000/grafana',
+              appPath: 'grafana',
+              rewritePaths: true,
+            },
+          ],
+        },
+        jest.fn(),
+      )
+      const handler = extractProxyResHandler()
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PassThrough } = require('stream') as typeof import('stream')
+      const proxyResStream = new PassThrough()
+      const headers: Record<string, string> = {
+        'content-type': 'text/html',
+        location: '/grafana/login',
+      }
+      Object.assign(proxyResStream, { headers, statusCode: 302 })
+      const mockRes = new PassThrough() as unknown as {
+        writeHead: jest.Mock
+        headersSent: boolean
+      }
+      mockRes.writeHead = jest.fn()
+      Object.assign(mockRes, { headersSent: false })
+
+      handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
+
+      expect(headers['location']).toBe('/plugins/signalk-web-proxy/proxy/grafana/login')
+      expect(headers['location']).not.toContain('/grafana/grafana/')
+    })
+
+    it('does not rewrite absolute URL Location headers', () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PassThrough } = require('stream') as typeof import('stream')
+      const proxyResStream = new PassThrough()
+      const headers: Record<string, string> = {
+        'content-type': 'text/html',
+        location: 'https://external.example.com/callback',
+      }
+      Object.assign(proxyResStream, { headers, statusCode: 302 })
+      const mockRes = new PassThrough() as unknown as {
+        writeHead: jest.Mock
+        headersSent: boolean
+      }
+      mockRes.writeHead = jest.fn()
+      Object.assign(mockRes, { headersSent: false })
+
+      handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
+
+      expect(headers['location']).toBe('https://external.example.com/callback')
+    })
+
+    it('does not rewrite already-proxied Location headers', () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      // eslint-disable-next-line @typescript-eslint/no-require-imports
+      const { PassThrough } = require('stream') as typeof import('stream')
+      const proxyResStream = new PassThrough()
+      const headers: Record<string, string> = {
+        'content-type': 'text/html',
+        location: '/plugins/signalk-web-proxy/proxy/0/dashboard',
+      }
+      Object.assign(proxyResStream, { headers, statusCode: 302 })
+      const mockRes = new PassThrough() as unknown as {
+        writeHead: jest.Mock
+        headersSent: boolean
+      }
+      mockRes.writeHead = jest.fn()
+      Object.assign(mockRes, { headersSent: false })
+
+      handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
+
+      expect(headers['location']).toBe('/plugins/signalk-web-proxy/proxy/0/dashboard')
+    })
+
     it('pipes non-HTML responses without HTML rewriting', () => {
       plugin.start(oneApp({ rewritePaths: true }), jest.fn())
       const handler = extractProxyResHandler()
@@ -1518,6 +1628,46 @@ describe('signalk-web-proxy plugin', () => {
 
       // No base path — variable should be the empty string
       expect(body.toString()).toContain('B=""')
+    })
+
+    it('does not override Location.prototype.pathname getter', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      const script = body.toString()
+      // pathname getter must NOT be overridden — frameworks (Angular) need the real
+      // pathname to match the rewritten <base> tag for in-app link detection.
+      expect(script).not.toContain('defineProperty(LP,"pathname"')
+    })
+
+    it('does not override Location.prototype.href getter', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      const script = body.toString()
+      // The href getter must remain the native getter so frameworks see real URLs
+      // that are consistent with the rewritten <base> tag.
+      // Only the SETTER should be overridden.
+      expect(script).toContain('get:hD.get')
+    })
+
+    it('includes MutationObserver to rewrite dynamic element attributes', async () => {
+      plugin.start(oneApp({ rewritePaths: true }), jest.fn())
+      const handler = extractProxyResHandler()
+
+      const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
+
+      const script = body.toString()
+      // A MutationObserver rewrites href/src/action attributes on dynamically
+      // added elements so frameworks see proxy-prefixed URLs matching <base>.
+      expect(script).toContain('MutationObserver')
+      expect(script).toContain('setAttribute')
+      expect(script).toContain('childList:true')
+      expect(script).toContain('attributeFilter:["href","src","action"]')
     })
   })
 })
