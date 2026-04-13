@@ -1,4 +1,4 @@
-# signalk-app-proxy
+# signalk-embedded-webapp-proxy
 
 SignalK embedded webapp plugin that acts as a general reverse proxy, letting you embed any web application into the SignalK admin UI.
 
@@ -16,7 +16,7 @@ Configure one or more applications (Portainer CE, Grafana, Node-RED, etc.). A se
 
 1. Open the SignalK admin UI
 2. Navigate to **Appstore** > **Available**
-3. Search for **App Proxy**
+3. Search for **Embedded Webapp Proxy**
 4. Click **Install**
 5. Restart SignalK server
 
@@ -24,7 +24,7 @@ Configure one or more applications (Portainer CE, Grafana, Node-RED, etc.). A se
 
 ```bash
 cd ~/.signalk
-npm install signalk-app-proxy
+npm install signalk-embedded-webapp-proxy
 ```
 
 Then restart the SignalK server.
@@ -34,14 +34,14 @@ Then restart the SignalK server.
 After installation, configure the plugin in the SignalK admin UI:
 
 1. Navigate to **Server** > **Plugin Config**
-2. Find **App Proxy** in the plugin list
+2. Find **Embedded Webapp Proxy** in the plugin list
 3. Enable the plugin
 4. Add one or more applications under **Web Applications**:
 
 | Field                              | Description                                                                          | Default              |
 | ---------------------------------- | ------------------------------------------------------------------------------------ | -------------------- |
 | **Name**                           | Display name shown in the app selector                                               | `My App`             |
-| **Proxy Path**                     | Custom path identifier (e.g. `portainer`). When set, the app is also accessible at `/plugins/signalk-app-proxy/proxy/<appPath>`. Must start with a letter; only letters, digits, and hyphens allowed. | _(none)_ |
+| **Proxy Path**                     | Custom path identifier (e.g. `portainer`). When set, the app is also accessible at `/plugins/signalk-embedded-webapp-proxy/proxy/<appPath>`. Must start with a letter; only letters, digits, and hyphens allowed. | _(none)_ |
 | **Application URL**                | URL with protocol and host required; port is optional (defaults to `80` for http, `443` for https); base path is optional — e.g. `http://192.168.1.100:9000`, `https://myapp.local/admin` | `http://127.0.0.1` |
 | **Allow Self-Signed Certificates** | Accept self-signed TLS certs (HTTPS only)                                            | `false`              |
 | **Rewrite Absolute Paths**         | Inject a script into HTML responses that rewrites absolute API paths (e.g. `/api/auth`) so they route through the proxy. Enable for SPAs like Portainer or Grafana — eliminates the need for `--base-url` on the target container. | `false` |
@@ -76,7 +76,7 @@ Once the plugin is enabled and configured:
 
 1. Open the SignalK admin UI
 2. Navigate to **Webapps**
-3. Click **App Proxy**
+3. Click **Embedded Webapp Proxy**
 4. If multiple apps are configured, select one from the dropdown
 5. The selected application loads embedded in the SignalK admin UI
 
@@ -87,24 +87,24 @@ If only one application is configured, it loads automatically without requiring 
 Each application is accessible by its numeric index:
 
 ```text
-/plugins/signalk-app-proxy/proxy/{index}/
+/plugins/signalk-embedded-webapp-proxy/proxy/{index}/
 ```
 
 If an `appPath` is configured, the app is also accessible at:
 
 ```text
-/plugins/signalk-app-proxy/proxy/{appPath}/
+/plugins/signalk-embedded-webapp-proxy/proxy/{appPath}/
 ```
 
 | App | Proxy URLs |
 |-----|-----------|
-| First app (index 0, appPath `portainer`)  | `/plugins/signalk-app-proxy/proxy/0/` or `/plugins/signalk-app-proxy/proxy/portainer/` |
-| Second app (index 1, no appPath) | `/plugins/signalk-app-proxy/proxy/1/` |
+| First app (index 0, appPath `portainer`)  | `/plugins/signalk-embedded-webapp-proxy/proxy/0/` or `/plugins/signalk-embedded-webapp-proxy/proxy/portainer/` |
+| Second app (index 1, no appPath) | `/plugins/signalk-embedded-webapp-proxy/proxy/1/` |
 
 The list of configured apps (name, index, appPath) is also available as JSON:
 
 ```http
-GET /plugins/signalk-app-proxy/apps
+GET /plugins/signalk-embedded-webapp-proxy/apps
 ```
 
 ## Application-specific setup notes

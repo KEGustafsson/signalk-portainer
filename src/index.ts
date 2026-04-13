@@ -3,11 +3,7 @@ import type { IRouter, Request, Response } from 'express'
 import type { IncomingMessage, Server, ServerResponse } from 'http'
 import { Socket } from 'net'
 import { createBrotliDecompress, createGunzip, createInflate } from 'zlib'
-import {
-  createProxyMiddleware,
-  fixRequestBody,
-  type RequestHandler,
-} from 'http-proxy-middleware'
+import { createProxyMiddleware, fixRequestBody, type RequestHandler } from 'http-proxy-middleware'
 
 interface ServerAPIWithServer extends ServerAPI {
   server?: Server
@@ -27,8 +23,8 @@ interface AppConfig {
   rewritePaths: boolean // inject script to rewrite absolute API paths through the proxy
 }
 
-const PLUGIN_ID = 'signalk-app-proxy'
-const PLUGIN_NAME = 'App Proxy'
+const PLUGIN_ID = 'signalk-embedded-webapp-proxy'
+const PLUGIN_NAME = 'Embedded Webapp Proxy'
 
 const VALID_SCHEMES = new Set<string>(['http', 'https'])
 
@@ -140,8 +136,7 @@ function parseAppConfig(raw: Record<string, unknown>, index: number): AppConfig 
     }
   }
 
-  const rewritePaths =
-    typeof raw['rewritePaths'] === 'boolean' ? raw['rewritePaths'] : false
+  const rewritePaths = typeof raw['rewritePaths'] === 'boolean' ? raw['rewritePaths'] : false
 
   return {
     name,
@@ -207,7 +202,7 @@ function buildRewriteScript(proxyPathPrefix: string, appBasePath: string): strin
   const base = appBasePath === '/' ? '' : appBasePath.replace(/\/$/, '')
   const baseJson = JSON.stringify(base)
   return (
-    '<script data-signalk-app-proxy="path-rewrite">' +
+    '<script data-signalk-embedded-webapp-proxy="path-rewrite">' +
     '(function(){' +
     `var P=${prefix};` +
     `var B=${baseJson};` +
@@ -362,11 +357,15 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
 
                     // Rewrite Location headers on redirects so the browser
                     // follows through the proxy instead of hitting the host root.
-                    // e.g. "Location: /grafana/login" → "Location: /plugins/signalk-app-proxy/proxy/grafana/login"
+                    // e.g. "Location: /grafana/login" → "Location: /plugins/signalk-embedded-webapp-proxy/proxy/grafana/login"
                     if (proxyRes.headers['location']) {
                       const loc = String(proxyRes.headers['location'])
                       // Only rewrite root-relative paths (not absolute URLs or protocol-relative)
-                      if (loc.charAt(0) === '/' && loc.charAt(1) !== '/' && !loc.startsWith(proxyPathPrefix)) {
+                      if (
+                        loc.charAt(0) === '/' &&
+                        loc.charAt(1) !== '/' &&
+                        !loc.startsWith(proxyPathPrefix)
+                      ) {
                         const appPathBase =
                           appConfig.path === '/' ? '' : appConfig.path.replace(/\/$/, '')
                         const normalizedLoc =
@@ -486,11 +485,20 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
           const slash = pathPart.indexOf('/')
           const appId = slash >= 0 ? pathPart.substring(0, slash) : pathPart
           const index = resolveAppIndex(appId, currentApps)
-          if (index < 0 || index >= proxies.length) { reject404(); return }
+          if (index < 0 || index >= proxies.length) {
+            reject404()
+            return
+          }
           const targetProxy = proxies[index]
-          if (!targetProxy) { reject404(); return }
+          if (!targetProxy) {
+            reject404()
+            return
+          }
           const proxyUpgrade = targetProxy.upgrade
-          if (!proxyUpgrade) { reject404(); return }
+          if (!proxyUpgrade) {
+            reject404()
+            return
+          }
           stripInvalidHeaders(req)
           req.url = (slash >= 0 ? pathPart.substring(slash) : '/') + queryString
           proxyUpgrade.call(targetProxy, req, socket, head)
@@ -546,7 +554,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     schema() {
       return {
         type: 'object' as const,
-        title: 'App Proxy Configuration',
+        title: 'Embedded Webapp Proxy Configuration',
         description: 'Configure one or more web applications to embed in SignalK',
         properties: {
           apps: {
@@ -568,7 +576,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'string' as const,
                   title: 'Proxy Path',
                   description:
-                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-app-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
+                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-embedded-webapp-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
                   pattern: '^[a-zA-Z][a-zA-Z0-9-]*$',
                   minLength: 1,
                   maxLength: 64,

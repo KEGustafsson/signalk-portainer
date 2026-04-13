@@ -41,7 +41,7 @@ function extractProxyReqHandler(): ProxyReqFn {
   return (options['on'] as Record<string, unknown>)['proxyReq'] as ProxyReqFn
 }
 
-describe('signalk-app-proxy plugin', () => {
+describe('signalk-embedded-webapp-proxy plugin', () => {
   let plugin: Plugin
 
   beforeEach(() => {
@@ -51,11 +51,11 @@ describe('signalk-app-proxy plugin', () => {
 
   describe('metadata', () => {
     it('has the correct plugin id', () => {
-      expect(plugin.id).toBe('signalk-app-proxy')
+      expect(plugin.id).toBe('signalk-embedded-webapp-proxy')
     })
 
     it('has the correct plugin name', () => {
-      expect(plugin.name).toBe('App Proxy')
+      expect(plugin.name).toBe('Embedded Webapp Proxy')
     })
 
     it('has a description', () => {
@@ -535,7 +535,11 @@ describe('signalk-app-proxy plugin', () => {
 
     it('uses appPath in rewrite prefix when both appPath and rewritePaths are set', () => {
       plugin.start(
-        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer', rewritePaths: true }] },
+        {
+          apps: [
+            { name: 'P', url: 'http://localhost:9000', appPath: 'portainer', rewritePaths: true },
+          ],
+        },
         jest.fn(),
       )
 
@@ -763,7 +767,10 @@ describe('signalk-app-proxy plugin', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
-      plugin.start({ apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer' }] }, jest.fn())
+      plugin.start(
+        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'portainer' }] },
+        jest.fn(),
+      )
       plugin.registerWithRouter!(mockRouter)
 
       const handler = registeredHandlers.get('/proxy/:appId')!
@@ -780,7 +787,10 @@ describe('signalk-app-proxy plugin', () => {
       const dummyProxy: MockProxyMiddleware = jest.fn()
       mockCreateProxyMiddleware.mockReturnValue(dummyProxy)
 
-      plugin.start({ apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'Portainer' }] }, jest.fn())
+      plugin.start(
+        { apps: [{ name: 'P', url: 'http://localhost:9000', appPath: 'Portainer' }] },
+        jest.fn(),
+      )
       plugin.registerWithRouter!(mockRouter)
 
       const handler = registeredHandlers.get('/proxy/:appId')!
@@ -863,7 +873,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/0/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/0/api/websocket/exec',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -894,7 +904,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/1/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/1/api/websocket/exec',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -912,7 +922,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/0',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/0',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -929,7 +939,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/0/api/websocket/exec?token=abc&endpointId=1',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/0/api/websocket/exec?token=abc&endpointId=1',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -946,7 +956,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/0?token=abc',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/0?token=abc',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -966,7 +976,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/portainer?token=abc',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/portainer?token=abc',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -983,7 +993,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/0/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/0/api/websocket/exec',
         headers: {
           upgrade: 'websocket',
           'primus::req::backup': {},
@@ -1021,7 +1031,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/portainer/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/portainer/api/websocket/exec',
         headers: {},
       } as unknown as IncomingMessage
       const mockSocket = {} as Socket
@@ -1038,7 +1048,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn())
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/unknown/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/unknown/api/websocket/exec',
       } as IncomingMessage
       const mockSocket = { write: jest.fn(), end: jest.fn() } as unknown as Socket
       const mockHead = Buffer.alloc(0)
@@ -1058,7 +1068,7 @@ describe('signalk-app-proxy plugin', () => {
       plugin.start(oneApp(), jest.fn()) // only 1 app → index 0 valid, index 1 invalid
 
       const mockReq = {
-        url: '/plugins/signalk-app-proxy/proxy/1/api/websocket/exec',
+        url: '/plugins/signalk-embedded-webapp-proxy/proxy/1/api/websocket/exec',
       } as IncomingMessage
       const mockSocket = { write: jest.fn(), end: jest.fn() } as unknown as Socket
       const mockHead = Buffer.alloc(0)
@@ -1262,7 +1272,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'src="/plugins/signalk-app-proxy/proxy/0/public/build/app.js"',
+        'src="/plugins/signalk-embedded-webapp-proxy/proxy/0/public/build/app.js"',
       )
     })
 
@@ -1276,7 +1286,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'href="/plugins/signalk-app-proxy/proxy/0/public/fonts/font.css"',
+        'href="/plugins/signalk-embedded-webapp-proxy/proxy/0/public/fonts/font.css"',
       )
     })
 
@@ -1290,7 +1300,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'action="/plugins/signalk-app-proxy/proxy/0/login"',
+        'action="/plugins/signalk-embedded-webapp-proxy/proxy/0/login"',
       )
     })
 
@@ -1336,7 +1346,9 @@ describe('signalk-app-proxy plugin', () => {
 
       const { body } = await runHtmlProxyRes(handler, '<html><head></head><body></body></html>')
 
-      expect(body.toString()).toContain('<script data-signalk-app-proxy="path-rewrite">')
+      expect(body.toString()).toContain(
+        '<script data-signalk-embedded-webapp-proxy="path-rewrite">',
+      )
     })
 
     it('uses appPath in the rewritten attribute prefix', async () => {
@@ -1361,7 +1373,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'src="/plugins/signalk-app-proxy/proxy/grafana/public/build/app.js"',
+        'src="/plugins/signalk-embedded-webapp-proxy/proxy/grafana/public/build/app.js"',
       )
     })
 
@@ -1386,7 +1398,7 @@ describe('signalk-app-proxy plugin', () => {
 
       handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
 
-      expect(headers['location']).toBe('/plugins/signalk-app-proxy/proxy/0/login')
+      expect(headers['location']).toBe('/plugins/signalk-embedded-webapp-proxy/proxy/0/login')
     })
 
     it('strips app base path from Location header before prepending proxy prefix', () => {
@@ -1422,7 +1434,7 @@ describe('signalk-app-proxy plugin', () => {
 
       handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
 
-      expect(headers['location']).toBe('/plugins/signalk-app-proxy/proxy/grafana/login')
+      expect(headers['location']).toBe('/plugins/signalk-embedded-webapp-proxy/proxy/grafana/login')
       expect(headers['location']).not.toContain('/grafana/grafana/')
     })
 
@@ -1459,7 +1471,7 @@ describe('signalk-app-proxy plugin', () => {
       const proxyResStream = new PassThrough()
       const headers: Record<string, string> = {
         'content-type': 'text/html',
-        location: '/plugins/signalk-app-proxy/proxy/0/dashboard',
+        location: '/plugins/signalk-embedded-webapp-proxy/proxy/0/dashboard',
       }
       Object.assign(proxyResStream, { headers, statusCode: 302 })
       const mockRes = new PassThrough() as unknown as {
@@ -1471,7 +1483,7 @@ describe('signalk-app-proxy plugin', () => {
 
       handler(proxyResStream as unknown as IncomingMessage, {} as IncomingMessage, mockRes)
 
-      expect(headers['location']).toBe('/plugins/signalk-app-proxy/proxy/0/dashboard')
+      expect(headers['location']).toBe('/plugins/signalk-embedded-webapp-proxy/proxy/0/dashboard')
     })
 
     it('pipes non-HTML responses without HTML rewriting', () => {
@@ -1541,7 +1553,9 @@ describe('signalk-app-proxy plugin', () => {
 
       const out = body.toString()
       // base path /grafana stripped before prepending proxy prefix
-      expect(out).toContain('src="/plugins/signalk-app-proxy/proxy/grafana/public/build/app.js"')
+      expect(out).toContain(
+        'src="/plugins/signalk-embedded-webapp-proxy/proxy/grafana/public/build/app.js"',
+      )
       expect(out).not.toContain('/grafana/grafana/')
     })
 
@@ -1567,7 +1581,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'src="/plugins/signalk-app-proxy/proxy/grafana/other/asset.js"',
+        'src="/plugins/signalk-embedded-webapp-proxy/proxy/grafana/other/asset.js"',
       )
     })
 
@@ -1594,7 +1608,7 @@ describe('signalk-app-proxy plugin', () => {
       )
 
       expect(body.toString()).toContain(
-        'src="/plugins/signalk-app-proxy/proxy/grafana/grafanaextra/app.js"',
+        'src="/plugins/signalk-embedded-webapp-proxy/proxy/grafana/grafanaextra/app.js"',
       )
     })
 

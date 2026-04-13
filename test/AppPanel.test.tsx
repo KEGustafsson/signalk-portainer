@@ -24,7 +24,12 @@ function mockFetchHttpError(status: number): void {
 }
 
 describe('AppPanel', () => {
+  beforeEach(() => {
+    jest.useFakeTimers()
+  })
+
   afterEach(() => {
+    jest.useRealTimers()
     jest.restoreAllMocks()
   })
 
@@ -72,7 +77,7 @@ describe('AppPanel', () => {
       mockFetchApps(singleApp)
       render(<AppPanel />)
       const iframe = await screen.findByTitle('Portainer CE')
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/0/')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-embedded-webapp-proxy/proxy/0/')
     })
 
     it('does not render a dropdown for a single app', async () => {
@@ -103,7 +108,10 @@ describe('AppPanel', () => {
       mockFetchApps([{ index: 0, name: 'Portainer CE', appPath: 'portainer' }])
       render(<AppPanel />)
       const iframe = await screen.findByTitle('Portainer CE')
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/portainer/')
+      expect(iframe).toHaveAttribute(
+        'src',
+        '/plugins/signalk-embedded-webapp-proxy/proxy/portainer/',
+      )
     })
 
     it('iframe has no border', async () => {
@@ -166,7 +174,7 @@ describe('AppPanel', () => {
 
       const iframe = screen.getByTitle('Grafana')
       expect(iframe).toBeInTheDocument()
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/1/')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-embedded-webapp-proxy/proxy/1/')
     })
 
     it('iframe title matches the selected app name', async () => {
@@ -191,7 +199,7 @@ describe('AppPanel', () => {
       })
       expect(screen.getByTitle('Portainer CE')).toHaveAttribute(
         'src',
-        '/plugins/signalk-app-proxy/proxy/0/',
+        '/plugins/signalk-embedded-webapp-proxy/proxy/0/',
       )
 
       act(() => {
@@ -200,8 +208,144 @@ describe('AppPanel', () => {
       expect(screen.queryByTitle('Portainer CE')).not.toBeInTheDocument()
       expect(screen.getByTitle('Grafana')).toHaveAttribute(
         'src',
-        '/plugins/signalk-app-proxy/proxy/1/',
+        '/plugins/signalk-embedded-webapp-proxy/proxy/1/',
       )
+    })
+  })
+
+  describe('toolbar auto-hide', () => {
+    const twoApps: AppInfo[] = [
+      { index: 0, name: 'Portainer CE' },
+      { index: 1, name: 'Grafana' },
+    ]
+
+    it('toolbar is visible initially before any selection', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      await screen.findByRole('combobox')
+      const toolbar = screen.getByTestId('toolbar')
+      expect(toolbar).toHaveStyle({ top: '0px' })
+    })
+
+    it('toolbar hides after selecting an app and timeout elapses', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+
+      // Toolbar still visible immediately after selection
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '0px' })
+
+      // Advance past auto-hide delay
+      act(() => {
+        jest.advanceTimersByTime(3000)
+      })
+
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '-40px' })
+    })
+
+    it('hot zone appears when toolbar is hidden', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      // No hot zone while toolbar is visible
+      expect(screen.queryByTestId('hot-zone')).not.toBeInTheDocument()
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+      act(() => {
+        jest.advanceTimersByTime(3000)
+      })
+
+      // Hot zone appears when toolbar is hidden
+      expect(screen.getByTestId('hot-zone')).toBeInTheDocument()
+    })
+
+    it('hovering over hot zone reveals toolbar', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+      act(() => {
+        jest.advanceTimersByTime(3000)
+      })
+
+      // Toolbar is hidden
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '-40px' })
+
+      // Hover over hot zone
+      act(() => {
+        fireEvent.mouseEnter(screen.getByTestId('hot-zone'))
+      })
+
+      // Toolbar reappears
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '0px' })
+    })
+
+    it('toolbar stays visible while mouse is over it', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+
+      // Mouse enters toolbar — should cancel hide timer
+      act(() => {
+        fireEvent.mouseEnter(screen.getByTestId('toolbar'))
+      })
+
+      // Advance well past the hide delay
+      act(() => {
+        jest.advanceTimersByTime(10000)
+      })
+
+      // Toolbar still visible
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '0px' })
+    })
+
+    it('toolbar hides after mouse leaves it', async () => {
+      mockFetchApps(twoApps)
+      render(<AppPanel />)
+      const select = await screen.findByRole('combobox')
+
+      act(() => {
+        fireEvent.change(select, { target: { value: '0' } })
+      })
+
+      act(() => {
+        fireEvent.mouseEnter(screen.getByTestId('toolbar'))
+      })
+      act(() => {
+        fireEvent.mouseLeave(screen.getByTestId('toolbar'))
+      })
+
+      // Not hidden yet
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '0px' })
+
+      // Advance past delay
+      act(() => {
+        jest.advanceTimersByTime(3000)
+      })
+
+      expect(screen.getByTestId('toolbar')).toHaveStyle({ top: '-40px' })
+    })
+
+    it('does not show toolbar or hot zone for single app', async () => {
+      mockFetchApps([{ index: 0, name: 'Portainer CE' }])
+      render(<AppPanel />)
+      await screen.findByTitle('Portainer CE')
+      expect(screen.queryByTestId('toolbar')).not.toBeInTheDocument()
+      expect(screen.queryByTestId('hot-zone')).not.toBeInTheDocument()
     })
   })
 
@@ -210,7 +354,7 @@ describe('AppPanel', () => {
       mockFetchApps([])
       render(<AppPanel />)
       await screen.findByText(/No web applications configured/i)
-      expect(global.fetch).toHaveBeenCalledWith('/plugins/signalk-app-proxy/apps')
+      expect(global.fetch).toHaveBeenCalledWith('/plugins/signalk-embedded-webapp-proxy/apps')
     })
   })
 })
