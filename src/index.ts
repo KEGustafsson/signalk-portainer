@@ -27,8 +27,8 @@ interface AppConfig {
   rewritePaths: boolean // inject script to rewrite absolute API paths through the proxy
 }
 
-const PLUGIN_ID = 'signalk-web-proxy'
-const PLUGIN_NAME = 'Web Application Proxy'
+const PLUGIN_ID = 'signalk-app-proxy'
+const PLUGIN_NAME = 'App Proxy'
 
 const VALID_SCHEMES = new Set<string>(['http', 'https'])
 
@@ -207,7 +207,7 @@ function buildRewriteScript(proxyPathPrefix: string, appBasePath: string): strin
   const base = appBasePath === '/' ? '' : appBasePath.replace(/\/$/, '')
   const baseJson = JSON.stringify(base)
   return (
-    '<script data-signalk-web-proxy="path-rewrite">' +
+    '<script data-signalk-app-proxy="path-rewrite">' +
     '(function(){' +
     `var P=${prefix};` +
     `var B=${baseJson};` +
@@ -362,7 +362,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
 
                     // Rewrite Location headers on redirects so the browser
                     // follows through the proxy instead of hitting the host root.
-                    // e.g. "Location: /grafana/login" → "Location: /plugins/signalk-web-proxy/proxy/grafana/login"
+                    // e.g. "Location: /grafana/login" → "Location: /plugins/signalk-app-proxy/proxy/grafana/login"
                     if (proxyRes.headers['location']) {
                       const loc = String(proxyRes.headers['location'])
                       // Only rewrite root-relative paths (not absolute URLs or protocol-relative)
@@ -546,7 +546,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
     schema() {
       return {
         type: 'object' as const,
-        title: 'Web Application Proxy Configuration',
+        title: 'App Proxy Configuration',
         description: 'Configure one or more web applications to embed in SignalK',
         properties: {
           apps: {
@@ -568,7 +568,7 @@ module.exports = function (app: ServerAPIWithServer): Plugin {
                   type: 'string' as const,
                   title: 'Proxy Path',
                   description:
-                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-web-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
+                    'Custom path identifier (e.g. "portainer"). When set, the app is accessible at /plugins/signalk-app-proxy/proxy/<appPath> in addition to its numeric index. Must start with a letter; only letters, digits, and hyphens allowed.',
                   pattern: '^[a-zA-Z][a-zA-Z0-9-]*$',
                   minLength: 1,
                   maxLength: 64,

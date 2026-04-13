@@ -1,11 +1,11 @@
 {
-  "name": "signalk-web-proxy",
+  "name": "signalk-app-proxy",
   "version": "1.0.0",
   "description": "SignalK embedded webapp plugin — general reverse proxy for web applications",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
   "signalk": {
-    "displayName": "Web Application Proxy"
+    "displayName": "App Proxy"
   },
   "keywords": [
     "signalk-node-server-plugin",

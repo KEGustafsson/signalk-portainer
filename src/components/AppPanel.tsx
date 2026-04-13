@@ -1,6 +1,6 @@
 import React from 'react'
 
-const PLUGIN_PATH = '/plugins/signalk-web-proxy'
+const PLUGIN_PATH = '/plugins/signalk-app-proxy'
 
 // Height in pixels of the SignalK admin UI top navigation bar.
 // The panel fills the remaining viewport height below it.

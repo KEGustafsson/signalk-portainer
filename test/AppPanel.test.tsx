@@ -72,7 +72,7 @@ describe('AppPanel', () => {
       mockFetchApps(singleApp)
       render(<AppPanel />)
       const iframe = await screen.findByTitle('Portainer CE')
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/0/')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/0/')
     })
 
     it('does not render a dropdown for a single app', async () => {
@@ -103,7 +103,7 @@ describe('AppPanel', () => {
       mockFetchApps([{ index: 0, name: 'Portainer CE', appPath: 'portainer' }])
       render(<AppPanel />)
       const iframe = await screen.findByTitle('Portainer CE')
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/portainer/')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/portainer/')
     })
 
     it('iframe has no border', async () => {
@@ -166,7 +166,7 @@ describe('AppPanel', () => {
 
       const iframe = screen.getByTitle('Grafana')
       expect(iframe).toBeInTheDocument()
-      expect(iframe).toHaveAttribute('src', '/plugins/signalk-web-proxy/proxy/1/')
+      expect(iframe).toHaveAttribute('src', '/plugins/signalk-app-proxy/proxy/1/')
     })
 
     it('iframe title matches the selected app name', async () => {
@@ -191,7 +191,7 @@ describe('AppPanel', () => {
       })
       expect(screen.getByTitle('Portainer CE')).toHaveAttribute(
         'src',
-        '/plugins/signalk-web-proxy/proxy/0/',
+        '/plugins/signalk-app-proxy/proxy/0/',
       )
 
       act(() => {
@@ -200,7 +200,7 @@ describe('AppPanel', () => {
       expect(screen.queryByTitle('Portainer CE')).not.toBeInTheDocument()
       expect(screen.getByTitle('Grafana')).toHaveAttribute(
         'src',
-        '/plugins/signalk-web-proxy/proxy/1/',
+        '/plugins/signalk-app-proxy/proxy/1/',
       )
     })
   })
@@ -210,7 +210,7 @@ describe('AppPanel', () => {
       mockFetchApps([])
       render(<AppPanel />)
       await screen.findByText(/No web applications configured/i)
-      expect(global.fetch).toHaveBeenCalledWith('/plugins/signalk-web-proxy/apps')
+      expect(global.fetch).toHaveBeenCalledWith('/plugins/signalk-app-proxy/apps')
     })
   })
 })
