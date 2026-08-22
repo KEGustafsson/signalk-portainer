@@ -24,14 +24,34 @@ interface FacadeError {
 }
 
 export async function apiGet<T>(path: string, instance?: string, signal?: AbortSignal): Promise<T> {
-  const query = instance ? `?instance=${encodeURIComponent(instance)}` : '';
+  // Some tab paths already carry a query (?all=true), so the separator has to
+  // be chosen rather than assumed — appending a second '?' makes the facade
+  // ignore the instance and silently serve the default one.
+  const separator = path.includes('?') ? '&' : '?';
+  const query = instance ? `${separator}instance=${encodeURIComponent(instance)}` : '';
+
   const response = await fetch(`${BASE}${path}${query}`, {
     credentials: 'include',
     headers: { accept: 'application/json' },
     ...(signal ? { signal } : {}),
   });
 
-  const body: unknown = await response.json().catch(() => ({}));
+  let body: unknown;
+  try {
+    body = await response.json();
+  } catch {
+    if (response.ok) {
+      // A 200 that is not JSON means something answered instead of the plugin —
+      // a proxy, or a login page. Falling back to {} would render an empty
+      // table, which reads as "nothing here" rather than "something is wrong".
+      throw new ApiError(
+        response.status,
+        'The response was not JSON',
+        'a proxy or login page may have answered instead of the plugin',
+      );
+    }
+    body = {};
+  }
 
   if (!response.ok) {
     const failure = body as FacadeError;

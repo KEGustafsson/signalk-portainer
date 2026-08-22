@@ -16,8 +16,12 @@ that matter.
 | `signalk-webapp` | standalone webapp, served on its own route |
 | `signalk-embeddable-webapp` | a panel embedded in the admin UI — **what this plugin ships** |
 
-A package providing *only* embedded components uses `signalk-webapp`; that is
-not our case, since this package is a plugin that also ships a panel.
+A third case looks like a contradiction but is not: a package providing *only*
+embedded components — no webapp of its own — also uses `signalk-webapp`, because
+upstream defines no keyword for that case. Quoting the source: *"There is no
+keyword for a module that provides only embedded components, use
+`signalk-webapp` instead."* Neither applies here: this package is a plugin that
+ships an embeddable panel, so it uses `signalk-embeddable-webapp`.
 
 ## 2. Mechanism: Module Federation
 
@@ -53,7 +57,7 @@ with `"type": "module"` in package.json), but then a CommonJS server side needs
 
 The admin UI runs **React 19**. Bundling a second copy fails at runtime with:
 
-```
+```text
 Cannot read properties of null (reading 'useState')
 ```
 

@@ -32,11 +32,11 @@ The plugin talks to Portainer server-side (never from the browser: no CORS, no
 token in the client, no self-signed-cert interstitial, no mixed content) and
 exposes its own small REST facade under `/plugins/signalk-portainer/api/*`,
 protected by Signal K's own authentication. On top of that facade sit an
-embedded webapp for day-to-day container work, a delta poller that turns
-container state into Signal K paths under `system.docker.<instance>.*`,
-watchdog notifications that raise a Signal K alarm when a container that should
-be running is not, and PUT handlers so any Signal K client can start or stop a
-container.
+embedded webapp for day-to-day container work. Planned for M2–M3: a delta
+poller turning container state into Signal K paths under
+`system.docker.<instance>.*`, watchdog notifications raising a Signal K alarm
+when a container that should be running is not, and PUT handlers so any Signal
+K client can start or stop a container.
 
 ## What works today (M1)
 

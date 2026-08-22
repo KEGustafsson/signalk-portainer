@@ -83,6 +83,9 @@ export default function AppPanel(): ReactElement {
   // Keeps a slow response from overwriting the results of a later request when
   // the operator switches tab or instance while one is still in flight.
   const requestSeq = useRef(0);
+  // A stalled request would otherwise stay open while every poll starts
+  // another, so each new request cancels the one before it.
+  const inFlight = useRef<AbortController | undefined>(undefined);
 
   const activeTab = useMemo(
     () => TABS.find((candidate) => candidate.id === tab) ?? TABS[1]!,
@@ -128,14 +131,18 @@ export default function AppPanel(): ReactElement {
   }, [instance, instances.length]);
 
   const load = useCallback(async (): Promise<void> => {
+    inFlight.current?.abort();
+    const controller = new AbortController();
+    inFlight.current = controller;
     const seq = (requestSeq.current += 1);
     try {
-      const body = await apiGet<TabPayload>(activeTab.path, instance);
+      const body = await apiGet<TabPayload>(activeTab.path, instance, controller.signal);
       if (seq !== requestSeq.current) return;
       setPayload(body);
       setError(undefined);
     } catch (cause) {
-      if (seq !== requestSeq.current) return;
+      // A cancelled request is expected, not a failure to report.
+      if (isAbort(cause) || seq !== requestSeq.current) return;
       setError(asApiError(cause));
     } finally {
       if (seq === requestSeq.current) setLoading(false);
@@ -147,7 +154,11 @@ export default function AppPanel(): ReactElement {
     setLoading(true);
     void load();
     const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
-    return () => clearInterval(timer);
+    return () => {
+      clearInterval(timer);
+      // Unmounting or switching away must not leave a request open.
+      inFlight.current?.abort();
+    };
   }, [load, instances.length]);
 
   // A tab that disappears (swarm turned off) must not leave a blank panel.
@@ -228,6 +239,10 @@ function TabBody({ tab, payload }: { tab: TabId; payload: TabPayload }): ReactEl
     default:
       return <ContainersTable rows={payload.containers ?? []} />;
   }
+}
+
+function isAbort(cause: unknown): boolean {
+  return cause instanceof Error && cause.name === 'AbortError';
 }
 
 function asApiError(cause: unknown): ApiError {

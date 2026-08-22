@@ -134,8 +134,60 @@ describe('AppPanel', () => {
 
     await waitFor(() => {
       const paths = fetchMock.mock.calls.map((call) => call[0] as string);
-      expect(paths.some((path) => path.includes('instance=shore'))).toBe(true);
+      // Asserted exactly, not with includes(): a malformed
+      // '?all=true?instance=shore' also "includes" the instance, and the facade
+      // would quietly serve the default instance instead.
+      expect(paths).toContain('/plugins/signalk-portainer/api/containers?all=true&instance=shore');
     });
+  });
+
+  it('aborts an in-flight request when the panel unmounts', async () => {
+    const signals: AbortSignal[] = [];
+    global.fetch = jest.fn((input: string, init?: RequestInit) => {
+      if (init?.signal) signals.push(init.signal);
+      if (input.includes('/instances')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
+        });
+      }
+      // Never settles: stands in for a facade that has stalled.
+      return new Promise(() => {});
+    }) as unknown as typeof fetch;
+
+    const { unmount } = render(<AppPanel />);
+    await waitFor(() => expect(signals.length).toBeGreaterThan(0));
+
+    expect(signals[0]?.aborted).toBe(false);
+    unmount();
+    expect(signals[0]?.aborted).toBe(true);
+  });
+
+  it('does not surface an aborted request as an error', async () => {
+    global.fetch = jest.fn((input: string, init?: RequestInit) => {
+      if (input.includes('/instances')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
+        });
+      }
+      return new Promise((_resolve, reject) => {
+        init?.signal?.addEventListener('abort', () => {
+          const error = new Error('The operation was aborted');
+          error.name = 'AbortError';
+          reject(error);
+        });
+      });
+    }) as unknown as typeof fetch;
+
+    const { unmount } = render(<AppPanel />);
+    await screen.findByText('Loading…');
+
+    unmount();
+
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 
   it('shows the facade error and its hint instead of an empty table', async () => {
