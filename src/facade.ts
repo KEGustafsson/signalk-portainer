@@ -15,6 +15,7 @@ import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
 import { stackHoldsSelf } from './stackguard';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
+import { ExecTicketError, type ExecTickets } from './exectickets';
 
 export interface FacadeDeps {
   registry: () => InstanceRegistry | undefined;
@@ -26,6 +27,12 @@ export interface FacadeDeps {
   streams?: StreamLimiter;
   /** Keepalive period for open log streams; injectable for tests. */
   keepaliveMs?: number;
+  /**
+   * Where a console authorisation is recorded for the socket that follows.
+   * Absent when the Signal K server cannot serve a WebSocket, and then the
+   * console is not offered at all.
+   */
+  execTickets?: ExecTickets;
 }
 
 /**
@@ -346,6 +353,14 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
         allowPutControl: control?.allowPutControl ?? false,
         allowDestructive: control?.allowDestructive ?? false,
         allowSelfManagement: control?.allowSelfManagement ?? false,
+        console: {
+          // The panel asks rather than assuming: an older Signal K server
+          // cannot serve the WebSocket a console needs.
+          available: deps.execTickets !== undefined,
+          ...(deps.execTickets
+            ? {}
+            : { reason: 'this Signal K server cannot serve a plugin WebSocket' }),
+        },
         self: {
           inContainer: self.inContainer,
           identified: self.identified,
@@ -360,6 +375,51 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
               : undefined,
         },
       };
+    }),
+  );
+
+  // ── console ─────────────────────────────────────────────────────────────
+
+  /**
+   * Asks for a shell, and gets back a ticket rather than a shell.
+   *
+   * This is where the console is authorised: Signal K requires an admin
+   * session for this route, and the ticket carries that decision to the
+   * WebSocket, which Signal K does not authenticate and CORS does not protect.
+   * The exec instance is created here too, so a container that is gone or
+   * stopped is a status the panel can show rather than a socket that opens and
+   * closes for reasons nobody sees.
+   */
+  // Registered before /api/containers/:id/:action, which would otherwise match
+  // "exec" as a lifecycle action and refuse it as an unknown one.
+  router.post(
+    '/api/containers/:id/exec',
+    body,
+    withClient(deps, async (req, client) => {
+      const tickets = deps.execTickets;
+      if (!tickets) {
+        throw new PolicyError(
+          'The console is not available on this Signal K server',
+          'it needs a server new enough to let a plugin serve a WebSocket',
+        );
+      }
+
+      const id = String(req.params.id);
+      requireControlEnabled(deps);
+      // A shell inside the Signal K container can stop Signal K as surely as
+      // the stop button can, and with less to say about it afterwards.
+      const canonical = await requireNotSelf(deps, client, id, 'open a shell in');
+
+      const command = readExecCommand(req);
+      const execId = await client.createExec(id, command);
+      const ticket = tickets.mint({
+        instance: instanceParam(req),
+        execId,
+        containerId: canonical ?? id,
+      });
+
+      audit(deps, req, `console ${command.join(' ')}`, id, canonical);
+      return { id, ticket, command };
     }),
   );
 
@@ -732,6 +792,40 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
 }
 
 /**
+ * The shell to run, from the request.
+ *
+ * A list of arguments, never a string to be split: a command assembled from
+ * text and handed to a shell is how a request becomes an injection. Docker
+ * takes argv directly, so there is no shell in between unless the operator
+ * asked for one by name.
+ */
+function readExecCommand(req: Request): string[] {
+  const path = '/api/containers/:id/exec';
+  const asked = (req.body ?? {}) as { command?: unknown };
+  if (asked.command === undefined) return [...DEFAULT_EXEC_COMMAND];
+  if (
+    !Array.isArray(asked.command) ||
+    asked.command.length === 0 ||
+    !asked.command.every((part) => typeof part === 'string' && part.length > 0)
+  ) {
+    throw badRequest(
+      'POST',
+      path,
+      'command must be a non-empty list of strings',
+      'send { "command": ["/bin/sh"] }, or leave it out for the default',
+    );
+  }
+  if (asked.command.length > MAX_EXEC_ARGS) {
+    throw badRequest('POST', path, `a command may have at most ${MAX_EXEC_ARGS} arguments`);
+  }
+  return asked.command as string[];
+}
+
+/** Present in every image worth opening a shell in; bash is not. */
+const DEFAULT_EXEC_COMMAND = ['/bin/sh'] as const;
+const MAX_EXEC_ARGS = 32;
+
+/**
  * The stack version of the footgun guard.
  *
  * Container self-protection catches "stop this container"; this catches "stop
@@ -878,7 +972,7 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
         res.status(404).json({ error: cause.message });
         return;
       }
-      if (cause instanceof PolicyError) {
+      if (cause instanceof PolicyError || cause instanceof ExecTicketError) {
         // Refusals are logged as well as accepted mutations: an operator whose
         // button did nothing should find the reason in the same place.
         deps.log(`${req.method} ${req.path}: refused — ${cause.message}`);

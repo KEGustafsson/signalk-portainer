@@ -10,6 +10,7 @@ const createApp = () => {
   const debug: string[] = [];
   const deltas: unknown[] = [];
   const puts: { context: string; path: string; handler: unknown }[] = [];
+  const sockets: { path: string; close: () => void }[] = [];
   const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
     enabled: true,
   });
@@ -24,8 +25,17 @@ const createApp = () => {
     registerPutHandler: (context: string, path: string, handler: unknown) => {
       puts.push({ context, path, handler });
     },
+    registerWebSocket: (path: string) => {
+      const endpoint = {
+        on: () => endpoint,
+        clients: new Set(),
+        close: () => undefined,
+      };
+      sockets.push({ path, close: endpoint.close });
+      return endpoint as unknown as ReturnType<NonNullable<SignalKApp['registerWebSocket']>>;
+    },
   } as SignalKApp;
-  return { app, statuses, errors, debug, deltas, puts };
+  return { app, statuses, errors, debug, deltas, puts, sockets };
 };
 
 const noopRestart = (): void => {};
@@ -463,6 +473,42 @@ describe('plugin lifecycle', () => {
 
     instance.start(validOptions, noopRestart);
     expect(debug.join(' ')).not.toContain('ptr_boat');
+    instance.stop();
+  });
+});
+
+describe('the console endpoint', () => {
+  it('is registered when the server can serve a WebSocket', () => {
+    const { app, sockets } = createApp();
+    const instance = plugin(app);
+
+    instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
+
+    expect(sockets.map((socket) => socket.path)).toEqual(['/console']);
+    instance.stop();
+  });
+
+  it('is absent, with a reason, on a server that cannot', () => {
+    // Feature-detected rather than assumed: an older server has no such method,
+    // and a console that cannot work should not be offered.
+    const { app, debug } = createApp();
+    const older = { ...app, registerWebSocket: undefined } as unknown as SignalKApp;
+    const instance = plugin(older);
+
+    instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
+
+    expect(debug.join('\n')).toContain('cannot serve a plugin WebSocket');
+    instance.stop();
+  });
+
+  it('is not registered at all while control is disabled', () => {
+    // Nothing to open a shell for: every mutating route is refused anyway.
+    const { app, sockets } = createApp();
+    const instance = plugin(app);
+
+    instance.start({ ...validOptions, control: { allowPutControl: false } }, noopRestart);
+
+    expect(sockets).toHaveLength(0);
     instance.stop();
   });
 });
