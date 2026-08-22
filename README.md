@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M1)
+## What works today (M2a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -48,9 +48,12 @@ K client can start or stop a container.
   networks — plus services and nodes when the environment is a Swarm. It polls
   every 10s and surfaces facade errors with their hint rather than an empty
   table.
-- A read-only REST facade under `/plugins/signalk-portainer/api/`,
-  authenticated by Signal K. Every route takes `?instance=<name>`, defaulting
-  to the first enabled instance:
+- **Container lifecycle** — start, stop, restart, kill and remove, each behind
+  the guards below. Exposed by the API only for now; the panel's buttons are
+  M2b.
+- A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
+  Signal K. Every route takes `?instance=<name>`, defaulting to the first
+  enabled instance:
 
   | Route | Returns |
   | --- | --- |
