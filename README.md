@@ -1,6 +1,6 @@
 # signalk-portainer
 
-[![CI](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/ci.yml/badge.svg)](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/ci.yml)
+[![SignalK Plugin CI](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml/badge.svg)](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml)
 
 A Signal K server plugin that manages [Portainer CE](https://www.portainer.io/)
 over its HTTP API — containers, stacks, images, volumes and networks — and
@@ -54,9 +54,13 @@ npm test           # 93 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
-Every one of these runs in CI on Node 20.18.1 and 22 for each push and pull
-request, so a failure blocks the merge rather than depending on someone having
-run them locally.
+These same commands run in CI via the Signal K project's shared
+[`plugin-ci`](https://github.com/SignalK/signalk-server/blob/master/.github/workflows/plugin-ci.yml)
+reusable workflow, on Node 20.18.1, 22 and 24 across Linux x64, Linux arm64,
+macOS and Windows. It additionally validates the plugin entry point and schema,
+the start/stop/restart lifecycle, deprecated server API usage, npm pack
+completeness and App Store compatibility — and reports armv7 (Cerbo GX / Venus
+OS) results, which are advisory.
 
 ## Design decisions
 
