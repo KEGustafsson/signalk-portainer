@@ -33,7 +33,7 @@ on:
       enable-armv7:
         description: Run armv7 (Cerbo GX / Venus OS) tests via QEMU
         required: false
-        default: true
+        default: false
         type: boolean
       enable-signalk-integration:
         description: Start SignalK server and install plugin for integration testing
@@ -61,9 +61,10 @@ jobs:
       # The shared workflow's default pair. Note the armv7 job below still
       # exercises Node 20, which is what Venus OS ships.
       node-versions: '["22", "24"]'
-      # Advisory and non-blocking, but Venus OS on a Cerbo GX is a real target
-      # for this plugin, so the result is worth having.
-      enable-armv7: true
+      # Off: it runs under QEMU emulation and takes many minutes for an
+      # advisory, non-blocking result. Enable it on demand from the Actions UI
+      # via workflow_dispatch when Cerbo GX / Venus OS support needs checking.
+      enable-armv7: false
       # Installs the plugin into a running Signal K server and checks it loads —
       # the strongest available check that the plugin contract is honoured.
       enable-signalk-integration: true

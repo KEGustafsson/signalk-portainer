@@ -59,8 +59,8 @@ These same commands run in CI via the Signal K project's shared
 reusable workflow, on Node 22 and 24 across Linux x64, Linux arm64, macOS and
 Windows. It additionally validates the plugin entry point and schema,
 the start/stop/restart lifecycle, deprecated server API usage, npm pack
-completeness and App Store compatibility — and reports armv7 (Cerbo GX / Venus
-OS) results, which are advisory.
+completeness and App Store compatibility. An armv7 (Cerbo GX / Venus OS) job is
+available on demand from the Actions UI.
 
 ## Design decisions
 
