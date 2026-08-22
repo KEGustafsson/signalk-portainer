@@ -1,6 +1,7 @@
 import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
 import { TtlCache, TTL } from './cache';
 import { PortainerError, type AuthMode } from './errors';
+import { LogDemuxer, type LogFrame } from './logframes';
 import { redactValue } from './redact';
 import {
   EDGE_ENVIRONMENT_TYPES,
@@ -20,6 +21,52 @@ import {
   type PortainerStatus,
   type Stack,
 } from './types';
+
+/** What to read of a container's log. */
+export interface LogOptions {
+  /** Lines from the end. Always sent — an unbounded log can be gigabytes. */
+  tail?: number;
+  /** Unix seconds; only entries after this. */
+  since?: number;
+  /** Prefix each line with Docker's RFC3339 timestamp. */
+  timestamps?: boolean;
+  stdout?: boolean;
+  stderr?: boolean;
+}
+
+/** Lines to read when the caller does not say. */
+export const DEFAULT_LOG_TAIL = 200;
+/** The most any single request may ask for, however large a number it sends. */
+export const MAX_LOG_TAIL = 5000;
+
+/**
+ * The Docker query for a log request.
+ *
+ * `tail` is clamped rather than trusted: a container that has been running for
+ * a year can hold gigabytes, and an unbounded read would hold the whole thing
+ * in memory on the way through.
+ */
+export function logQuery(options: LogOptions = {}, follow = false): string {
+  const stdout = options.stdout !== false;
+  const stderr = options.stderr !== false;
+  const tail = Math.min(
+    MAX_LOG_TAIL,
+    Math.max(1, Math.floor(options.tail ?? DEFAULT_LOG_TAIL) || DEFAULT_LOG_TAIL),
+  );
+
+  const query = new URLSearchParams();
+  // Docker answers 400 when neither stream is asked for, so a caller that turns
+  // both off gets stdout rather than an error about a request it did not make.
+  query.set('stdout', String(stdout || !stderr));
+  query.set('stderr', String(stderr));
+  query.set('tail', String(tail));
+  if (options.since !== undefined && Number.isFinite(options.since)) {
+    query.set('since', String(Math.max(0, Math.floor(options.since))));
+  }
+  if (options.timestamps) query.set('timestamps', 'true');
+  if (follow) query.set('follow', 'true');
+  return query.toString();
+}
 
 /**
  * Read-only slice of the Docker Engine API, reached through Portainer's docker
@@ -51,6 +98,25 @@ export interface DockerApi {
   /** Freezes the processes; the container stays "running" to the daemon. */
   pauseContainer(id: string): Promise<void>;
   unpauseContainer(id: string): Promise<void>;
+
+  // ── logs ────────────────────────────────────────────────────────────────
+
+  /** A bounded slice of the log, demuxed. `tail` is always sent. */
+  logs(id: string, options?: LogOptions): Promise<LogFrame[]>;
+  /**
+   * The log as it happens.
+   *
+   * The promise settles when Portainer has answered, so a container that does
+   * not exist rejects here rather than part-way through an apparently healthy
+   * stream. The iterable then yields frames until Docker ends the stream or the
+   * signal fires — and the signal is the only thing that ends it early, so a
+   * caller that forgets to abort leaks a connection to Portainer.
+   */
+  logStream(
+    id: string,
+    signal: AbortSignal,
+    options?: LogOptions,
+  ): Promise<AsyncIterable<LogFrame>>;
   removeContainer(id: string, opts?: { force?: boolean; removeVolumes?: boolean }): Promise<void>;
 }
 
@@ -104,6 +170,14 @@ interface RawInit {
   headers?: Record<string, string>;
   json?: unknown;
   timeoutMs?: number;
+  /**
+   * Caller-owned lifetime, replacing the request timeout entirely.
+   *
+   * A timeout aborts the whole exchange, body included, so a follow stream that
+   * is meant to stay open until the operator closes it cannot have one. The
+   * caller takes responsibility for ending it instead.
+   */
+  signal?: AbortSignal;
 }
 
 /**
@@ -235,6 +309,39 @@ export class PortainerClient {
           `/containers/${encode(id)}/kill${signal ? `?signal=${encodeURIComponent(signal)}` : ''}`,
         ),
 
+      logs: async (id, options = {}) => {
+        const path = `${await this.dockerBase()}/containers/${encode(id)}/logs?${logQuery(options)}`;
+        const response = await this.send('GET', path, {}, true);
+        const demuxer = new LogDemuxer();
+        const bytes = new Uint8Array(await response.arrayBuffer());
+        return [...demuxer.push(bytes), ...demuxer.flush()];
+      },
+
+      logStream: async (id, signal, options = {}) => {
+        const path = `${await this.dockerBase()}/containers/${encode(id)}/logs?${logQuery(
+          options,
+          true,
+        )}`;
+        // The caller's signal governs the body, which is meant to stay open —
+        // but the handshake still needs a bound, or a Portainer that accepts
+        // the connection and then says nothing holds the request forever. The
+        // two are composed for the send and the timer cleared as soon as the
+        // response arrives, so only the caller can end it from then on.
+        const handshake = new AbortController();
+        const timer = setTimeout(() => handshake.abort(), this.timeoutMs);
+        try {
+          const response = await this.send(
+            'GET',
+            path,
+            { signal: AbortSignal.any([signal, handshake.signal]) },
+            true,
+          );
+          return readLogFrames(response);
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+
       removeContainer: (id, opts = {}) =>
         mutate(
           'DELETE',
@@ -275,7 +382,7 @@ export class PortainerClient {
         method,
         headers,
         body: init.json === undefined ? undefined : JSON.stringify(init.json),
-        signal: AbortSignal.timeout(init.timeoutMs ?? this.timeoutMs),
+        signal: init.signal ?? AbortSignal.timeout(init.timeoutMs ?? this.timeoutMs),
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
       })) as unknown as Response;
     } catch (cause) {
@@ -555,4 +662,31 @@ export function environmentHealth(environment: Environment, nowMs = Date.now()):
   if (environment.Status === 1) return 'up';
   if (environment.Status === 2) return 'down';
   return 'unknown';
+}
+
+/**
+ * Frames from an open log response, yielded as they arrive.
+ *
+ * A free function rather than a method: it needs nothing from the client, and
+ * keeping it out of the class makes it plain that the response is already open
+ * by the time anything here runs.
+ */
+async function* readLogFrames(response: Response): AsyncIterable<LogFrame> {
+  const body = response.body;
+  if (!body) return;
+
+  const demuxer = new LogDemuxer();
+  const reader = body.getReader();
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) yield* demuxer.push(value);
+    }
+    yield* demuxer.flush();
+  } finally {
+    // The caller's signal firing mid-read can leave cancel() rejecting, and a
+    // rejection in a finally would mask whatever ended the loop.
+    await reader.cancel().catch(() => undefined);
+  }
 }

@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M3 — Signal K native.** Read-only APIs, the admin-UI panel,
-> container lifecycle behind its guards, container state in the Signal K data
-> model, watchdog alarms, and PUT control from any Signal K client.
+> **Status: M4a — container logs (server side).** Everything through M3, plus
+> container logs as JSON and as a live SSE stream. The log viewer in the panel
+> is M4b.
 
 ## Documents
 
@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M3)
+## What works today (M4a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -59,11 +59,11 @@ K client can start or stop a container.
   dashboards render labelled values rather than bare numbers. How much is
   published is a choice, not a switch:
 
-  | Level | Publishes |
-  | --- | --- |
-  | `off` | nothing — no polling at all, unless a watchdog is configured; the facade and the panel still work |
-  | `health` | instance reachability and version, running/total counts, and each container's state and health |
-  | `full` | the above plus each container's image, name and short id |
+  | Level    | Publishes                                                                                         |
+  | -------- | ------------------------------------------------------------------------------------------------- |
+  | `off`    | nothing — no polling at all, unless a watchdog is configured; the facade and the panel still work |
+  | `health` | instance reachability and version, running/total counts, and each container's state and health    |
+  | `full`   | the above plus each container's image, name and short id                                          |
 
   `health` is the default: it is what a dashboard and the watchdog need, without
   carrying an image name and a container id for every container through the
@@ -82,25 +82,45 @@ K client can start or stop a container.
   `allowPutControl` is set, subject to the same self-protection, and answered
   `PENDING` until Docker actually finishes.
 
+- **Container logs**, one-shot or live. A container started without a TTY has
+  its stdout and stderr multiplexed into one framed stream; the plugin demuxes
+  it, so every line arrives labelled with the stream it came from and no framing
+  bytes ever reach the browser. A container started _with_ a TTY has no framing
+  and no separation — Docker merges stderr into stdout before the plugin ever
+  sees it — so every line from one of those is labelled `stdout`, whichever
+  stream the process wrote to.
+  Streaming is Server-Sent Events rather than a WebSocket: it inherits the
+  Signal K session cookie, reconnects on its own, and needs no second auth path.
+  A quiet stream sends a comment frame every 20 seconds so proxies and NAT
+  tables do not reap it, and closing the tab ends the upstream request rather
+  than leaving it open.
+  `tail` bounds the history a request starts from — 200 lines by default, 5000
+  at most — but not a follow stream, which then runs for as long as the browser
+  keeps it open. What bounds those is the concurrency ceiling: at most 3 streams
+  per container and 8 in total, so a few forgotten browser tabs cannot exhaust a
+  Raspberry Pi's file descriptors.
+
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
 
-  | Route | Returns |
-  | --- | --- |
-  | `GET /instances` | configured instances and which is default |
-  | `GET /health` | reachability, version and capabilities per instance |
-  | `GET /environments` | environments with health, and which is selected |
-  | `GET /capabilities` | swarm support, swarm id, Docker and Portainer versions |
-  | `GET /containers` | container list (`?all=true` to include stopped) |
-  | `GET /containers/:id` | container inspect |
-  | `GET /stacks` | stacks belonging to this environment |
-  | `GET /stacks/:id/file` | the stack's compose file |
-  | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
-  | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
-  | `GET /control` | what the UI may offer, and whether self-protection is active |
-  | `POST /containers/:id/:action` | `start` · `stop` · `restart` · `kill` · `pause` · `unpause` |
-  | `DELETE /containers/:id` | remove (`?force=` `?removeVolumes=`) |
+  | Route                                      | Returns                                                      |
+  | ------------------------------------------ | ------------------------------------------------------------ |
+  | `GET /instances`                           | configured instances and which is default                    |
+  | `GET /health`                              | reachability, version and capabilities per instance          |
+  | `GET /environments`                        | environments with health, and which is selected              |
+  | `GET /capabilities`                        | swarm support, swarm id, Docker and Portainer versions       |
+  | `GET /containers`                          | container list (`?all=true` to include stopped)              |
+  | `GET /containers/:id`                      | container inspect                                            |
+  | `GET /containers/:id/logs`                 | log lines (`?tail=` `?since=` `?timestamps=`)                |
+  | `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                        |
+  | `GET /stacks`                              | stacks belonging to this environment                         |
+  | `GET /stacks/:id/file`                     | the stack's compose file                                     |
+  | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                     |
+  | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                             |
+  | `GET /control`                             | what the UI may offer, and whether self-protection is active |
+  | `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`  |
+  | `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                         |
 
 ### Guards on the mutating routes
 
@@ -143,7 +163,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 347 unit tests, no network required, 80% coverage enforced
+npm test           # 396 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -157,12 +177,12 @@ available on demand from the Actions UI.
 
 ## Design decisions
 
-| | Decision |
-| --- | --- |
-| **Namespace** | `system.docker.<instance>.*`, prefix configurable, with Signal K metadata (units, display names) so dashboards render it properly. |
-| **Multiple Portainers** | Configured as an array from v1 — adding a second instance is configuration, not a migration. |
-| **Swarm** | Auto-detected from `docker/info`; swarm views appear only when the daemon is in a swarm. No toggle. |
-| **Delta keys** | Compose service identity first (`project_service`), then stack, then container name, then short id — so `docker compose up` recreating a container does not move its paths. |
+|                         | Decision                                                                                                                                                                    |
+| ----------------------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **Namespace**           | `system.docker.<instance>.*`, prefix configurable, with Signal K metadata (units, display names) so dashboards render it properly.                                          |
+| **Multiple Portainers** | Configured as an array from v1 — adding a second instance is configuration, not a migration.                                                                                |
+| **Swarm**               | Auto-detected from `docker/info`; swarm views appear only when the daemon is in a swarm. No toggle.                                                                         |
+| **Delta keys**          | Compose service identity first (`project_service`), then stack, then container name, then short id — so `docker compose up` recreating a container does not move its paths. |
 
 Rationale for each is in [`docs/plan.md` §10](docs/plan.md#10-decisions).
 

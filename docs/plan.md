@@ -386,7 +386,8 @@ process is a footgun.
 | **M2** | Container lifecycle | start/stop/restart/kill + self-protection + destructive guard. |
 | **M3a** | Signal K deltas | Delta poller with the §6.1 key resolution, meta deltas, and the off/health/full publishing levels. |
 | **M3b** | Signal K native | Watchdog notifications, PUT handlers, and container pause/unpause. |
-| **M4** | Logs | SSE log streaming with frame demux, tail/since controls, download. |
+| **M4a** | Logs (server) | Frame demux, one-shot log route, SSE streaming route, stream ceilings. |
+| **M4b** | Logs (UI) | Log viewer in the panel, follow toggle, tail/since controls, download. |
 | **M5** | Stacks write | compose editor, env vars, update/redeploy (incl. git redeploy), create from string/repository; swarm variants when `capabilities.swarm`. |
 | **M6** | Console | WebSocket relay to `/api/websocket/exec` for an interactive shell. |
 
