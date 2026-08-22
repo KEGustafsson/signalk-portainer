@@ -4,6 +4,7 @@
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import { LogViewer } from '../../src/webapp/LogViewer';
+import { MAX_LINES } from '../../src/webapp/logstream';
 import type { DockerContainer } from '../../src/types';
 
 const container: DockerContainer = {
@@ -292,6 +293,24 @@ describe('LogViewer', () => {
       click.mockRestore();
       anchor.mockRestore();
     }
+  });
+
+  it('caps a one-shot read at the same ceiling a following one has', async () => {
+    // `tail` bounds the entries Docker returns, not the lines in them: one
+    // entry can carry many newlines, so a 5000-entry read can be far more than
+    // 5000 lines by the time it reaches the browser.
+    const flood = Array.from({ length: MAX_LINES + 10 }, (_, index) => ({
+      stream: 'stdout',
+      text: `line-${index}`,
+    }));
+    global.fetch = withLines(...flood) as unknown as typeof fetch;
+
+    renderViewer();
+
+    expect(await screen.findByText(`line-${MAX_LINES + 9}`)).toBeInTheDocument();
+    // The oldest are dropped, not rendered into a DOM that grows without bound.
+    expect(screen.queryByText('line-0')).not.toBeInTheDocument();
+    expect(screen.getByText(/5000 lines/)).toBeInTheDocument();
   });
 
   it('closes on Escape', async () => {

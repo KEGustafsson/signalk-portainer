@@ -90,7 +90,11 @@ export function LogViewer({
       const controller = new AbortController();
       apiGet<unknown>(logPath(id, query, false), instance, controller.signal)
         .then((body) => {
-          setLines(normalizeLines(body));
+          // Through appendLines rather than straight in: `tail` bounds the
+          // entries Docker returns, not the lines they contain — one entry can
+          // carry many newlines — so a one-shot read is capped here by the same
+          // ceiling a following one is.
+          setLines(appendLines([], normalizeLines(body)));
           setStatus({ kind: 'idle' });
         })
         .catch((cause: unknown) => {
