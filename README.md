@@ -56,8 +56,8 @@ npm run build      # emits dist/
 
 These same commands run in CI via the Signal K project's shared
 [`plugin-ci`](https://github.com/SignalK/signalk-server/blob/master/.github/workflows/plugin-ci.yml)
-reusable workflow, on Node 20.18.1, 22 and 24 across Linux x64, Linux arm64,
-macOS and Windows. It additionally validates the plugin entry point and schema,
+reusable workflow, on Node 22 and 24 across Linux x64, Linux arm64, macOS and
+Windows. It additionally validates the plugin entry point and schema,
 the start/stop/restart lifecycle, deprecated server API usage, npm pack
 completeness and App Store compatibility — and reports armv7 (Cerbo GX / Venus
 OS) results, which are advisory.

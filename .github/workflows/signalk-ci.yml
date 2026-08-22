@@ -15,9 +15,11 @@
 name: SignalK Plugin CI
 
 on:
+  # Only main on push: pull_request already covers branch pushes, and running
+  # both made every PR execute the whole matrix twice.
   push:
     branches:
-      - '**'
+      - main
   pull_request:
     branches:
       - '**'
@@ -26,7 +28,7 @@ on:
       node-versions:
         description: 'JSON array of Node versions, example: ["22","24"]'
         required: false
-        default: '["20.18.1", "22", "24"]'
+        default: '["22", "24"]'
         type: string
       enable-armv7:
         description: Run armv7 (Cerbo GX / Venus OS) tests via QEMU
@@ -56,10 +58,9 @@ jobs:
       coverage-command: npm test
       build-command: npm run build
       format-check-command: npm run format:check
-      # 20.18.1 is the floor declared in engines (undici's requirement), so the
-      # declared minimum is verified rather than assumed; 22 and 24 are what the
-      # shared workflow covers by default.
-      node-versions: '["20.18.1", "22", "24"]'
+      # The shared workflow's default pair. Note the armv7 job below still
+      # exercises Node 20, which is what Venus OS ships.
+      node-versions: '["22", "24"]'
       # Advisory and non-blocking, but Venus OS on a Cerbo GX is a real target
       # for this plugin, so the result is worth having.
       enable-armv7: true

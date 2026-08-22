@@ -18,8 +18,8 @@
     "clean": "rm -rf dist coverage",
     "lint": "eslint src test",
     "lint:fix": "eslint --fix src test",
-    "format": "prettier --write 'src/**/*.ts' 'test/**/*.ts'",
-    "format:check": "prettier --check 'src/**/*.ts' 'test/**/*.ts'",
+    "format": "prettier --write \"src/**/*.ts\" \"test/**/*.ts\"",
+    "format:check": "prettier --check \"src/**/*.ts\" \"test/**/*.ts\"",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
     "prepublishOnly": "npm run clean && npm run lint && npm run format:check && npm run test && npm run build"
