@@ -1,0 +1,254 @@
+/**
+ * @jest-environment jsdom
+ */
+import { render, screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { ApiError } from '../../src/webapp/api';
+import { StackEditor, type StackDeployment } from '../../src/webapp/StackEditor';
+import type { Stack } from '../../src/types';
+
+const fileStack: Stack = {
+  Id: 3,
+  Name: 'signalk',
+  Type: 2,
+  EndpointId: 1,
+  Status: 1,
+  Env: [{ name: 'TZ', value: 'Europe/Helsinki' }],
+};
+
+const gitStack: Stack = {
+  ...fileStack,
+  Id: 5,
+  Name: 'from-git',
+  GitConfig: { URL: 'https://example.test/boat/stacks', ReferenceName: 'refs/heads/main' },
+};
+
+const withFile = (content = 'services:\n  influxdb:\n') =>
+  jest.fn(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ content }) }));
+
+const renderEditor = (
+  props: Partial<React.ComponentProps<typeof StackEditor>> = {},
+): { onDeploy: jest.Mock; onClose: jest.Mock } => {
+  const onDeploy = jest.fn();
+  const onClose = jest.fn();
+  render(
+    <StackEditor
+      target={{ kind: 'existing', stack: fileStack }}
+      instance="boat"
+      canDeploy
+      busy={false}
+      onDeploy={onDeploy}
+      onClose={onClose}
+      {...props}
+    />,
+  );
+  return { onDeploy, onClose };
+};
+
+describe('StackEditor', () => {
+  beforeEach(() => {
+    global.fetch = withFile() as unknown as typeof fetch;
+  });
+
+  it('loads the compose file and the environment the stack was deployed with', async () => {
+    renderEditor();
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+    expect(screen.getByLabelText('Variable 1 name')).toHaveValue('TZ');
+    expect(screen.getByLabelText('Variable 1 value')).toHaveValue('Europe/Helsinki');
+  });
+
+  it('asks the selected instance for the file', async () => {
+    const fetchMock = global.fetch as unknown as jest.Mock;
+    renderEditor();
+
+    await waitFor(() => expect(fetchMock).toHaveBeenCalled());
+    expect(String(fetchMock.mock.calls[0]?.[0])).toContain('/stacks/3/file?instance=boat');
+  });
+
+  it('will not deploy until something has changed', async () => {
+    const user = userEvent.setup();
+    renderEditor();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Compose file'), '  web:\n');
+
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeEnabled();
+  });
+
+  it('sends the file, the environment and the deploy options', async () => {
+    const user = userEvent.setup();
+    const { onDeploy } = renderEditor();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+
+    await user.clear(screen.getByLabelText('Variable 1 value'));
+    await user.type(screen.getByLabelText('Variable 1 value'), 'UTC');
+    await user.click(screen.getByLabelText('Remove services no longer in the file'));
+    await user.click(screen.getByRole('button', { name: 'Deploy' }));
+
+    const deployment = onDeploy.mock.calls[0]?.[0] as StackDeployment;
+    expect(deployment.content).toBe('services:\n  influxdb:\n');
+    expect(deployment.env).toEqual([{ name: 'TZ', value: 'UTC' }]);
+    expect(deployment.prune).toBe(true);
+    expect(deployment.pullImage).toBe(false);
+  });
+
+  it('drops a variable the operator removed', async () => {
+    const user = userEvent.setup();
+    const { onDeploy } = renderEditor();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Remove TZ' }));
+    await user.click(screen.getByRole('button', { name: 'Deploy' }));
+
+    expect((onDeploy.mock.calls[0]?.[0] as StackDeployment).env).toEqual([]);
+  });
+
+  it('shows a git-backed stack read-only, and offers no deploy at all', async () => {
+    renderEditor({ target: { kind: 'existing', stack: gitStack } });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+    // Deploying a file over it would detach it from the repository; the server
+    // refuses that, and an editable box ending in a refusal says it worse.
+    expect(screen.getByLabelText('Compose file')).toHaveAttribute('readonly');
+    expect(screen.queryByRole('button', { name: 'Deploy' })).not.toBeInTheDocument();
+    expect(screen.getByText(/cannot be edited here/)).toBeInTheDocument();
+  });
+
+  it('is read-only when the configuration does not allow writes', async () => {
+    renderEditor({ canDeploy: false });
+
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+    expect(screen.getByLabelText('Compose file')).toHaveAttribute('readonly');
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeDisabled();
+    expect(screen.getByText(/read-only/)).toBeInTheDocument();
+  });
+
+  it('reports a file that could not be read', async () => {
+    global.fetch = jest.fn(() =>
+      Promise.resolve({
+        ok: false,
+        status: 404,
+        json: async () => ({ error: 'Stack 3 does not belong to this environment' }),
+      }),
+    ) as unknown as typeof fetch;
+
+    renderEditor();
+
+    expect(await screen.findByText(/does not belong to this environment/)).toBeInTheDocument();
+  });
+
+  it('keeps a failed deploy on screen without throwing the file away', async () => {
+    renderEditor({
+      result: { ok: false, error: new ApiError(400, 'Stack is deployed from a repository') },
+    });
+
+    expect(await screen.findByText('Stack is deployed from a repository')).toBeInTheDocument();
+    // The editor is still here, still holding what was typed.
+    expect(screen.getByLabelText('Compose file')).toBeInTheDocument();
+  });
+
+  describe('creating', () => {
+    const renderNew = () => renderEditor({ target: { kind: 'new' } });
+
+    it('needs a name Docker would accept before it will create', async () => {
+      const user = userEvent.setup();
+      renderNew();
+
+      await user.type(screen.getByLabelText('Compose file'), 'services:\n');
+      // A file is not enough on its own: the stack still needs a name.
+      expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      expect(screen.getByRole('button', { name: 'Create' })).toBeEnabled();
+
+      await user.clear(screen.getByLabelText('Name'));
+      await user.type(screen.getByLabelText('Name'), '../etc');
+
+      expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+      expect(screen.getByText(/only letters, digits/)).toBeInTheDocument();
+    });
+
+    it('creates from a compose file', async () => {
+      const user = userEvent.setup();
+      const { onDeploy } = renderNew();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.type(screen.getByLabelText('Compose file'), 'services:\n');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      const deployment = onDeploy.mock.calls[0]?.[0] as StackDeployment;
+      expect(deployment.name).toBe('weather');
+      expect(deployment.content).toBe('services:\n');
+      expect(deployment.repositoryUrl).toBeUndefined();
+    });
+
+    it('creates from a repository, with the fields that belong to one', async () => {
+      const user = userEvent.setup();
+      const { onDeploy } = renderNew();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.selectOptions(screen.getByLabelText('From'), 'repository');
+      await user.type(screen.getByLabelText('Repository URL'), 'https://example.test/boat/stacks');
+      await user.type(screen.getByLabelText('Reference'), 'refs/heads/main');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      const deployment = onDeploy.mock.calls[0]?.[0] as StackDeployment;
+      expect(deployment.repositoryUrl).toBe('https://example.test/boat/stacks');
+      expect(deployment.reference).toBe('refs/heads/main');
+      expect(deployment.content).toBeUndefined();
+      // No file was read: a new stack has none.
+      expect(global.fetch).not.toHaveBeenCalled();
+    });
+
+    it('sends a token given without a username', async () => {
+      // Several git hosts take the token in the password field and ignore the
+      // username; dropping it would clone anonymously and fail.
+      const user = userEvent.setup();
+      const { onDeploy } = renderNew();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.selectOptions(screen.getByLabelText('From'), 'repository');
+      await user.type(screen.getByLabelText('Repository URL'), 'https://example.test/boat/stacks');
+      await user.type(screen.getByLabelText('Password or token'), 'ghp_secret');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      const deployment = onDeploy.mock.calls[0]?.[0] as StackDeployment;
+      expect(deployment.password).toBe('ghp_secret');
+      expect(deployment.username).toBeUndefined();
+    });
+
+    it('will not create from a repository with no URL', async () => {
+      const user = userEvent.setup();
+      renderNew();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.selectOptions(screen.getByLabelText('From'), 'repository');
+
+      expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
+    });
+  });
+
+  it('closes on Escape, but not while a deploy is in flight', async () => {
+    const user = userEvent.setup();
+    const { onClose } = renderEditor({ busy: true });
+
+    await user.keyboard('{Escape}');
+    // Closing would not stop the deploy; it would only hide it.
+    expect(onClose).not.toHaveBeenCalled();
+  });
+});

@@ -273,6 +273,37 @@ describe('facade stack writes', () => {
       expect(body.RepositoryUsername).toBe('deploy');
     });
 
+    it('treats a token with no username as credentials', async () => {
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      let body: Record<string, unknown> = {};
+      boat()
+        .intercept({
+          path: '/api/stacks/create/standalone/repository?endpointId=1',
+          method: 'POST',
+          body: (value: string) => {
+            body = JSON.parse(value) as Record<string, unknown>;
+            return true;
+          },
+        })
+        .reply(200, { Id: 14, Name: 'weather', Type: 2, EndpointId: 1 });
+
+      await request(app()).post('/api/stacks').send({
+        name: 'weather',
+        repositoryUrl: 'https://example.test/boat/stacks',
+        password: 'ghp_secret',
+      });
+
+      // Requiring both halves would clone anonymously and fail on a private
+      // repository, with nothing saying why.
+      expect(body.RepositoryAuthentication).toBe(true);
+      expect(body.RepositoryPassword).toBe('ghp_secret');
+      expect(body.RepositoryUsername).toBe('');
+    });
+
     it('never lets a request turn off certificate verification', async () => {
       withEnvironment();
       boat()

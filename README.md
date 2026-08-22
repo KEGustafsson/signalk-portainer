@@ -11,10 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M5a — stack writes (server side).** Everything through M4, plus
-> starting, stopping, updating, redeploying, creating and deleting stacks over
-> the API, behind the same guards container control uses. The compose editor in
-> the panel is M5b.
+> **Status: M5b — stacks in the panel.** Everything through M5a, plus a Stacks
+> tab that can act: a compose and environment editor, start/stop, redeploy,
+> create, and delete behind a confirmation.
 
 ## Documents
 
@@ -38,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M5a)
+## What works today (M5b)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -112,6 +111,19 @@ K client can start or stop a container.
   keeps it open. What bounds those is the concurrency ceiling: at most 3 streams
   per container and 8 in total, so a few forgotten browser tabs cannot exhaust a
   Raspberry Pi's file descriptors.
+
+- **A stacks editor in the panel.** Each row offers what applies to it: a
+  running stack is stopped and a stopped one started, never both; Redeploy
+  appears only for a stack that has a repository. Edit opens the compose file
+  and the stack's environment variables side by side, with toggles for pruning
+  and re-pulling, and a Deploy that stays disabled until something actually
+  changes. A stack deployed from a repository is shown read-only — deploying a
+  file over it would detach it from git, which the server refuses — and New
+  stack creates one from a file or from a repository. Deleting asks first, in a
+  dialog that names the stack and offers its volumes as a separate, unticked
+  choice. A failed deploy leaves the editor open with the file still in it,
+  because an error message asking the operator to try again should not also
+  throw away what they wrote.
 
 - **Stack control** — start, stop, update, redeploy, create and delete, behind
   the same guards container lifecycle uses. An update sends the compose file
@@ -199,7 +211,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 497 unit tests, no network required, 80% coverage enforced
+npm test           # 547 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

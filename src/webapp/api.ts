@@ -43,11 +43,16 @@ async function request<T>(
   path: string,
   instance?: string,
   signal?: AbortSignal,
+  payload?: unknown,
 ): Promise<T> {
   const response = await fetch(apiUrl(path, instance), {
     method,
     credentials: 'include',
-    headers: { accept: 'application/json' },
+    headers: {
+      accept: 'application/json',
+      ...(payload === undefined ? {} : { 'content-type': 'application/json' }),
+    },
+    ...(payload === undefined ? {} : { body: JSON.stringify(payload) }),
     ...(signal ? { signal } : {}),
   });
 
@@ -89,10 +94,11 @@ export async function apiGet<T>(path: string, instance?: string, signal?: AbortS
  * a path that reads like a read, and so every call site has to name its method.
  */
 export async function apiSend<T>(
-  method: 'POST' | 'DELETE',
+  method: 'POST' | 'PUT' | 'DELETE',
   path: string,
   instance?: string,
   signal?: AbortSignal,
+  body?: unknown,
 ): Promise<T> {
-  return request<T>(method, path, instance, signal);
+  return request<T>(method, path, instance, signal, body);
 }
