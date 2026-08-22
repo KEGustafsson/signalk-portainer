@@ -1,5 +1,7 @@
 # signalk-portainer
 
+[![CI](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/ci.yml/badge.svg)](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/ci.yml)
+
 A Signal K server plugin that manages [Portainer CE](https://www.portainer.io/)
 over its HTTP API — containers, stacks, images, volumes and networks — and
 publishes container health into the Signal K data model.
@@ -45,11 +47,16 @@ container.
 Requires Node.js 20.18.1 or newer (the version `undici` needs).
 
 ```bash
-npm install     # install dependencies
-npm test        # 93 unit tests, no network required, 80% coverage enforced
-npm run lint
-npm run build   # emits dist/
+npm install        # install dependencies
+npm run lint       # eslint
+npm run format:check
+npm test           # 93 unit tests, no network required, 80% coverage enforced
+npm run build      # emits dist/
 ```
+
+Every one of these runs in CI on Node 20.18.1 and 22 for each push and pull
+request, so a failure blocks the merge rather than depending on someone having
+run them locally.
 
 ## Design decisions
 
