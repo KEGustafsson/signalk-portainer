@@ -11,10 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M1 complete — read-only APIs and UI.** The Portainer client,
-> instance registry, configuration validation, the read-only facade and the
-> embedded admin-UI panel are implemented and tested. Container lifecycle
-> actions and delta publishing land in M2–M3.
+> **Status: M2a — container lifecycle (server side).** Read-only APIs, the
+> admin-UI panel, and container start/stop/restart/kill/remove behind their
+> guards. The UI buttons are M2b; delta publishing is M3.
 
 ## Documents
 
@@ -65,6 +64,30 @@ K client can start or stop a container.
   | `GET /stacks/:id/file` | the stack's compose file |
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
   | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
+  | `GET /control` | what the UI may offer, and whether self-protection is active |
+  | `POST /containers/:id/:action` | `start` · `stop` · `restart` · `kill` |
+  | `DELETE /containers/:id` | remove (`?force=` `?removeVolumes=`) |
+
+### Guards on the mutating routes
+
+Three independent checks, each enforced server-side regardless of what the UI
+offers:
+
+- **Control disabled** — every mutating route returns 403 unless
+  `allowPutControl` is set.
+- **Destructive disabled** — removal additionally requires `allowDestructive`.
+  `removeVolumes` defaults to false, so a container's data is never destroyed
+  by implication.
+- **Self-protection** — the plugin identifies the container it runs in and
+  refuses to start, stop, restart, kill or remove it. Stopping that container
+  stops Signal K, the admin UI and the plugin issuing the request, leaving no
+  way back except a shell on the host. Override with `allowSelfManagement`.
+
+Identification reads `/proc/self/cgroup`, falls back to `/proc/self/mountinfo`
+(cgroup v2 often hides the id), then to the hostname, which Docker defaults to
+the short container id. If the plugin is containerised but cannot identify
+itself — a custom `--hostname` under cgroup v2 with no bind mounts — it says so
+in `GET /control` rather than implying a protection it cannot provide.
 
 Requires Node.js 22 or newer — the versions CI actually verifies.
 

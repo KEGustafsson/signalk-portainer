@@ -1,14 +1,25 @@
 import type { IRouter } from 'express';
-import { ConfigError, normalizeConfig, PLUGIN_SCHEMA, type RawConfig } from './config';
+import {
+  ConfigError,
+  normalizeConfig,
+  PLUGIN_SCHEMA,
+  type PluginConfig,
+  type RawConfig,
+} from './config';
 import { registerRoutes } from './facade';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
+import { detectSelfContainer, type SelfContainer } from './self';
 import type { SignalKApp, SignalKPlugin } from './signalk';
 
 const PLUGIN_ID = 'signalk-portainer';
 
 const plugin = (app: SignalKApp): SignalKPlugin => {
   let registry: InstanceRegistry | undefined;
+  let config: PluginConfig | undefined;
+  // Detected once at load: the container id cannot change under a running
+  // process, and probing /proc on every request would be wasted work.
+  const self: SelfContainer = detectSelfContainer();
 
   const log = (message: string): void => app.debug(redactText(message));
 
@@ -68,12 +79,20 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
 
     start(options: object, _restart: (newConfiguration: object) => void): void {
       try {
-        const config = normalizeConfig(options as RawConfig | undefined);
+        config = normalizeConfig(options as RawConfig | undefined);
         registry = new InstanceRegistry(config.instances, log);
+        if (self.inContainer && !self.identified) {
+          log(
+            'Running in a container but unable to identify which one — the Signal K container cannot be protected from being stopped',
+          );
+        } else if (self.identified) {
+          log(`Signal K appears to run in container ${self.shortId} (via ${self.source})`);
+        }
         setStatus(`Starting — ${registry.names.length} instance(s): ${registry.names.join(', ')}`);
         void reportHealth();
       } catch (cause) {
         registry = undefined;
+        config = undefined;
         if (cause instanceof ConfigError) setError(cause.message);
         else setError(`Failed to start: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
@@ -82,11 +101,17 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     stop(): void {
       registry?.close();
       registry = undefined;
+      config = undefined;
       setStatus('Stopped');
     },
 
     registerWithRouter(router: IRouter): void {
-      registerRoutes(router, { registry: () => registry, log });
+      registerRoutes(router, {
+        registry: () => registry,
+        config: () => config,
+        self: () => self,
+        log,
+      });
     },
   };
 };

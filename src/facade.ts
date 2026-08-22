@@ -1,13 +1,25 @@
 import type { Request, Response, Router } from 'express';
 import type { PortainerClient } from './client';
 import { environmentHealth } from './client';
-import { PortainerError } from './errors';
+import type { PluginConfig } from './config';
+import { PolicyError, PortainerError } from './errors';
 import { redactValue } from './redact';
 import { InstanceRegistry, UnknownInstanceError } from './registry';
+import { isSelfContainer, type SelfContainer } from './self';
 
 export interface FacadeDeps {
   registry: () => InstanceRegistry | undefined;
+  config: () => PluginConfig | undefined;
+  /** Identity of the container this plugin runs in, for self-protection. */
+  self: () => SelfContainer;
   log: (message: string) => void;
+}
+
+const LIFECYCLE_ACTIONS = ['start', 'stop', 'restart', 'kill'] as const;
+type LifecycleAction = (typeof LIFECYCLE_ACTIONS)[number];
+
+function isLifecycleAction(value: string): value is LifecycleAction {
+  return (LIFECYCLE_ACTIONS as readonly string[]).includes(value);
 }
 
 /** Reads ?instance=<name>, defaulting to the first enabled instance. */
@@ -136,6 +148,95 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     withClient(deps, async (_req, client) => ({ df: await client.docker.diskUsage() })),
   );
 
+  // ── control surface ─────────────────────────────────────────────────────
+
+  /**
+   * What the UI is permitted to offer. Sending this rather than letting the UI
+   * guess keeps the buttons honest: a disabled action is disabled because the
+   * server says so, and the same rules are enforced again below.
+   */
+  router.get(
+    '/api/control',
+    handle(deps, async () => {
+      const control = deps.config()?.control;
+      const self = deps.self();
+      return {
+        allowPutControl: control?.allowPutControl ?? false,
+        allowDestructive: control?.allowDestructive ?? false,
+        allowSelfManagement: control?.allowSelfManagement ?? false,
+        self: {
+          inContainer: self.inContainer,
+          identified: self.identified,
+          shortId: self.shortId,
+          source: self.source,
+          // Says plainly when self-protection cannot work, instead of leaving
+          // the operator to assume it does.
+          protectionActive: self.identified && !(control?.allowSelfManagement ?? false),
+          warning:
+            self.inContainer && !self.identified
+              ? 'Running in a container but unable to identify which one, so the Signal K container cannot be protected from being stopped'
+              : undefined,
+        },
+      };
+    }),
+  );
+
+  // ── container lifecycle ─────────────────────────────────────────────────
+
+  router.post(
+    '/api/containers/:id/:action',
+    withClient(deps, async (req, client) => {
+      const action = String(req.params.action);
+      const id = String(req.params.id);
+
+      if (!isLifecycleAction(action)) {
+        throw new PortainerError({
+          status: 400,
+          method: 'POST',
+          path: `/api/containers/:id/${action}`,
+          message: `Unknown container action "${action}"`,
+          hint: `supported actions: ${LIFECYCLE_ACTIONS.join(', ')}`,
+        });
+      }
+
+      requireControlEnabled(deps);
+      requireNotSelf(deps, id, action);
+
+      switch (action) {
+        case 'start':
+          await client.docker.startContainer(id);
+          break;
+        case 'stop':
+          await client.docker.stopContainer(id);
+          break;
+        case 'restart':
+          await client.docker.restartContainer(id);
+          break;
+        case 'kill':
+          await client.docker.killContainer(id);
+          break;
+      }
+
+      return { id, action, ok: true };
+    }),
+  );
+
+  router.delete(
+    '/api/containers/:id',
+    withClient(deps, async (req, client) => {
+      const id = String(req.params.id);
+      const removeVolumes = req.query.removeVolumes === 'true';
+      const force = req.query.force === 'true';
+
+      requireControlEnabled(deps);
+      requireDestructiveAllowed(deps);
+      requireNotSelf(deps, id, 'remove');
+
+      await client.docker.removeContainer(id, { force, removeVolumes });
+      return { id, action: 'remove', removeVolumes, ok: true };
+    }),
+  );
+
   // ── swarm (absent unless the daemon is a swarm member) ──────────────────
 
   router.get(
@@ -152,6 +253,39 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       await requireSwarm(client, '/api/swarm/nodes');
       return { nodes: await client.docker.listNodes() };
     }),
+  );
+}
+
+/** Every mutating route is off entirely when control is disabled. */
+function requireControlEnabled(deps: FacadeDeps): void {
+  if (deps.config()?.control.allowPutControl) return;
+  throw new PolicyError(
+    'Container control is disabled',
+    'enable "Allow Signal K PUT control" in the plugin configuration',
+  );
+}
+
+/** Removal destroys state, so it needs its own opt-in beyond control. */
+function requireDestructiveAllowed(deps: FacadeDeps): void {
+  if (deps.config()?.control.allowDestructive) return;
+  throw new PolicyError(
+    'Destructive operations are disabled',
+    'enable "Allow destructive operations" in the plugin configuration',
+  );
+}
+
+/**
+ * The footgun this plugin exists to avoid: stopping the container that runs
+ * Signal K takes the plugin, the admin UI and the operator's way back with it.
+ */
+function requireNotSelf(deps: FacadeDeps, containerId: string, action: string): void {
+  const self = deps.self();
+  if (deps.config()?.control.allowSelfManagement) return;
+  if (!isSelfContainer(self, containerId)) return;
+
+  throw new PolicyError(
+    `Refusing to ${action} the container running Signal K`,
+    'this would stop the plugin issuing the request; enable "Allow managing the Signal K container itself" if you really mean to',
   );
 }
 
@@ -198,6 +332,10 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
     } catch (cause) {
       if (cause instanceof UnknownInstanceError) {
         res.status(404).json({ error: cause.message });
+        return;
+      }
+      if (cause instanceof PolicyError) {
+        res.status(cause.status).json({ error: cause.message, hint: cause.hint });
         return;
       }
       if (cause instanceof PortainerError) {

@@ -2,16 +2,43 @@ import express from 'express';
 import request from 'supertest';
 import type { MockAgent } from 'undici';
 import { normalizeConfig } from '../src/config';
+import type { PluginConfig } from '../src/config';
 import { PortainerError } from '../src/errors';
+import type { SelfContainer } from '../src/self';
 import { registerRoutes, instanceParam } from '../src/facade';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import * as fixtures from './fixtures';
 import { createMockAgent } from './support';
 
-const buildApp = (registry: InstanceRegistry | undefined) => {
+const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
+
+const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig['control'] => ({
+  allowPutControl: true,
+  allowDestructive: false,
+  allowSelfManagement: false,
+  watchdog: [],
+  ...overrides,
+});
+
+const buildApp = (
+  registry: InstanceRegistry | undefined,
+  opts: { control?: PluginConfig['control']; self?: SelfContainer } = {},
+) => {
   const app = express();
   const router = express.Router();
-  registerRoutes(router, { registry: () => registry, log: () => {} });
+  registerRoutes(router, {
+    registry: () => registry,
+    config: () =>
+      registry
+        ? ({
+            instances: [],
+            telemetry: { enabled: false, intervalSeconds: 30, emitStats: false, pathPrefix: 'x' },
+            control: opts.control ?? control(),
+          } as PluginConfig)
+        : undefined,
+    self: () => opts.self ?? noSelf,
+    log: () => {},
+  });
   app.use(router);
   return app;
 };
@@ -265,6 +292,241 @@ describe('facade swarm routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.services).toHaveLength(1);
+  });
+});
+
+describe('facade container lifecycle', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  const SELF_ID = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
+  const selfContainer: SelfContainer = {
+    inContainer: true,
+    id: SELF_ID,
+    shortId: SELF_ID.slice(0, 12),
+    source: 'cgroup',
+    identified: true,
+  };
+
+  const boat = () => agent.get('https://boat.test:9443');
+  const withEnvironment = () =>
+    boat()
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  it.each([
+    ['start', 'start'],
+    ['stop', 'stop'],
+    ['restart', 'restart'],
+    ['kill', 'kill'],
+  ])('performs %s through the docker proxy', async (action, dockerPath) => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/abc123def456/${dockerPath}`,
+        method: 'POST',
+      })
+      .reply(204, '');
+
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      `/api/containers/abc123def456/${action}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ action, ok: true });
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('rejects an unknown action before contacting Portainer', async () => {
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      '/api/containers/abc123def456/destroy',
+    );
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Unknown container action');
+    expect(res.body.hint).toContain('start, stop, restart, kill');
+  });
+
+  it('refuses every action on the container running Signal K', async () => {
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+
+    for (const action of ['start', 'stop', 'restart', 'kill']) {
+      const res = await request(app).post(`/api/containers/${SELF_ID}/${action}`);
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('running Signal K');
+    }
+    // Nothing was sent to Portainer: no interceptor was registered at all.
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('recognises itself from the short id the UI actually sends', async () => {
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+
+    const res = await request(app).post(`/api/containers/${SELF_ID.slice(0, 12)}/stop`);
+
+    expect(res.status).toBe(403);
+  });
+
+  it('allows managing the Signal K container once explicitly enabled', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: `/api/endpoints/1/docker/containers/${SELF_ID}/restart`, method: 'POST' })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      control: control({ allowSelfManagement: true }),
+    });
+
+    const res = await request(app).post(`/api/containers/${SELF_ID}/restart`);
+
+    expect(res.status).toBe(200);
+  });
+
+  it('leaves other containers alone when self-protection is active', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/ffffffffffff/stop', method: 'POST' })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const res = await request(app).post('/api/containers/ffffffffffff/stop');
+
+    expect(res.status).toBe(200);
+  });
+
+  it('refuses all mutations when control is disabled', async () => {
+    const app = buildApp(new InstanceRegistry(config), {
+      control: control({ allowPutControl: false }),
+    });
+
+    const stop = await request(app).post('/api/containers/abc123def456/stop');
+    const remove = await request(app).delete('/api/containers/abc123def456');
+
+    expect(stop.status).toBe(403);
+    expect(stop.body.error).toContain('Container control is disabled');
+    expect(remove.status).toBe(403);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('refuses removal unless destructive operations are enabled', async () => {
+    const app = buildApp(new InstanceRegistry(config));
+    const res = await request(app).delete('/api/containers/abc123def456');
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('Destructive operations are disabled');
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('removes a container without its volumes by default', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
+        method: 'DELETE',
+      })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), {
+      control: control({ allowDestructive: true }),
+    });
+    const res = await request(app).delete('/api/containers/abc123def456');
+
+    expect(res.status).toBe(200);
+    expect(res.body.removeVolumes).toBe(false);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('removes volumes only when asked explicitly', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456?force=true&v=true',
+        method: 'DELETE',
+      })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), {
+      control: control({ allowDestructive: true }),
+    });
+    const res = await request(app).delete(
+      '/api/containers/abc123def456?force=true&removeVolumes=true',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.removeVolumes).toBe(true);
+  });
+
+  it('still refuses to remove the Signal K container even when destructive is on', async () => {
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      control: control({ allowDestructive: true }),
+    });
+
+    const res = await request(app).delete(`/api/containers/${SELF_ID}`);
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('running Signal K');
+  });
+});
+
+describe('facade control surface', () => {
+  it('reports what the UI may offer, and that protection is active', async () => {
+    const res = await request(
+      buildApp(new InstanceRegistry(config), {
+        self: {
+          inContainer: true,
+          id: 'a'.repeat(64),
+          shortId: 'a'.repeat(12),
+          source: 'cgroup',
+          identified: true,
+        },
+      }),
+    ).get('/api/control');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({
+      allowPutControl: true,
+      allowDestructive: false,
+      allowSelfManagement: false,
+    });
+    expect(res.body.self.protectionActive).toBe(true);
+    expect(res.body.self.warning).toBeUndefined();
+  });
+
+  it('warns when it is containerised but cannot identify itself', async () => {
+    const res = await request(
+      buildApp(new InstanceRegistry(config), {
+        self: { inContainer: true, source: 'none', identified: false },
+      }),
+    ).get('/api/control');
+
+    expect(res.body.self.protectionActive).toBe(false);
+    expect(res.body.self.warning).toContain('unable to identify');
+  });
+
+  it('reports protection inactive when self-management is enabled', async () => {
+    const res = await request(
+      buildApp(new InstanceRegistry(config), {
+        self: {
+          inContainer: true,
+          id: 'a'.repeat(64),
+          shortId: 'a'.repeat(12),
+          source: 'cgroup',
+          identified: true,
+        },
+        control: control({ allowSelfManagement: true }),
+      }),
+    ).get('/api/control');
+
+    expect(res.body.self.protectionActive).toBe(false);
   });
 });
 

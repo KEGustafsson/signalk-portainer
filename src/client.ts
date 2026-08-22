@@ -38,6 +38,17 @@ export interface DockerApi {
   listServices(): Promise<DockerService[]>;
   /** Swarm only — callers must check capabilities().swarm first. */
   listNodes(): Promise<DockerNode[]>;
+
+  // ── lifecycle ───────────────────────────────────────────────────────────
+  // Each mutation drops the cached container list, so the next read reflects
+  // the change instead of serving a snapshot from before it.
+
+  startContainer(id: string): Promise<void>;
+  /** `timeoutSeconds` is how long Docker waits before SIGKILL. */
+  stopContainer(id: string, timeoutSeconds?: number): Promise<void>;
+  restartContainer(id: string, timeoutSeconds?: number): Promise<void>;
+  killContainer(id: string, signal?: string): Promise<void>;
+  removeContainer(id: string, opts?: { force?: boolean; removeVolumes?: boolean }): Promise<void>;
 }
 
 /** A JWT is valid for ~8h; renew at 7h so a long poll never straddles expiry. */
@@ -133,6 +144,22 @@ export class PortainerClient {
         this.json<T>('GET', `${await this.dockerBase()}${path}`),
       );
 
+    const encode = (id: string): string => encodeURIComponent(id);
+    const seconds = (value?: number): string =>
+      value === undefined ? '' : `?t=${Math.max(0, Math.floor(value))}`;
+
+    /**
+     * Runs a state-changing proxy call and drops the cached reads, so the UI's
+     * next poll shows the result rather than a pre-change snapshot.
+     */
+    const mutate = async (method: string, path: string): Promise<void> => {
+      const response = await this.send(method, `${await this.dockerBase()}${path}`, {}, true);
+      // Docker answers 204 for these; the body is drained so the connection is
+      // released rather than left for the collector.
+      await response.body?.cancel().catch(() => undefined);
+      this.cache.invalidate();
+    };
+
     return {
       info: () => this.dockerInfo(),
 
@@ -166,6 +193,30 @@ export class PortainerClient {
       listServices: () => proxied<DockerService[]>('/services', 'services', TTL.containers),
 
       listNodes: () => proxied<DockerNode[]>('/nodes', 'nodes', TTL.containers),
+
+      startContainer: (id) => mutate('POST', `/containers/${encode(id)}/start`),
+
+      stopContainer: (id, timeoutSeconds) =>
+        mutate('POST', `/containers/${encode(id)}/stop${seconds(timeoutSeconds)}`),
+
+      restartContainer: (id, timeoutSeconds) =>
+        mutate('POST', `/containers/${encode(id)}/restart${seconds(timeoutSeconds)}`),
+
+      killContainer: (id, signal) =>
+        mutate(
+          'POST',
+          `/containers/${encode(id)}/kill${signal ? `?signal=${encodeURIComponent(signal)}` : ''}`,
+        ),
+
+      removeContainer: (id, opts = {}) =>
+        mutate(
+          'DELETE',
+          // v defaults to false: removing a container's volumes destroys data
+          // and must never be implied by removing the container.
+          `/containers/${encode(id)}?force=${opts.force ? 'true' : 'false'}&v=${
+            opts.removeVolumes ? 'true' : 'false'
+          }`,
+        ),
     };
   }
 
