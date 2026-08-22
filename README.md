@@ -11,10 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M1 complete — read-only APIs and UI.** The Portainer client,
-> instance registry, configuration validation, the read-only facade and the
-> embedded admin-UI panel are implemented and tested. Container lifecycle
-> actions and delta publishing land in M2–M3.
+> **Status: M2a — container lifecycle (server side).** Read-only APIs, the
+> admin-UI panel, and container start/stop/restart/kill/remove behind their
+> guards. The UI buttons are M2b; delta publishing is M3.
 
 ## Documents
 
@@ -38,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M1)
+## What works today (M2a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -49,9 +48,12 @@ K client can start or stop a container.
   networks — plus services and nodes when the environment is a Swarm. It polls
   every 10s and surfaces facade errors with their hint rather than an empty
   table.
-- A read-only REST facade under `/plugins/signalk-portainer/api/`,
-  authenticated by Signal K. Every route takes `?instance=<name>`, defaulting
-  to the first enabled instance:
+- **Container lifecycle** — start, stop, restart, kill and remove, each behind
+  the guards below. Exposed by the API only for now; the panel's buttons are
+  M2b.
+- A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
+  Signal K. Every route takes `?instance=<name>`, defaulting to the first
+  enabled instance:
 
   | Route | Returns |
   | --- | --- |
@@ -65,6 +67,39 @@ K client can start or stop a container.
   | `GET /stacks/:id/file` | the stack's compose file |
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
   | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
+  | `GET /control` | what the UI may offer, and whether self-protection is active |
+  | `POST /containers/:id/:action` | `start` · `stop` · `restart` · `kill` |
+  | `DELETE /containers/:id` | remove (`?force=` `?removeVolumes=`) |
+
+### Guards on the mutating routes
+
+Three independent checks, each enforced server-side regardless of what the UI
+offers:
+
+- **Control disabled** — every mutating route returns 403 unless
+  `allowPutControl` is set.
+- **Destructive disabled** — removal additionally requires `allowDestructive`.
+  `removeVolumes` defaults to false, so a container's data is never destroyed
+  by implication.
+- **Self-protection** — the plugin identifies the container it runs in and
+  refuses to start, stop, restart, kill or remove it. Stopping that container
+  stops Signal K, the admin UI and the plugin issuing the request, leaving no
+  way back except a shell on the host. Override with `allowSelfManagement`.
+
+Identification reads `/proc/self/cgroup`, falls back to `/proc/self/mountinfo`
+(cgroup v2 often hides the id), then to the hostname, which Docker defaults to
+the short container id. If the plugin is containerised but cannot identify
+itself — a custom `--hostname` under cgroup v2 with no bind mounts — it says so
+in `GET /control` rather than implying a protection it cannot provide.
+
+Docker accepts a container name wherever an id goes, so a reference that is not
+already our id is inspected and the guard is applied to the canonical id Docker
+reports — asking for the Signal K container by name is refused just the same. A
+reference that cannot be resolved is never mutated: not knowing what it points
+at is not the same as knowing it is safe.
+
+Every mutation the guards accept, and every refusal, is logged through
+`app.debug` — enable the plugin in the server's Log page to keep the trail.
 
 Requires Node.js 22 or newer — the versions CI actually verifies.
 
@@ -77,7 +112,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 152 unit tests, no network required, 80% coverage enforced
+npm test           # 197 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

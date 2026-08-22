@@ -59,6 +59,29 @@ describe('PortainerClient docker read surface', () => {
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
+  it('drops the container list after a mutation but keeps the environment', async () => {
+    // Registered once: a second /api/endpoints request has no interceptor and
+    // fails the test, which is the point — a mutation must not cost one.
+    withEnvironment();
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .times(2);
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/c1f0e2a3b4c5/stop', method: 'POST' })
+      .reply(204, '');
+
+    const client = createClient(agent);
+
+    await client.docker.listContainers();
+    await client.docker.stopContainer('c1f0e2a3b4c5');
+    // Served from Portainer again rather than from the pre-stop snapshot.
+    await client.docker.listContainers();
+
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
   it('encodes the container id into the inspect path', async () => {
     withEnvironment();
     agent

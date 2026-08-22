@@ -111,3 +111,23 @@ function isTimeoutCause(cause: unknown, depth = 0): boolean {
   if (message.includes('timeout') || message.includes('aborted')) return true;
   return isTimeoutCause((cause as { cause?: unknown }).cause, depth + 1);
 }
+
+/**
+ * The plugin itself refusing an operation — control disabled, destructive
+ * operations disabled, or the target being the Signal K container.
+ *
+ * Deliberately not a PortainerError: that type maps an upstream 403 to 502,
+ * because Portainer refusing the plugin is a gateway problem rather than the
+ * browser's. A policy refusal is the opposite — it is exactly the browser's
+ * 403 and must reach it unchanged.
+ */
+export class PolicyError extends Error {
+  readonly status = 403;
+  readonly hint: string;
+
+  constructor(message: string, hint: string) {
+    super(message);
+    this.name = 'PolicyError';
+    this.hint = hint;
+  }
+}
