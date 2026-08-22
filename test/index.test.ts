@@ -8,14 +8,19 @@ const createApp = () => {
   const statuses: string[] = [];
   const errors: string[] = [];
   const debug: string[] = [];
+  const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
+    enabled: true,
+  });
   const app: SignalKApp = {
-    debug: (message) => debug.push(message),
-    error: (message) => errors.push(message),
-    setPluginStatus: (message) => statuses.push(message),
-    setPluginError: (message) => errors.push(message),
+    debug: debugFn,
+    error: (message: string) => errors.push(message),
+    setPluginStatus: (message: string) => statuses.push(message),
+    setPluginError: (message: string) => errors.push(message),
   };
   return { app, statuses, errors, debug };
 };
+
+const noopRestart = (): void => {};
 
 const validOptions = {
   instances: [{ name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' }],
@@ -49,7 +54,7 @@ describe('plugin lifecycle', () => {
     const { app, errors } = createApp();
     const instance = plugin(app);
 
-    expect(() => instance.start({ instances: [] })).not.toThrow();
+    expect(() => instance.start({ instances: [] }, noopRestart)).not.toThrow();
     expect(errors.join(' ')).toMatch(/No Portainer instance configured/);
   });
 
@@ -66,7 +71,7 @@ describe('plugin lifecycle', () => {
     const { app, statuses } = createApp();
     const instance = plugin(app);
 
-    instance.start(validOptions);
+    instance.start(validOptions, noopRestart);
     await flush();
     await flush();
 
@@ -86,7 +91,7 @@ describe('plugin lifecycle', () => {
     const { app, errors } = createApp();
     const instance = plugin(app);
 
-    instance.start(validOptions);
+    instance.start(validOptions, noopRestart);
     await flush();
     await flush();
 
@@ -94,11 +99,59 @@ describe('plugin lifecycle', () => {
     instance.stop();
   });
 
+  it('redacts credentials before they reach any Signal K host callback', async () => {
+    // The instance name is token-shaped, so it appears verbatim in the failure
+    // message the plugin builds. setPluginError persists whatever it is given,
+    // so the redaction has to happen before the callback, not only in app.error.
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .replyWithError(new Error('connect ECONNREFUSED'));
+
+    const { app, statuses, errors } = createApp();
+    const instance = plugin(app);
+
+    instance.start(
+      { instances: [{ name: 'ptr_boat', host: 'boat.test', apiKey: 'ptr_boat' }] },
+      noopRestart,
+    );
+    await flush();
+    await flush();
+
+    expect(errors.join(' ')).toMatch(/No Portainer instance reachable/);
+    expect([...statuses, ...errors].join(' ')).not.toContain('ptr_boat');
+    instance.stop();
+  });
+
+  it('does not let an in-flight health check overwrite the stopped status', async () => {
+    // The probe must fully succeed, otherwise it reports an error instead of a
+    // status and the race this guards against is never exercised.
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo);
+    pool.intercept({ path: '/api/system/status', method: 'GET' }).reply(200, fixtures.systemStatus);
+
+    const { app, statuses } = createApp();
+    const instance = plugin(app);
+
+    instance.start(validOptions, noopRestart);
+    instance.stop();
+    await flush();
+    await flush();
+
+    // The probe started before stop(); its result belongs to a dead registry.
+    expect(statuses.at(-1)).toBe('Stopped');
+  });
+
   it('never writes a credential to the debug log', () => {
     const { app, debug } = createApp();
     const instance = plugin(app);
 
-    instance.start(validOptions);
+    instance.start(validOptions, noopRestart);
     expect(debug.join(' ')).not.toContain('ptr_boat');
     instance.stop();
   });

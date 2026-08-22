@@ -1,4 +1,4 @@
-import type { Router } from 'express';
+import type { IRouter } from 'express';
 import { ConfigError, normalizeConfig, PLUGIN_SCHEMA, type RawConfig } from './config';
 import { registerRoutes } from './facade';
 import { InstanceRegistry } from './registry';
@@ -12,14 +12,18 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
 
   const log = (message: string): void => app.debug(redactText(message));
 
+  // Redaction happens once, here, so no host callback can ever receive a raw
+  // message: setPluginStatus/setPluginError persist their text in the server.
   const setStatus = (message: string): void => {
-    app.setPluginStatus?.(message);
-    log(message);
+    const safe = redactText(message);
+    app.setPluginStatus(safe);
+    app.debug(safe);
   };
 
   const setError = (message: string): void => {
-    app.setPluginError?.(message);
-    app.error(redactText(message));
+    const safe = redactText(message);
+    app.setPluginError(safe);
+    app.error(safe);
   };
 
   /**
@@ -27,9 +31,13 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    * even when Portainer is down, so the UI can say why.
    */
   const reportHealth = async (): Promise<void> => {
-    if (!registry) return;
+    // stop() can clear the registry, and a restart can replace it, while this
+    // probe is in flight; results from a superseded registry must be dropped.
+    const active = registry;
+    if (!active) return;
     try {
-      const health = await registry.health();
+      const health = await active.health();
+      if (registry !== active) return;
       const up = health.filter((instance) => instance.reachable);
       if (up.length === health.length) {
         const detail = up
@@ -47,6 +55,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       if (up.length === 0) setError(`No Portainer instance reachable — ${detail}`);
       else setError(`${up.length}/${health.length} instances reachable — ${detail}`);
     } catch (cause) {
+      if (registry !== active) return;
       setError(`Health check failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     }
   };
@@ -57,7 +66,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     description: 'Manage Portainer CE containers and stacks, and publish container health',
     schema: PLUGIN_SCHEMA,
 
-    start(options: unknown): void {
+    start(options: object, _restart: (newConfiguration: object) => void): void {
       try {
         const config = normalizeConfig(options as RawConfig | undefined);
         registry = new InstanceRegistry(config.instances, log);
@@ -76,7 +85,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       setStatus('Stopped');
     },
 
-    registerWithRouter(router: Router): void {
+    registerWithRouter(router: IRouter): void {
       registerRoutes(router, { registry: () => registry, log });
     },
   };

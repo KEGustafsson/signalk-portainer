@@ -63,6 +63,7 @@ export class PortainerClient {
   private readonly cache = new TtlCache();
   private readonly log: (message: string) => void;
   private jwt: { token: string; issuedAt: number } | undefined;
+  private jwtInFlight: Promise<string> | undefined;
 
   constructor(options: PortainerClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
@@ -151,6 +152,20 @@ export class PortainerClient {
   private async jwtToken(): Promise<string> {
     if (this.auth.mode !== 'userPass') throw new Error('jwtToken called outside userPass mode');
     if (this.jwt && Date.now() - this.jwt.issuedAt < JWT_MAX_AGE_MS) return this.jwt.token;
+
+    // Concurrent callers share one /api/auth round trip: without this, a burst
+    // of parallel requests authenticates once per request and the last response
+    // wins the cache slot.
+    if (!this.jwtInFlight) {
+      this.jwtInFlight = this.authenticate().finally(() => {
+        this.jwtInFlight = undefined;
+      });
+    }
+    return this.jwtInFlight;
+  }
+
+  private async authenticate(): Promise<string> {
+    if (this.auth.mode !== 'userPass') throw new Error('authenticate called outside userPass mode');
 
     // Deliberately not via send(): the auth call must carry no auth header.
     let res: Response;
@@ -291,7 +306,14 @@ export class PortainerClient {
   }
 
   close(): void {
-    if (this.ownsDispatcher && this.dispatcher) void this.dispatcher.close();
+    if (!this.ownsDispatcher || !this.dispatcher) return;
+    // close() rejecting during shutdown would otherwise surface as an unhandled
+    // rejection and take the Signal K process down with it.
+    this.dispatcher.close().catch((cause: unknown) => {
+      this.log(
+        `dispatcher close failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    });
   }
 
   /** Safe to log or return: no credentials, no snapshot payloads. */

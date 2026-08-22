@@ -1,20 +1,10 @@
-/**
- * The slice of the Signal K server plugin API this plugin uses. Declared
- * locally so the plugin carries no runtime dependency on the server package.
- */
-export interface SignalKApp {
-  debug: (message: string) => void;
-  error: (message: string) => void;
-  setPluginStatus?: (message: string) => void;
-  setPluginError?: (message: string) => void;
-}
+import type { Plugin, PluginConstructor, ServerAPI } from '@signalk/server-api';
 
-export interface SignalKPlugin {
-  id: string;
-  name: string;
-  description: string;
-  schema: unknown;
-  start: (options: unknown) => void;
-  stop: () => void;
-  registerWithRouter?: (router: import('express').Router) => void;
-}
+/**
+ * The slice of the Signal K server API this plugin uses, derived from the
+ * server's own types rather than hand-written, so contract drift is a compile
+ * error instead of a runtime surprise.
+ */
+export type SignalKApp = Pick<ServerAPI, 'debug' | 'error' | 'setPluginStatus' | 'setPluginError'>;
+
+export type { Plugin as SignalKPlugin, PluginConstructor };

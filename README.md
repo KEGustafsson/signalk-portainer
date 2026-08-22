@@ -42,6 +42,8 @@ container.
 - Two facade routes, authenticated by Signal K:
   `GET /plugins/signalk-portainer/api/instances` and `.../api/health`.
 
+Requires Node.js 20.18.1 or newer (the version `undici` needs).
+
 ```bash
 npm install     # install dependencies
 npm test        # 58 unit tests, no network required

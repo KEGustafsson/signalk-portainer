@@ -60,6 +60,29 @@ describe('PortainerClient authentication', () => {
     expect(authCalls).toBe(1);
   });
 
+  it('authenticates once when several requests start concurrently', async () => {
+    const pool = agent.get(BASE_URL);
+    let authCalls = 0;
+
+    pool.intercept({ path: '/api/auth', method: 'POST' }).reply(200, () => {
+      authCalls += 1;
+      return { jwt: 'eyJhbGciOiJIUzI1NiJ9.payload.signature' };
+    });
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .times(3);
+
+    const client = createClient(agent, {
+      auth: { mode: 'userPass', username: 'admin', password: 'hunter2' },
+    });
+
+    await Promise.all([client.systemStatus(), client.systemStatus(), client.systemStatus()]);
+
+    // Without in-flight coalescing this is 3.
+    expect(authCalls).toBe(1);
+  });
+
   it('renews the JWT once when Portainer answers 401, then succeeds', async () => {
     const pool = agent.get(BASE_URL);
     let authCalls = 0;

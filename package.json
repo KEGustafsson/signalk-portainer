@@ -35,7 +35,7 @@
   },
   "homepage": "https://github.com/KEGustafsson/signalk-portainer#readme",
   "engines": {
-    "node": ">=18.0.0"
+    "node": ">=20.18.1"
   },
   "files": [
     "dist",
@@ -46,6 +46,7 @@
     "undici": "^7.16.0"
   },
   "devDependencies": {
+    "@signalk/server-api": "^2.31.1",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
     "@types/supertest": "^6.0.2",
