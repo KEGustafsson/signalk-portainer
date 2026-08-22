@@ -109,6 +109,21 @@ export const volumeList: DockerVolumeList = {
 export const emptyVolumeList: DockerVolumeList = { Volumes: null };
 
 export const stacks: Stack[] = [
-  { Id: 3, Name: 'signalk', Type: 2, EndpointId: 1, Status: 1 },
+  {
+    Id: 3,
+    Name: 'signalk',
+    Type: 2,
+    EndpointId: 1,
+    Status: 1,
+    Env: [{ name: 'TZ', value: 'Europe/Helsinki' }],
+  },
   { Id: 9, Name: 'elsewhere', Type: 2, EndpointId: 4, Status: 1 },
+  {
+    Id: 5,
+    Name: 'from-git',
+    Type: 2,
+    EndpointId: 1,
+    Status: 1,
+    GitConfig: { URL: 'https://example.test/boat/stacks', ReferenceName: 'refs/heads/main' },
+  },
 ];

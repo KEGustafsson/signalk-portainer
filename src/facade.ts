@@ -1,5 +1,11 @@
-import type { Request, Response, Router } from 'express';
-import type { PortainerClient } from './client';
+import express, { type Request, type Response, type Router } from 'express';
+import type {
+  PortainerClient,
+  StackEnvVar,
+  StackFromRepository,
+  StackFromString,
+  StackUpdate,
+} from './client';
 import { environmentHealth } from './client';
 import type { PluginConfig } from './config';
 import { PolicyError, PortainerError } from './errors';
@@ -7,6 +13,7 @@ import { redactValue } from './redact';
 import { toLines } from './logframes';
 import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
+import { stackHoldsSelf } from './stackguard';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
 
 export interface FacadeDeps {
@@ -149,6 +156,93 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
         });
       }
       return { id, content: await client.stackFile(id) };
+    }),
+  );
+
+  // ── stack writes ────────────────────────────────────────────────────────
+
+  /**
+   * A compose file is text, and text arrives in a body. Bounded rather than
+   * unlimited: this is a compose file, not an upload endpoint, and an
+   * unbounded body is a way to make Signal K run out of memory.
+   */
+  const body = express.json({ limit: '512kb' });
+
+  router.post(
+    '/api/stacks',
+    body,
+    withClient(deps, async (req, client) => {
+      requireControlEnabled(deps);
+      const create = readStackCreate(req);
+      const created =
+        'content' in create
+          ? await client.createStackFromString(create)
+          : await client.createStackFromRepository(create);
+
+      audit(deps, req, `stack create ${create.name}`, create.name);
+      return { ok: true, stack: created };
+    }),
+  );
+
+  router.post(
+    '/api/stacks/:id/:action',
+    withClient(deps, async (req, client) => {
+      const id = stackId(req, 'POST', '/api/stacks/:id/:action');
+      const action = String(req.params.action);
+      if (!isStackAction(action)) {
+        throw new PortainerError({
+          status: 400,
+          method: 'POST',
+          path: `/api/stacks/:id/${action}`,
+          message: `Unknown stack action "${action}"`,
+          hint: `supported actions: ${STACK_ACTIONS.join(', ')}`,
+        });
+      }
+
+      requireControlEnabled(deps);
+      // Starting a stack cannot take Signal K down with it; everything else can.
+      if (action !== 'start') await requireStackNotSelf(deps, client, id, action);
+
+      if (action === 'start') await client.startStack(id);
+      else if (action === 'stop') await client.stopStack(id);
+      else await client.redeployStack(id, readRedeploy(req));
+
+      audit(deps, req, `stack ${action}`, String(id));
+      return { id, action, ok: true };
+    }),
+  );
+
+  router.put(
+    '/api/stacks/:id',
+    body,
+    withClient(deps, async (req, client) => {
+      const id = stackId(req, 'PUT', '/api/stacks/:id');
+      requireControlEnabled(deps);
+      // A redeploy restarts every container in the stack, Signal K included.
+      await requireStackNotSelf(deps, client, id, 'update');
+
+      const update = readStackUpdate(req);
+      await client.updateStack(id, update);
+
+      audit(deps, req, `stack update${update.prune ? ' --prune' : ''}`, String(id));
+      return { id, action: 'update', ok: true };
+    }),
+  );
+
+  router.delete(
+    '/api/stacks/:id',
+    withClient(deps, async (req, client) => {
+      const id = stackId(req, 'DELETE', '/api/stacks/:id');
+      const removeVolumes = req.query.removeVolumes === 'true';
+
+      requireControlEnabled(deps);
+      requireDestructiveAllowed(deps);
+      await requireStackNotSelf(deps, client, id, 'delete');
+
+      await client.deleteStack(id, { removeVolumes });
+
+      audit(deps, req, `stack delete${removeVolumes ? ' --volumes' : ''}`, String(id));
+      return { id, action: 'delete', removeVolumes, ok: true };
     }),
   );
 
@@ -458,6 +552,175 @@ function audit(
       ? `${reference} (${canonical.slice(0, 12)})`
       : reference;
   deps.log(`container ${action}: ${target} on ${instance}`);
+}
+
+const STACK_ACTIONS = ['start', 'stop', 'redeploy'] as const;
+type StackAction = (typeof STACK_ACTIONS)[number];
+
+function isStackAction(value: string): value is StackAction {
+  return (STACK_ACTIONS as readonly string[]).includes(value);
+}
+
+/** The stack id in the path, or a 400 that says what was wrong with it. */
+function stackId(req: Request, method: string, path: string): number {
+  const id = Number(req.params.id);
+  if (Number.isInteger(id) && id > 0) return id;
+  throw new PortainerError({
+    status: 400,
+    method,
+    path,
+    message: `Stack id "${String(req.params.id)}" is not a number`,
+  });
+}
+
+/** A 400 about the request body, phrased for whoever sent it. */
+function badRequest(method: string, path: string, message: string, hint?: string): PortainerError {
+  return new PortainerError({ status: 400, method, path, message, ...(hint ? { hint } : {}) });
+}
+
+/**
+ * Environment variables out of an untrusted body.
+ *
+ * Absent and empty are different answers: absent means "leave the stack's
+ * environment alone", so undefined is passed through rather than flattened to
+ * an empty list that would unset every variable the stack runs with.
+ */
+function readEnv(value: unknown, method: string, path: string): StackEnvVar[] | undefined {
+  if (value === undefined) return undefined;
+  if (!Array.isArray(value)) {
+    throw badRequest(method, path, 'env must be a list of { name, value }');
+  }
+  return value.map((entry) => {
+    const pair = entry as { name?: unknown; value?: unknown };
+    if (typeof pair?.name !== 'string' || pair.name.length === 0) {
+      throw badRequest(method, path, 'every environment variable needs a name');
+    }
+    return { name: pair.name, value: typeof pair.value === 'string' ? pair.value : '' };
+  });
+}
+
+/** The compose file and environment for an update. */
+function readStackUpdate(req: Request): StackUpdate {
+  const path = '/api/stacks/:id';
+  const payload = (req.body ?? {}) as {
+    content?: unknown;
+    env?: unknown;
+    prune?: unknown;
+    pullImage?: unknown;
+  };
+  if (typeof payload.content !== 'string' || payload.content.trim().length === 0) {
+    throw badRequest(
+      'PUT',
+      path,
+      'content is required and must be the compose file as text',
+      'send { content, env?, prune?, pullImage? }',
+    );
+  }
+  const env = readEnv(payload.env, 'PUT', path);
+  return {
+    content: payload.content,
+    ...(env ? { env } : {}),
+    prune: payload.prune === true,
+    pullImage: payload.pullImage === true,
+  };
+}
+
+/** Redeploy options come from the query, since the route takes no body. */
+function readRedeploy(req: Request): { prune: boolean; pullImage: boolean } {
+  return { prune: req.query.prune === 'true', pullImage: req.query.pullImage === 'true' };
+}
+
+/**
+ * A create, from either a compose file or a repository.
+ *
+ * Which one it is comes from what the body carries; asking for both is a
+ * mistake rather than a preference, so it is refused instead of picking one.
+ */
+function readStackCreate(req: Request): StackFromString | StackFromRepository {
+  const path = '/api/stacks';
+  const payload = (req.body ?? {}) as {
+    name?: unknown;
+    content?: unknown;
+    repositoryUrl?: unknown;
+    reference?: unknown;
+    composeFile?: unknown;
+    env?: unknown;
+    username?: unknown;
+    password?: unknown;
+    tlsSkipVerify?: unknown;
+  };
+
+  if (typeof payload.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(payload.name)) {
+    throw badRequest(
+      'POST',
+      path,
+      'name is required, and may contain only letters, digits, dot, dash and underscore',
+      'Docker uses the stack name as a resource-name prefix, so it has the same rules',
+    );
+  }
+
+  const hasContent = typeof payload.content === 'string' && payload.content.trim().length > 0;
+  const hasRepository =
+    typeof payload.repositoryUrl === 'string' && payload.repositoryUrl.trim().length > 0;
+  if (hasContent === hasRepository) {
+    throw badRequest(
+      'POST',
+      path,
+      'a stack comes from either a compose file or a repository',
+      hasContent ? 'send content or repositoryUrl, not both' : 'send content or repositoryUrl',
+    );
+  }
+
+  const env = readEnv(payload.env, 'POST', path);
+  const authentication =
+    typeof payload.username === 'string' && typeof payload.password === 'string'
+      ? { username: payload.username, password: payload.password }
+      : undefined;
+
+  if (hasContent) {
+    return { name: payload.name, content: payload.content as string, ...(env ? { env } : {}) };
+  }
+  return {
+    name: payload.name,
+    repositoryUrl: payload.repositoryUrl as string,
+    ...(typeof payload.reference === 'string' ? { reference: payload.reference } : {}),
+    ...(typeof payload.composeFile === 'string' ? { composeFile: payload.composeFile } : {}),
+    ...(env ? { env } : {}),
+    ...(authentication ? { authentication } : {}),
+    tlsSkipVerify: payload.tlsSkipVerify === true,
+  };
+}
+
+/**
+ * The stack version of the footgun guard.
+ *
+ * Container self-protection catches "stop this container"; this catches "stop
+ * the stack that contains it", which is the same outcome reached by naming
+ * something else. The stack's containers are read including stopped ones: a
+ * Signal K that is currently down is still what the operator would lose.
+ */
+async function requireStackNotSelf(
+  deps: FacadeDeps,
+  client: PortainerClient,
+  id: number,
+  action: string,
+): Promise<void> {
+  const self = deps.self();
+  if (deps.config()?.control.allowSelfManagement) return;
+  if (!self.identified) return;
+
+  const stacks = await client.listStacks();
+  const stack = stacks.find((candidate) => candidate.Id === id);
+  // An unknown id is the client's 404 to give, not a reason to refuse here.
+  if (!stack) return;
+
+  const containers = await client.docker.listContainers(true);
+  if (stackHoldsSelf(stack.Name, self.id ?? self.shortId, containers)) {
+    throw new PolicyError(
+      `Refusing to ${action} stack ${stack.Name}, which contains the container running Signal K`,
+      'this would stop the plugin issuing the request; enable "Allow managing the Signal K container itself" if you really mean to',
+    );
+  }
 }
 
 /** Every mutating route is off entirely when control is disabled. */

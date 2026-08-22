@@ -11,9 +11,10 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M4b — the log viewer.** Everything through M4a, plus a log viewer
-> in the admin panel: opened from a container row, one-shot or following, with
-> stderr coloured and a download of what is on screen.
+> **Status: M5a — stack writes (server side).** Everything through M4, plus
+> starting, stopping, updating, redeploying, creating and deleting stacks over
+> the API, behind the same guards container control uses. The compose editor in
+> the panel is M5b.
 
 ## Documents
 
@@ -112,6 +113,16 @@ K client can start or stop a container.
   per container and 8 in total, so a few forgotten browser tabs cannot exhaust a
   Raspberry Pi's file descriptors.
 
+- **Stack control** — start, stop, update, redeploy, create and delete, behind
+  the same guards container lifecycle uses. An update sends the compose file
+  and, unless the caller says otherwise, the environment the stack already had:
+  editing a file is not a statement about its variables. `prune` is always sent
+  explicitly and defaults to off, so a file that lost a service by accident does
+  not take the service with it. A redeploy pulls from the stack's own repository
+  and is refused for a stack that has none, rather than passed on to Portainer
+  to fail on a field the operator never filled in. Creating picks the swarm or
+  standalone route from the environment rather than asking the caller.
+
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
@@ -128,6 +139,10 @@ K client can start or stop a container.
   | `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                        |
   | `GET /stacks`                              | stacks belonging to this environment                         |
   | `GET /stacks/:id/file`                     | the stack's compose file                                     |
+  | `POST /stacks`                             | create from `content` or from `repositoryUrl`                |
+  | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` `?pullImage=`)      |
+  | `PUT /stacks/:id`                          | deploy a new compose file and environment                    |
+  | `DELETE /stacks/:id`                       | delete (`?removeVolumes=`)                                   |
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                     |
   | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                             |
   | `GET /control`                             | what the UI may offer, and whether self-protection is active |
@@ -145,7 +160,11 @@ offers:
   `removeVolumes` defaults to false, so a container's data is never destroyed
   by implication.
 - **Self-protection** — the plugin identifies the container it runs in and
-  refuses to start, stop, restart, kill or remove it. Stopping that container
+  refuses to start, stop, restart, kill or remove it — and refuses to stop,
+  update, redeploy or delete the _stack_ that contains it, which is the same
+  outcome reached by naming something one level up. The stack check reads the
+  compose project and swarm namespace labels off the containers themselves, and
+  counts a Signal K that is currently stopped: down is not gone. Stopping that container
   stops Signal K, the admin UI and the plugin issuing the request, leaving no
   way back except a shell on the host. Override with `allowSelfManagement`.
 
@@ -175,7 +194,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 439 unit tests, no network required, 80% coverage enforced
+npm test           # 487 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

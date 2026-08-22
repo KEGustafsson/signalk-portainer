@@ -1,0 +1,410 @@
+import express from 'express';
+import request from 'supertest';
+import type { MockAgent } from 'undici';
+import { normalizeConfig } from '../src/config';
+import type { PluginConfig } from '../src/config';
+import { registerRoutes } from '../src/facade';
+import { InstanceRegistry } from '../src/registry';
+import type { SelfContainer } from '../src/self';
+import * as fixtures from './fixtures';
+import { createMockAgent } from './support';
+
+const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
+
+const SELF_ID = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
+const selfContainer: SelfContainer = {
+  inContainer: true,
+  id: SELF_ID,
+  shortId: SELF_ID.slice(0, 12),
+  source: 'cgroup',
+  identified: true,
+};
+
+const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig['control'] => ({
+  allowPutControl: true,
+  allowDestructive: false,
+  allowSelfManagement: false,
+  watchdog: [],
+  ...overrides,
+});
+
+const buildApp = (
+  registry: InstanceRegistry | undefined,
+  opts: { control?: PluginConfig['control']; self?: SelfContainer; log?: (m: string) => void } = {},
+) => {
+  const app = express();
+  const router = express.Router();
+  registerRoutes(router, {
+    registry: () => registry,
+    config: () =>
+      registry
+        ? ({
+            instances: [],
+            telemetry: {
+              level: 'off' as const,
+              intervalSeconds: 30,
+              emitStats: false,
+              pathPrefix: 'x',
+            },
+            control: opts.control ?? control(),
+          } as PluginConfig)
+        : undefined,
+    self: () => opts.self ?? noSelf,
+    log: opts.log ?? (() => {}),
+  });
+  app.use(router);
+  return app;
+};
+
+const config = normalizeConfig({
+  instances: [{ name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' }],
+}).instances;
+
+/** A container carrying the compose label that says which stack it is in. */
+const inStack = (id: string, name: string, project: string) => ({
+  Id: id,
+  Names: [`/${name}`],
+  Image: 'x:1',
+  Created: 0,
+  State: 'running',
+  Status: 'Up',
+  Labels: { 'com.docker.compose.project': project },
+});
+
+describe('facade stack writes', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  const boat = () => agent.get('https://boat.test:9443');
+
+  const withEnvironment = () =>
+    boat()
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  const withStacks = () => {
+    withEnvironment();
+    boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+  };
+
+  /** The container list a self-protection check reads. */
+  const withContainers = (...containers: ReturnType<typeof inStack>[]) =>
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, containers);
+
+  const app = (opts: Parameters<typeof buildApp>[1] = {}) =>
+    buildApp(new InstanceRegistry(config), opts);
+
+  describe('lifecycle', () => {
+    it('starts a stack', async () => {
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3/start?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(app()).post('/api/stacks/3/start');
+
+      expect(res.status).toBe(200);
+      expect(res.body).toMatchObject({ id: 3, action: 'start', ok: true });
+    });
+
+    it('stops a stack', async () => {
+      withStacks();
+      withContainers(inStack('ffffffffffff0000', 'influx', 'signalk'));
+      boat()
+        .intercept({ path: '/api/stacks/3/stop?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(app({ self: selfContainer })).post('/api/stacks/3/stop');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('refuses an action it does not have', async () => {
+      const res = await request(app()).post('/api/stacks/3/destroy');
+
+      expect(res.status).toBe(400);
+      expect(res.body.hint).toContain('start, stop, redeploy');
+      // Nothing was asked of Portainer.
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('refuses a stack id that is not a number', async () => {
+      const res = await request(app()).post('/api/stacks/latest/stop');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('not a number');
+    });
+
+    it('passes prune and pull through to a redeploy', async () => {
+      withStacks();
+      withContainers();
+      let body: Record<string, unknown> = {};
+      boat()
+        .intercept({
+          path: '/api/stacks/5/git/redeploy?endpointId=1',
+          method: 'PUT',
+          body: (value: string) => {
+            body = JSON.parse(value) as Record<string, unknown>;
+            return true;
+          },
+        })
+        .reply(200, fixtures.stacks[2]);
+
+      const res = await request(app()).post('/api/stacks/5/redeploy?pullImage=true');
+
+      expect(res.status).toBe(200);
+      expect(body.PullImage).toBe(true);
+      expect(body.Prune).toBe(false);
+    });
+  });
+
+  describe('update', () => {
+    it('sends the compose file and reports what it did', async () => {
+      withStacks();
+      withContainers();
+      let body: Record<string, unknown> = {};
+      boat()
+        .intercept({
+          path: '/api/stacks/3?endpointId=1',
+          method: 'PUT',
+          body: (value: string) => {
+            body = JSON.parse(value) as Record<string, unknown>;
+            return true;
+          },
+        })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .send({ content: 'services:\n  web:\n', env: [{ name: 'TZ', value: 'UTC' }] });
+
+      expect(res.status).toBe(200);
+      expect(body.StackFileContent).toBe('services:\n  web:\n');
+      expect(body.Env).toEqual([{ name: 'TZ', value: 'UTC' }]);
+    });
+
+    it('refuses an update with no file in it', async () => {
+      const res = await request(app()).put('/api/stacks/3').send({ env: [] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('content is required');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('refuses an environment variable with no name', async () => {
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .send({ content: 'services:\n', env: [{ value: 'orphan' }] });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('needs a name');
+    });
+
+    it('refuses an env that is not a list', async () => {
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .send({ content: 'services:\n', env: 'TZ=UTC' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('must be a list');
+    });
+  });
+
+  describe('create', () => {
+    it('creates from a compose file', async () => {
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
+        .reply(200, { Id: 11, Name: 'weather', Type: 2, EndpointId: 1 });
+
+      const res = await request(app())
+        .post('/api/stacks')
+        .send({ name: 'weather', content: 'services:\n  wx:\n' });
+
+      expect(res.status).toBe(200);
+      expect(res.body.stack).toMatchObject({ Id: 11, Name: 'weather' });
+    });
+
+    it('refuses a name Docker would not accept', async () => {
+      const res = await request(app())
+        .post('/api/stacks')
+        .send({ name: '../etc', content: 'services:\n' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('name is required');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('refuses a create that names neither a file nor a repository', async () => {
+      const res = await request(app()).post('/api/stacks').send({ name: 'weather' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('either a compose file or a repository');
+    });
+
+    it('refuses a create that names both', async () => {
+      // Asking for both is a mistake, not a preference between them.
+      const res = await request(app())
+        .post('/api/stacks')
+        .send({ name: 'weather', content: 'services:\n', repositoryUrl: 'https://example.test/x' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.hint).toContain('not both');
+    });
+  });
+
+  describe('delete', () => {
+    it('is refused while destructive operations are off', async () => {
+      const res = await request(app()).delete('/api/stacks/3');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('Destructive operations are disabled');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('keeps the volumes unless they are asked for', async () => {
+      withStacks();
+      withContainers();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=false', method: 'DELETE' })
+        .reply(204, '');
+
+      const res = await request(app({ control: control({ allowDestructive: true }) })).delete(
+        '/api/stacks/3',
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.removeVolumes).toBe(false);
+    });
+
+    it('removes the volumes when they are', async () => {
+      withStacks();
+      withContainers();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=true', method: 'DELETE' })
+        .reply(204, '');
+
+      const res = await request(app({ control: control({ allowDestructive: true }) })).delete(
+        '/api/stacks/3?removeVolumes=true',
+      );
+
+      expect(res.status).toBe(200);
+      expect(res.body.removeVolumes).toBe(true);
+    });
+  });
+
+  describe('guards', () => {
+    it('refuses every write while control is disabled', async () => {
+      const off = app({ control: control({ allowPutControl: false }) });
+
+      for (const send of [
+        () => request(off).post('/api/stacks/3/stop'),
+        () => request(off).put('/api/stacks/3').send({ content: 'services:\n' }),
+        () => request(off).post('/api/stacks').send({ name: 'x', content: 'services:\n' }),
+        () => request(off).delete('/api/stacks/3'),
+      ]) {
+        const res = await send();
+        expect(res.status).toBe(403);
+      }
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('refuses to stop the stack the Signal K container is in', async () => {
+      // The container guard catches "stop this container"; this catches the
+      // same outcome reached by naming the stack around it.
+      withStacks();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+
+      const res = await request(app({ self: selfContainer })).post('/api/stacks/3/stop');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('contains the container running Signal K');
+    });
+
+    it('refuses to update or delete that stack too', async () => {
+      for (const send of [
+        async () => {
+          withStacks();
+          withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+          return request(app({ self: selfContainer }))
+            .put('/api/stacks/3')
+            .send({ content: 'services:\n' });
+        },
+        async () => {
+          withStacks();
+          withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+          return request(
+            app({ self: selfContainer, control: control({ allowDestructive: true }) }),
+          ).delete('/api/stacks/3');
+        },
+      ]) {
+        const res = await send();
+        expect(res.status).toBe(403);
+        expect(res.body.error).toContain('running Signal K');
+      }
+    });
+
+    it('still starts that stack, which cannot take Signal K down', async () => {
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3/start?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(app({ self: selfContainer })).post('/api/stacks/3/start');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('allows the stack write once self-management is enabled', async () => {
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3/stop?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(
+        app({ self: selfContainer, control: control({ allowSelfManagement: true }) }),
+      ).post('/api/stacks/3/stop');
+
+      expect(res.status).toBe(200);
+      // The container list is never read: the guard is off, not just passed.
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('leaves a stack alone that Signal K is not in', async () => {
+      withStacks();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'infrastructure'));
+      boat()
+        .intercept({ path: '/api/stacks/3/stop?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      const res = await request(app({ self: selfContainer })).post('/api/stacks/3/stop');
+
+      expect(res.status).toBe(200);
+    });
+
+    it('logs a refusal as well as an accepted write', async () => {
+      const lines: string[] = [];
+      withStacks();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+
+      await request(app({ self: selfContainer, log: (m) => lines.push(m) })).post(
+        '/api/stacks/3/stop',
+      );
+
+      expect(lines.join('\n')).toContain('refused');
+    });
+  });
+});
