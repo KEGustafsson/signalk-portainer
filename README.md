@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M4a — container logs (server side).** Everything through M3, plus
-> container logs as JSON and as a live SSE stream. The log viewer in the panel
-> is M4b.
+> **Status: M4b — the log viewer.** Everything through M4a, plus a log viewer
+> in the admin panel: opened from a container row, one-shot or following, with
+> stderr coloured and a download of what is on screen.
 
 ## Documents
 
@@ -81,6 +81,18 @@ K client can start or stop a container.
   button or an automation rule can do what the panel does. Registered only when
   `allowPutControl` is set, subject to the same self-protection, and answered
   `PENDING` until Docker actually finishes.
+
+- **A log viewer in the panel**, opened from any container row — a stopped one
+  included, since the logs of something that exited are the reason to look at
+  them. Choose how many lines to start from and how far back to reach, turn
+  timestamps on, and turn Follow on to watch it live. stderr is coloured apart
+  from ordinary output and can be shown on its own, and what is on screen can
+  be downloaded as a text file. The buffer holds the last 5000 lines, so a
+  container writing steadily cannot grow the page without bound; the view
+  follows the tail only while the operator is already at the bottom of it.
+  Every way of leaving — closing the viewer, turning Follow off, switching
+  instance, or the container stopping — closes the stream, because one left
+  open holds a server slot until the cap refuses the next viewer.
 
 - **Container logs**, one-shot or live. A container started without a TTY has
   its stdout and stderr multiplexed into one framed stream; the plugin demuxes
@@ -163,7 +175,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 396 unit tests, no network required, 80% coverage enforced
+npm test           # 438 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

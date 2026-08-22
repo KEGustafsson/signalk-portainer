@@ -23,19 +23,28 @@ interface FacadeError {
   hint?: string;
 }
 
+/**
+ * The full URL for a facade path, with the instance attached.
+ *
+ * Exported because an EventSource takes a URL rather than going through
+ * `fetch`, and the two must agree about how the instance is attached.
+ */
+export function apiUrl(path: string, instance?: string): string {
+  // Some paths already carry a query (?all=true, ?force=true), so the separator
+  // has to be chosen rather than assumed — appending a second '?' makes the
+  // facade ignore the instance and silently serve the default one.
+  const separator = path.includes('?') ? '&' : '?';
+  const query = instance ? `${separator}instance=${encodeURIComponent(instance)}` : '';
+  return `${BASE}${path}${query}`;
+}
+
 async function request<T>(
   method: string,
   path: string,
   instance?: string,
   signal?: AbortSignal,
 ): Promise<T> {
-  // Some paths already carry a query (?all=true, ?force=true), so the separator
-  // has to be chosen rather than assumed — appending a second '?' makes the
-  // facade ignore the instance and silently serve the default one.
-  const separator = path.includes('?') ? '&' : '?';
-  const query = instance ? `${separator}instance=${encodeURIComponent(instance)}` : '';
-
-  const response = await fetch(`${BASE}${path}${query}`, {
+  const response = await fetch(apiUrl(path, instance), {
     method,
     credentials: 'include',
     headers: { accept: 'application/json' },
