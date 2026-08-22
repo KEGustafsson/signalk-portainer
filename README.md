@@ -11,17 +11,20 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M1a — read-only APIs.** The Portainer client, instance registry,
-> configuration validation and the full read-only facade are implemented and
-> tested. The webapp UI is M1b; delta publishing and container lifecycle
-> actions land in M2–M3.
+> **Status: M1 complete — read-only APIs and UI.** The Portainer client,
+> instance registry, configuration validation, the read-only facade and the
+> embedded admin-UI panel are implemented and tested. Container lifecycle
+> actions and delta publishing land in M2–M3.
 
 ## Documents
 
 - [`docs/plan.md`](docs/plan.md) — architecture, configuration schema, Signal K
   integration, safety rails, milestones, and the settled design decisions.
 - [`docs/portainer-api.md`](docs/portainer-api.md) — researched reference of the
-  Portainer CE 2.x API surface the plugin will use.
+  Portainer CE 2.x API surface the plugin uses.
+- [`docs/signalk-webapp.md`](docs/signalk-webapp.md) — the Signal K embedded
+  webapp contract: Module Federation, the fixed `./AppPanel` name, React
+  singleton sharing, and why cookie auth makes the facade design correct.
 
 ## In one paragraph
 
@@ -29,18 +32,23 @@ The plugin talks to Portainer server-side (never from the browser: no CORS, no
 token in the client, no self-signed-cert interstitial, no mixed content) and
 exposes its own small REST facade under `/plugins/signalk-portainer/api/*`,
 protected by Signal K's own authentication. On top of that facade sit an
-embedded webapp for day-to-day container work, a delta poller that turns
-container state into Signal K paths under `system.docker.<instance>.*`,
-watchdog notifications that raise a Signal K alarm when a container that should
-be running is not, and PUT handlers so any Signal K client can start or stop a
-container.
+embedded webapp for day-to-day container work. Planned for M2–M3: a delta
+poller turning container state into Signal K paths under
+`system.docker.<instance>.*`, watchdog notifications raising a Signal K alarm
+when a container that should be running is not, and PUT handlers so any Signal
+K client can start or stop a container.
 
-## What works today (M0)
+## What works today (M1)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
 - The plugin resolves each instance's Docker environment, probes Swarm support,
   and reports connected versions in its Signal K plugin status.
+- An **embedded panel in the Signal K admin UI** with an instance selector and
+  read-only tables for environments, containers, stacks, images, volumes and
+  networks — plus services and nodes when the environment is a Swarm. It polls
+  every 10s and surfaces facade errors with their hint rather than an empty
+  table.
 - A read-only REST facade under `/plugins/signalk-portainer/api/`,
   authenticated by Signal K. Every route takes `?instance=<name>`, defaulting
   to the first enabled instance:
@@ -64,7 +72,7 @@ Requires Node.js 20.18.1 or newer (the version `undici` needs).
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 115 unit tests, no network required, 80% coverage enforced
+npm test           # 152 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
