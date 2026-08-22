@@ -130,7 +130,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 294 unit tests, no network required, 80% coverage enforced
+npm test           # 301 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -155,7 +155,7 @@ Rationale for each is in [`docs/plan.md` §10](docs/plan.md#10-decisions).
 
 ### Delta paths
 
-```
+```text
 system.docker.<instance>.status.reachable            boolean
 system.docker.<instance>.status.version              string   (Docker version)
 system.docker.<instance>.status.containersRunning    number

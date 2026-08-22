@@ -37,9 +37,6 @@ const SUFFIXES: Record<Exclude<TelemetryLevel, 'off'>, readonly string[]> = {
   full: ['state', 'health', 'image', 'name', 'id'],
 };
 
-/** Every suffix any level can publish, for clearing a container that is gone. */
-const ALL_SUFFIXES = SUFFIXES.full;
-
 /** Everything published for one container, keyed by path suffix. */
 function containerValues(container: DockerContainer): Record<string, unknown> {
   const name = container.Names?.[0]?.replace(/^\//, '');
@@ -90,8 +87,21 @@ const META: Record<string, MetaValue['value']> = {
  * One instance of this per configured Portainer instance.
  */
 export class DeltaBuilder {
-  /** Container keys published on the previous poll. */
-  private published = new Set<string>();
+  /**
+   * What the previous poll published: container key → the suffixes that
+   * actually carried a value.
+   *
+   * Suffixes rather than keys alone, because a suffix can vanish on its own —
+   * recreate a compose service without a healthcheck and `.health` stops being
+   * reported while the container and its key stay exactly as they were. Without
+   * this, the old verdict would sit in the data model forever.
+   *
+   * Tracked rather than assumed, because publishing null to a path that never
+   * existed creates it: a dashboard would grow a permanently empty row.
+   */
+  private published = new Map<string, Set<string>>();
+  /** Status suffixes published for this instance, cleared the same way. */
+  private publishedStatus = new Set<string>();
   /** Paths that have already had their meta delta sent. */
   private readonly metaSent = new Set<string>();
 
@@ -122,11 +132,14 @@ export class DeltaBuilder {
     };
 
     const status = joinPath(this.base(), 'status');
-    values.push({ path: joinPath(status, 'reachable'), value: snapshot.reachable });
-    addMeta(joinPath(status, 'reachable'), 'status.reachable');
-    if (snapshot.version) {
-      values.push({ path: joinPath(status, 'version'), value: snapshot.version });
-    }
+    const addStatus = (suffix: string, value: unknown): void => {
+      values.push({ path: joinPath(status, suffix), value });
+      this.publishedStatus.add(suffix);
+      addMeta(joinPath(status, suffix), `status.${suffix}`);
+    };
+
+    addStatus('reachable', snapshot.reachable);
+    if (snapshot.version) addStatus('version', snapshot.version);
 
     // An unreachable instance publishes its status and stops there. Reporting
     // zero containers would be a claim about the environment that this poll has
@@ -137,38 +150,44 @@ export class DeltaBuilder {
     }
 
     const running = snapshot.containers.filter((container) => container.State === 'running').length;
-    values.push({ path: joinPath(status, 'containersRunning'), value: running });
-    addMeta(joinPath(status, 'containersRunning'), 'status.containersRunning');
-    values.push({ path: joinPath(status, 'containersTotal'), value: snapshot.containers.length });
-    addMeta(joinPath(status, 'containersTotal'), 'status.containersTotal');
+    addStatus('containersRunning', running);
+    addStatus('containersTotal', snapshot.containers.length);
 
     const keys = assignKeys(snapshot.containers);
-    const seen = new Set<string>();
+    const seen = new Map<string, Set<string>>();
 
     for (const container of snapshot.containers) {
       const assigned = keys.get(container.Id);
       if (!assigned) continue;
-      seen.add(assigned.key);
       const root = joinPath(this.base(), 'containers', assigned.key);
 
       const available = containerValues(container);
+      const carried = new Set<string>();
       for (const suffix of SUFFIXES[this.level]) {
         const value = available[suffix];
         if (value === undefined) continue;
         const path = joinPath(root, suffix);
         values.push({ path, value });
         addMeta(path, `containers.${suffix}`);
+        carried.add(suffix);
+      }
+      seen.set(assigned.key, carried);
+
+      // A suffix this container used to report and no longer does — a compose
+      // service recreated without a healthcheck is the usual way. The container
+      // is still here, so only that path is cleared.
+      for (const suffix of this.published.get(assigned.key) ?? []) {
+        if (carried.has(suffix)) continue;
+        values.push({ path: joinPath(root, suffix), value: null });
       }
     }
 
     // Gone since the last poll: published once as null so a dashboard clears,
     // then forgotten so it is not republished forever.
-    for (const key of this.published) {
+    for (const [key, suffixes] of this.published) {
       if (seen.has(key)) continue;
       const root = joinPath(this.base(), 'containers', key);
-      // Cleared across every suffix, not just this level's: the level can have
-      // been turned down since those paths were published.
-      for (const suffix of ALL_SUFFIXES) {
+      for (const suffix of suffixes) {
         values.push({ path: joinPath(root, suffix), value: null });
       }
     }
@@ -184,14 +203,19 @@ export class DeltaBuilder {
    */
   clear(): PathValue[] {
     const values: PathValue[] = [];
-    for (const key of this.published) {
+    for (const [key, suffixes] of this.published) {
       const root = joinPath(this.base(), 'containers', key);
-      for (const suffix of ALL_SUFFIXES) {
+      for (const suffix of suffixes) {
         values.push({ path: joinPath(root, suffix), value: null });
       }
     }
-    values.push({ path: joinPath(this.base(), 'status', 'reachable'), value: null });
-    this.published = new Set();
+    // The instance's own paths too: leaving a container count behind would have
+    // a dashboard reporting containers for a plugin that stopped watching them.
+    for (const suffix of this.publishedStatus) {
+      values.push({ path: joinPath(this.base(), 'status', suffix), value: null });
+    }
+    this.published = new Map();
+    this.publishedStatus = new Set();
     return values;
   }
 }

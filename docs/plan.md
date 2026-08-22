@@ -295,8 +295,9 @@ container id changes every recreate and the container name can change with it;
 the service identity does not. Names are normalised — lowercased, non-alphanumerics
 to `_` — so paths stay valid.
 
-Each container also publishes its real id and name as paths (`.id`, `.name`),
-so the readable key never costs you the ability to identify the exact container.
+Each container also publishes its short id — the 12 hex characters `docker ps`
+shows — and its name as paths (`.id`, `.name`), so the readable key never costs
+you the ability to identify the exact container.
 
 > Implemented in M3a as paths rather than as `$source` metadata, as this section
 > originally proposed. A `SourceRef` encoding the container id would change on
@@ -445,5 +446,6 @@ Upgraded from the original "container names with normalisation". Plain container
 names break on the most ordinary operation there is — `docker compose up`
 recreating a container — whereas the `com.docker.compose.project`/`service`
 labels survive it. So the key resolves through compose identity first, stack
-identity second, container name third, short id last, with the real id and name
-carried in `$source`. Readable *and* stable, instead of choosing one.
+identity second, container name third, short id last, with the short id and the
+name published as their own paths. Readable *and* stable, instead of choosing
+one.

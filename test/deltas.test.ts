@@ -161,6 +161,38 @@ describe('DeltaBuilder', () => {
     });
   });
 
+  describe('when a value stops being reported', () => {
+    it('clears health when a container is recreated without a healthcheck', () => {
+      // Same compose service, same key, but the new container has no
+      // healthcheck. Without clearing, the old verdict — possibly "unhealthy" —
+      // sits in the data model forever.
+      const builder = new DeltaBuilder('system.docker', 'boat');
+      builder.build(snapshot());
+
+      const { values } = builder.build(
+        snapshot({ containers: [container({ Status: 'Up 2 seconds' })] }),
+      );
+
+      expect(byPath(values)['system.docker.boat.containers.influx.health']).toBeNull();
+      // The container is still there, so its other paths carry values.
+      expect(byPath(values)['system.docker.boat.containers.influx.state']).toBe('running');
+    });
+
+    it('clears it once, not on every later poll', () => {
+      const builder = new DeltaBuilder('system.docker', 'boat');
+      builder.build(snapshot());
+      builder.build(snapshot({ containers: [container({ Status: 'Up 2 seconds' })] }));
+
+      const { values } = builder.build(
+        snapshot({ containers: [container({ Status: 'Up 3 seconds' })] }),
+      );
+
+      expect(Object.keys(byPath(values))).not.toContain(
+        'system.docker.boat.containers.influx.health',
+      );
+    });
+  });
+
   describe('when a container disappears', () => {
     it('clears its paths once and then stops mentioning it', () => {
       const builder = new DeltaBuilder('system.docker', 'boat');
@@ -174,14 +206,27 @@ describe('DeltaBuilder', () => {
       expect(Object.keys(after)).not.toContain('system.docker.boat.containers.influx.state');
     });
 
-    it('clears every suffix, including ones the current level does not publish', () => {
-      // Started at full, turned down to health, then the container went away:
-      // the image path is still in the data model and still needs clearing.
+    it('clears exactly the suffixes it published, and no others', () => {
+      // Publishing null to a path that was never published creates it: the
+      // dashboard grows a permanently empty row instead of staying clean.
       const builder = new DeltaBuilder('system.docker', 'boat', 'health');
       builder.build(snapshot());
 
       const cleared = byPath(builder.build(snapshot({ containers: [] })).values);
-      expect(cleared['system.docker.boat.containers.influx.image']).toBeNull();
+
+      expect(cleared['system.docker.boat.containers.influx.state']).toBeNull();
+      expect(cleared['system.docker.boat.containers.influx.health']).toBeNull();
+      expect(Object.keys(cleared)).not.toContain('system.docker.boat.containers.influx.image');
+    });
+
+    it('clears only what a container without a healthcheck ever published', () => {
+      const builder = new DeltaBuilder('system.docker', 'boat');
+      builder.build(snapshot({ containers: [container({ Status: 'Up 3 days' })] }));
+
+      const cleared = byPath(builder.build(snapshot({ containers: [] })).values);
+
+      expect(cleared['system.docker.boat.containers.influx.state']).toBeNull();
+      expect(Object.keys(cleared)).not.toContain('system.docker.boat.containers.influx.health');
     });
   });
 
@@ -196,15 +241,38 @@ describe('DeltaBuilder', () => {
       expect(cleared['system.docker.boat.status.reachable']).toBeNull();
     });
 
+    it('clears the instance status paths too, not just the containers', () => {
+      const builder = new DeltaBuilder('system.docker', 'boat');
+      builder.build(snapshot({ version: '24.0.7' }));
+
+      const cleared = byPath(builder.clear());
+
+      // A stopped plugin leaving a container count behind has a dashboard
+      // reporting containers nobody is watching any more.
+      expect(cleared['system.docker.boat.status.reachable']).toBeNull();
+      expect(cleared['system.docker.boat.status.version']).toBeNull();
+      expect(cleared['system.docker.boat.status.containersRunning']).toBeNull();
+      expect(cleared['system.docker.boat.status.containersTotal']).toBeNull();
+    });
+
+    it('does not clear a status path that was never published', () => {
+      const builder = new DeltaBuilder('system.docker', 'boat');
+      // Never reachable, so the counts and version were never published.
+      builder.build({ reachable: false, containers: [] });
+
+      const cleared = byPath(builder.clear());
+
+      expect(cleared['system.docker.boat.status.reachable']).toBeNull();
+      expect(Object.keys(cleared)).not.toContain('system.docker.boat.status.version');
+      expect(Object.keys(cleared)).not.toContain('system.docker.boat.status.containersTotal');
+    });
+
     it('is idempotent', () => {
       const builder = new DeltaBuilder('system.docker', 'boat');
       builder.build(snapshot());
       builder.clear();
 
-      // Only the instance status, which is always cleared.
-      expect(builder.clear()).toEqual([
-        { path: 'system.docker.boat.status.reachable', value: null },
-      ]);
+      expect(builder.clear()).toEqual([]);
     });
   });
 });
