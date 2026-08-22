@@ -139,6 +139,11 @@ function looksContainerised(cgroup: string | undefined, mountinfo: string | unde
  * while we hold the full one, or the reverse. Comparison is prefix-based in
  * both directions, with a floor of 12 characters so a coincidentally short
  * input cannot match everything.
+ *
+ * Ids only. Docker also accepts a name wherever an id goes, and a name tells
+ * this function nothing — callers must resolve the reference to its canonical
+ * id first, or the guard is trivially bypassed by asking for the container by
+ * name. `resolveSelfReference` in facade.ts is what does that.
  */
 export function isSelfContainer(self: SelfContainer, containerId: string): boolean {
   if (!self.identified) return false;

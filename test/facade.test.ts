@@ -22,7 +22,11 @@ const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig
 
 const buildApp = (
   registry: InstanceRegistry | undefined,
-  opts: { control?: PluginConfig['control']; self?: SelfContainer } = {},
+  opts: {
+    control?: PluginConfig['control'];
+    self?: SelfContainer;
+    log?: (message: string) => void;
+  } = {},
 ) => {
   const app = express();
   const router = express.Router();
@@ -37,7 +41,7 @@ const buildApp = (
           } as PluginConfig)
         : undefined,
     self: () => opts.self ?? noSelf,
-    log: () => {},
+    log: opts.log ?? (() => {}),
   });
   app.use(router);
   return app;
@@ -321,6 +325,15 @@ describe('facade container lifecycle', () => {
       .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
       .reply(200, [fixtures.localEnvironment]);
 
+  /** What Docker answers when a reference — name or id — is resolved. */
+  const withInspect = (reference: string, id: string) =>
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/${reference}/json`,
+        method: 'GET',
+      })
+      .reply(200, { Id: id, Name: `/${reference}`, Created: '', Image: 'img' });
+
   it.each([
     ['start', 'start'],
     ['stop', 'stop'],
@@ -392,6 +405,7 @@ describe('facade container lifecycle', () => {
 
   it('leaves other containers alone when self-protection is active', async () => {
     withEnvironment();
+    withInspect('ffffffffffff', 'ffffffffffff0000000000000000000000000000000000000000000000000000');
     boat()
       .intercept({ path: '/api/endpoints/1/docker/containers/ffffffffffff/stop', method: 'POST' })
       .reply(204, '');
@@ -400,6 +414,95 @@ describe('facade container lifecycle', () => {
     const res = await request(app).post('/api/containers/ffffffffffff/stop');
 
     expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  // Docker resolves a name wherever an id goes, so a guard that only compares
+  // hex ids can be walked straight past with `POST /containers/signalk/stop`.
+  it('refuses a mutation that names the Signal K container instead of its id', async () => {
+    withEnvironment();
+    withInspect('signalk-server', SELF_ID);
+
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const res = await request(app).post('/api/containers/signalk-server/stop');
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('running Signal K');
+    // The inspect was the only call: no stop reached the proxy.
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('refuses removal that names the Signal K container', async () => {
+    withEnvironment();
+    withInspect('signalk_signalk_1', SELF_ID);
+
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      control: control({ allowDestructive: true }),
+    });
+    const res = await request(app).delete('/api/containers/signalk_signalk_1');
+
+    expect(res.status).toBe(403);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('does not mutate a reference it could not resolve', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/ghost/json', method: 'GET' })
+      .reply(404, { message: 'No such container: ghost' });
+
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const res = await request(app).post('/api/containers/ghost/stop');
+
+    expect(res.status).toBe(404);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('skips the resolving inspect when self-protection cannot apply', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/anything/stop', method: 'POST' })
+      .reply(204, '');
+
+    // Not containerised: there is no self to protect, so no inspect is worth
+    // paying for. No inspect interceptor is registered, so one would fail.
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      '/api/containers/anything/stop',
+    );
+
+    expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('logs each accepted mutation with what the reference resolved to', async () => {
+    withEnvironment();
+    withInspect('web', 'ffffffffffff0000000000000000000000000000000000000000000000000000');
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/web/stop', method: 'POST' })
+      .reply(204, '');
+
+    const lines: string[] = [];
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      log: (message) => lines.push(message),
+    });
+    const res = await request(app).post('/api/containers/web/stop?instance=boat');
+
+    expect(res.status).toBe(200);
+    expect(lines).toContainEqual('container stop: web (ffffffffffff) on boat');
+  });
+
+  it('logs a refusal as well as the mutations it lets through', async () => {
+    const lines: string[] = [];
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      log: (message) => lines.push(message),
+    });
+
+    await request(app).post(`/api/containers/${SELF_ID}/stop`);
+
+    expect(lines.join('\n')).toContain('refused');
   });
 
   it('refuses all mutations when control is disabled', async () => {

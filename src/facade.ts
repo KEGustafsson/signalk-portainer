@@ -200,7 +200,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       }
 
       requireControlEnabled(deps);
-      requireNotSelf(deps, id, action);
+      const canonical = await requireNotSelf(deps, client, id, action);
 
       switch (action) {
         case 'start':
@@ -217,6 +217,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
           break;
       }
 
+      audit(deps, req, action, id, canonical);
       return { id, action, ok: true };
     }),
   );
@@ -230,9 +231,16 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
 
       requireControlEnabled(deps);
       requireDestructiveAllowed(deps);
-      requireNotSelf(deps, id, 'remove');
+      const canonical = await requireNotSelf(deps, client, id, 'remove');
 
       await client.docker.removeContainer(id, { force, removeVolumes });
+      audit(
+        deps,
+        req,
+        `remove${force ? ' --force' : ''}${removeVolumes ? ' --volumes' : ''}`,
+        id,
+        canonical,
+      );
       return { id, action: 'remove', removeVolumes, ok: true };
     }),
   );
@@ -256,6 +264,30 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
   );
 }
 
+/**
+ * One line per state change the guards let through, so the plugin's log answers
+ * "what stopped that container" instead of only recording what it refused.
+ *
+ * It goes to `app.debug`, which is what the plugin API offers below `error`;
+ * turn the plugin's switch on in the server's Log page to keep the trail.
+ */
+function audit(
+  deps: FacadeDeps,
+  req: Request,
+  action: string,
+  reference: string,
+  canonical?: string,
+): void {
+  const instance = instanceParam(req) ?? 'default instance';
+  // The reference as asked for, plus what it resolved to when they differ —
+  // a name in the request should still be traceable to a container id.
+  const target =
+    canonical && !canonical.startsWith(reference)
+      ? `${reference} (${canonical.slice(0, 12)})`
+      : reference;
+  deps.log(`container ${action}: ${target} on ${instance}`);
+}
+
 /** Every mutating route is off entirely when control is disabled. */
 function requireControlEnabled(deps: FacadeDeps): void {
   if (deps.config()?.control.allowPutControl) return;
@@ -277,13 +309,50 @@ function requireDestructiveAllowed(deps: FacadeDeps): void {
 /**
  * The footgun this plugin exists to avoid: stopping the container that runs
  * Signal K takes the plugin, the admin UI and the operator's way back with it.
+ *
+ * Returns the canonical container id when it had to be resolved, so the audit
+ * line names the container Docker actually acted on rather than the alias the
+ * request used.
  */
-function requireNotSelf(deps: FacadeDeps, containerId: string, action: string): void {
+async function requireNotSelf(
+  deps: FacadeDeps,
+  client: PortainerClient,
+  reference: string,
+  action: string,
+): Promise<string | undefined> {
   const self = deps.self();
-  if (deps.config()?.control.allowSelfManagement) return;
-  if (!isSelfContainer(self, containerId)) return;
+  if (deps.config()?.control.allowSelfManagement) return undefined;
+  if (!self.identified) return undefined;
 
-  throw new PolicyError(
+  if (isSelfContainer(self, reference)) throw selfRefusal(action);
+
+  // The reference was not our id — but Docker resolves names too, so
+  // "signalk-server" reaches exactly the container the id check just cleared.
+  // Only Docker can say which container a name means, so ask it.
+  const canonical = await resolveSelfReference(client, reference);
+  if (canonical && isSelfContainer(self, canonical)) throw selfRefusal(action);
+  return canonical;
+}
+
+/**
+ * The canonical id behind a container reference, whether it was a name, a short
+ * id or a full one.
+ *
+ * A failure here is not swallowed: if we cannot tell what a reference points
+ * at, we cannot tell that it is not the Signal K container, and guessing is the
+ * one outcome this guard exists to prevent. A missing container fails the
+ * inspect with the same 404 the mutation itself would have returned.
+ */
+async function resolveSelfReference(
+  client: PortainerClient,
+  reference: string,
+): Promise<string | undefined> {
+  const inspected = await client.docker.inspectContainer(reference);
+  return typeof inspected.Id === 'string' && inspected.Id.length > 0 ? inspected.Id : undefined;
+}
+
+function selfRefusal(action: string): PolicyError {
+  return new PolicyError(
     `Refusing to ${action} the container running Signal K`,
     'this would stop the plugin issuing the request; enable "Allow managing the Signal K container itself" if you really mean to',
   );
@@ -335,6 +404,9 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
         return;
       }
       if (cause instanceof PolicyError) {
+        // Refusals are logged as well as accepted mutations: an operator whose
+        // button did nothing should find the reason in the same place.
+        deps.log(`${req.method} ${req.path}: refused — ${cause.message}`);
         res.status(cause.status).json({ error: cause.message, hint: cause.hint });
         return;
       }

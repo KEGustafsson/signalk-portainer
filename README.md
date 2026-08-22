@@ -92,6 +92,15 @@ the short container id. If the plugin is containerised but cannot identify
 itself — a custom `--hostname` under cgroup v2 with no bind mounts — it says so
 in `GET /control` rather than implying a protection it cannot provide.
 
+Docker accepts a container name wherever an id goes, so a reference that is not
+already our id is inspected and the guard is applied to the canonical id Docker
+reports — asking for the Signal K container by name is refused just the same. A
+reference that cannot be resolved is never mutated: not knowing what it points
+at is not the same as knowing it is safe.
+
+Every mutation the guards accept, and every refusal, is logged through
+`app.debug` — enable the plugin in the server's Log page to keep the trail.
+
 Requires Node.js 22 or newer — the versions CI actually verifies.
 
 > Declaring Node 22 means Venus OS / Cerbo GX, which ships Node 20, is out of
@@ -103,7 +112,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 188 unit tests, no network required, 80% coverage enforced
+npm test           # 197 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
