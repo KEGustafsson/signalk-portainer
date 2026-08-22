@@ -1,4 +1,5 @@
 import type { MockAgent } from 'undici';
+import { logQuery, DEFAULT_LOG_TAIL, MAX_LOG_TAIL } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
 import { BASE_URL, createClient, createMockAgent } from './support';
@@ -230,5 +231,49 @@ describe('PortainerClient stacks', () => {
     expect((error as PortainerError).message).toMatch(/does not belong to this environment/);
     // The file was never requested: an unconsumed interceptor would remain.
     expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+});
+
+describe('logQuery', () => {
+  const parsed = (query: string) => Object.fromEntries(new URLSearchParams(query));
+
+  it('always bounds the read', () => {
+    // A container running for a year holds gigabytes; an unbounded read would
+    // carry the whole thing through memory.
+    expect(parsed(logQuery())).toMatchObject({ tail: String(DEFAULT_LOG_TAIL) });
+  });
+
+  it('clamps a tail larger than the ceiling', () => {
+    expect(parsed(logQuery({ tail: 10_000_000 })).tail).toBe(String(MAX_LOG_TAIL));
+  });
+
+  it('rejects a nonsensical tail rather than sending it', () => {
+    expect(parsed(logQuery({ tail: 0 })).tail).toBe(String(DEFAULT_LOG_TAIL));
+    expect(parsed(logQuery({ tail: -5 })).tail).toBe('1');
+    expect(parsed(logQuery({ tail: Number.NaN })).tail).toBe(String(DEFAULT_LOG_TAIL));
+  });
+
+  it('asks for both streams by default', () => {
+    expect(parsed(logQuery())).toMatchObject({ stdout: 'true', stderr: 'true' });
+  });
+
+  it('still asks for something when the caller turns both off', () => {
+    // Docker answers 400 for a log request that wants neither stream, which
+    // would surface as a failure about a request nobody made.
+    expect(parsed(logQuery({ stdout: false, stderr: false }))).toMatchObject({ stdout: 'true' });
+  });
+
+  it('carries since and timestamps only when asked', () => {
+    expect(parsed(logQuery({ since: 1_700_000_000, timestamps: true }))).toMatchObject({
+      since: '1700000000',
+      timestamps: 'true',
+    });
+    expect(parsed(logQuery())).not.toHaveProperty('since');
+    expect(parsed(logQuery())).not.toHaveProperty('timestamps');
+  });
+
+  it('adds follow only for a stream', () => {
+    expect(parsed(logQuery({}, true))).toMatchObject({ follow: 'true' });
+    expect(parsed(logQuery({}, false))).not.toHaveProperty('follow');
   });
 });

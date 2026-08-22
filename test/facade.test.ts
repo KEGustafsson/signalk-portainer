@@ -7,6 +7,7 @@ import { PortainerError } from '../src/errors';
 import type { SelfContainer } from '../src/self';
 import { registerRoutes, instanceParam } from '../src/facade';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
+import { StreamLimiter } from '../src/streamlimit';
 import * as fixtures from './fixtures';
 import { createMockAgent } from './support';
 
@@ -26,6 +27,7 @@ const buildApp = (
     control?: PluginConfig['control'];
     self?: SelfContainer;
     log?: (message: string) => void;
+    streams?: StreamLimiter;
   } = {},
 ) => {
   const app = express();
@@ -47,6 +49,7 @@ const buildApp = (
         : undefined,
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
+    ...(opts.streams ? { streams: opts.streams } : {}),
   });
   app.use(router);
   return app;
@@ -301,6 +304,244 @@ describe('facade swarm routes', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.services).toHaveLength(1);
+  });
+});
+
+describe('facade logs', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  /** One Docker log frame: 8-byte header then payload. */
+  const frame = (stream: 1 | 2, text: string): Buffer => {
+    const payload = Buffer.from(text, 'utf8');
+    const header = Buffer.alloc(8);
+    header[0] = stream;
+    header.writeUInt32BE(payload.length, 4);
+    return Buffer.concat([header, payload]);
+  };
+
+  const boat = () => agent.get('https://boat.test:9443');
+  const withEnvironment = () =>
+    boat()
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  it("returns the log as lines, with each line's stream", async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/logs?stdout=true&stderr=true&tail=200',
+        method: 'GET',
+      })
+      .reply(200, Buffer.concat([frame(1, 'listening\n'), frame(2, 'warning\n')]));
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body.lines).toEqual([
+      { stream: 'stdout', text: 'listening' },
+      { stream: 'stderr', text: 'warning' },
+    ]);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('passes tail, since and timestamps through to Docker', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/logs?stdout=true&stderr=true&tail=50&since=1700000000&timestamps=true',
+        method: 'GET',
+      })
+      .reply(200, frame(1, 'x\n'));
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs?tail=50&since=1700000000&timestamps=true',
+    );
+
+    expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('ignores a tail that is not a usable number', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/logs?stdout=true&stderr=true&tail=200',
+        method: 'GET',
+      })
+      .reply(200, frame(1, 'x\n'));
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs?tail=lots',
+    );
+
+    expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it("reads a TTY container's unframed output", async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/logs?stdout=true&stderr=true&tail=200',
+        method: 'GET',
+      })
+      .reply(200, 'plain tty output\nsecond line\n');
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs',
+    );
+
+    expect(res.body.lines).toEqual([
+      { stream: 'stdout', text: 'plain tty output' },
+      { stream: 'stdout', text: 'second line' },
+    ]);
+  });
+
+  it('maps a Portainer failure to the facade status', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/gone/logs?stdout=true&stderr=true&tail=200',
+        method: 'GET',
+      })
+      .reply(404, { message: 'No such container' });
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/gone/logs',
+    );
+
+    expect(res.status).toBe(404);
+  });
+});
+
+describe('facade log streaming', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  const frame = (stream: 1 | 2, text: string): Buffer => {
+    const payload = Buffer.from(text, 'utf8');
+    const header = Buffer.alloc(8);
+    header[0] = stream;
+    header.writeUInt32BE(payload.length, 4);
+    return Buffer.concat([header, payload]);
+  };
+
+  const boat = () => agent.get('https://boat.test:9443');
+  const streamPath =
+    '/api/endpoints/1/docker/containers/abc123def456/logs?stdout=true&stderr=true&tail=200&follow=true';
+
+  const withEnvironment = () =>
+    boat()
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  /** The events in an SSE body, as { event, data } pairs. */
+  const events = (body: string) =>
+    body
+      .split('\n\n')
+      .filter((block) => block.trim().length > 0)
+      .map((block) => {
+        const event = /^event: (.*)$/m.exec(block)?.[1] ?? 'message';
+        const data = /^data: (.*)$/m.exec(block)?.[1] ?? '';
+        return { event, data: data ? (JSON.parse(data) as unknown) : undefined };
+      });
+
+  it('relays each line as an event and ends when Docker does', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: streamPath, method: 'GET' })
+      .reply(200, Buffer.concat([frame(1, 'listening\n'), frame(2, 'warning\n')]));
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs/stream',
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toContain('text/event-stream');
+    // Proxies that buffer would hold every line until a stream that never ends.
+    expect(res.headers['x-accel-buffering']).toBe('no');
+    expect(events(res.text)).toEqual([
+      { event: 'open', data: { id: 'abc123def456', instance: 'boat' } },
+      { event: 'message', data: { stream: 'stdout', text: 'listening' } },
+      { event: 'message', data: { stream: 'stderr', text: 'warning' } },
+      { event: 'end', data: {} },
+    ]);
+  });
+
+  it('reports a failure as a status while nothing has been sent yet', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: streamPath, method: 'GET' })
+      .reply(404, { message: 'No such container' });
+
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc123def456/logs/stream',
+    );
+
+    // The stream never opened, so this can still be an ordinary error response.
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('failed with 404');
+  });
+
+  it('answers 404 for an instance that is not configured', async () => {
+    const res = await request(buildApp(new InstanceRegistry(config))).get(
+      '/api/containers/abc/logs/stream?instance=nowhere',
+    );
+
+    expect(res.status).toBe(404);
+  });
+
+  it('answers 503 before the plugin has started', async () => {
+    const res = await request(buildApp(undefined)).get('/api/containers/abc/logs/stream');
+
+    expect(res.status).toBe(503);
+  });
+
+  it('refuses to open more streams than the ceiling allows', async () => {
+    // Room overall, but this container already has its one stream.
+    const limiter = new StreamLimiter({ total: 5, perTarget: 1 });
+    limiter.acquire('boat/abc123def456');
+
+    const res = await request(buildApp(new InstanceRegistry(config), { streams: limiter })).get(
+      '/api/containers/abc123def456/logs/stream',
+    );
+
+    expect(res.status).toBe(429);
+    expect(res.body.hint).toContain('already following this container');
+    // Nothing was asked of Portainer: the refusal happens before the request.
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('frees the slot again once the stream has finished', async () => {
+    const limiter = new StreamLimiter({ total: 2, perTarget: 1 });
+    withEnvironment();
+    boat().intercept({ path: streamPath, method: 'GET' }).reply(200, frame(1, 'one\n')).times(2);
+
+    const app = buildApp(new InstanceRegistry(config), { streams: limiter });
+    await request(app).get('/api/containers/abc123def456/logs/stream');
+    const second = await request(app).get('/api/containers/abc123def456/logs/stream');
+
+    // A stream that ended must not hold its slot, or a tab opened twice in a
+    // row would be refused the second time.
+    expect(second.status).toBe(200);
+    expect(limiter.openCount).toBe(0);
   });
 });
 

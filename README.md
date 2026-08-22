@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M3 — Signal K native.** Read-only APIs, the admin-UI panel,
-> container lifecycle behind its guards, container state in the Signal K data
-> model, watchdog alarms, and PUT control from any Signal K client.
+> **Status: M4a — container logs (server side).** Everything through M3, plus
+> container logs as JSON and as a live SSE stream. The log viewer in the panel
+> is M4b.
 
 ## Documents
 
@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M3)
+## What works today (M4a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -82,6 +82,14 @@ K client can start or stop a container.
   `allowPutControl` is set, subject to the same self-protection, and answered
   `PENDING` until Docker actually finishes.
 
+- **Container logs**, one-shot or live. Docker multiplexes stdout and stderr
+  into one framed stream; the plugin demuxes it, so every line arrives labelled
+  with the stream it came from and no framing bytes ever reach the browser.
+  Streaming is Server-Sent Events rather than a WebSocket: it inherits the
+  Signal K session cookie, reconnects on its own, and needs no second auth path.
+  Reads are always bounded by `tail`, and concurrent streams are capped so a few
+  forgotten browser tabs cannot exhaust a Raspberry Pi's file descriptors.
+
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
@@ -94,6 +102,8 @@ K client can start or stop a container.
   | `GET /capabilities` | swarm support, swarm id, Docker and Portainer versions |
   | `GET /containers` | container list (`?all=true` to include stopped) |
   | `GET /containers/:id` | container inspect |
+  | `GET /containers/:id/logs` | log lines (`?tail=` `?since=` `?timestamps=`) |
+  | `GET /containers/:id/logs/stream` | the same, live, as Server-Sent Events |
   | `GET /stacks` | stacks belonging to this environment |
   | `GET /stacks/:id/file` | the stack's compose file |
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
@@ -143,7 +153,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 347 unit tests, no network required, 80% coverage enforced
+npm test           # 390 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

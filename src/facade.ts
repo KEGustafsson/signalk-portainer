@@ -4,8 +4,10 @@ import { environmentHealth } from './client';
 import type { PluginConfig } from './config';
 import { PolicyError, PortainerError } from './errors';
 import { redactValue } from './redact';
+import { toLines } from './logframes';
 import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
+import { StreamLimiter, StreamLimitError } from './streamlimit';
 
 export interface FacadeDeps {
   registry: () => InstanceRegistry | undefined;
@@ -13,6 +15,19 @@ export interface FacadeDeps {
   /** Identity of the container this plugin runs in, for self-protection. */
   self: () => SelfContainer;
   log: (message: string) => void;
+  /** Shared across requests so the ceiling is a ceiling; injectable for tests. */
+  streams?: StreamLimiter;
+}
+
+/** Reads ?tail= and ?since= into the client's log options. */
+export function logOptions(req: Request): { tail?: number; since?: number; timestamps: boolean } {
+  const tail = Number(req.query.tail);
+  const since = Number(req.query.since);
+  return {
+    ...(Number.isFinite(tail) && tail > 0 ? { tail } : {}),
+    ...(Number.isFinite(since) && since > 0 ? { since } : {}),
+    timestamps: req.query.timestamps === 'true',
+  };
 }
 
 const LIFECYCLE_ACTIONS = ['start', 'stop', 'restart', 'kill', 'pause', 'unpause'] as const;
@@ -36,6 +51,8 @@ export function instanceParam(req: Request): string | undefined {
  * instance, so single-Portainer setups never mention it.
  */
 export function registerRoutes(router: Router, deps: FacadeDeps): void {
+  const limiter = deps.streams ?? new StreamLimiter();
+
   // ── instances and health ────────────────────────────────────────────────
 
   router.get(
@@ -147,6 +164,29 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     '/api/df',
     withClient(deps, async (_req, client) => ({ df: await client.docker.diskUsage() })),
   );
+
+  // ── logs ────────────────────────────────────────────────────────────────
+
+  router.get(
+    '/api/containers/:id/logs',
+    withClient(deps, async (req, client) => {
+      const id = String(req.params.id);
+      const frames = await client.docker.logs(id, logOptions(req));
+      return { id, lines: toLines(frames) };
+    }),
+  );
+
+  /**
+   * The log as it happens, as Server-Sent Events.
+   *
+   * SSE rather than a WebSocket because it inherits the Signal K session cookie,
+   * reconnects on its own, and needs no second authentication path. Each line
+   * is one event carrying `{ stream, text }`, so the browser can colour stderr
+   * without parsing anything.
+   */
+  router.get('/api/containers/:id/logs/stream', (req: Request, res: Response) => {
+    void streamLogs(deps, limiter, req, res);
+  });
 
   // ── control surface ─────────────────────────────────────────────────────
 
@@ -268,6 +308,102 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       return { nodes: await client.docker.listNodes() };
     }),
   );
+}
+
+/**
+ * Holds a follow stream open, relaying each line to the browser as an SSE event.
+ *
+ * Written against the raw response rather than through handle(): the reply is
+ * an open stream, not a JSON body, and every error it can hit has to be
+ * reported differently depending on whether anything has been sent yet.
+ */
+async function streamLogs(
+  deps: FacadeDeps,
+  limiter: StreamLimiter,
+  req: Request,
+  res: Response,
+): Promise<void> {
+  const registry = deps.registry();
+  if (!registry) {
+    res.status(503).json({ error: 'Plugin is not started' });
+    return;
+  }
+
+  const id = String(req.params.id);
+  const instance = instanceParam(req) ?? registry.defaultName;
+  let release: (() => void) | undefined;
+
+  try {
+    const client = registry.get(instanceParam(req));
+    release = limiter.acquire(`${instance}/${id}`);
+
+    // The upstream stream is ended by this signal and nothing else, so the
+    // browser navigating away has to reach it — see the close handler below.
+    const controller = new AbortController();
+    // Awaited before any header is written, so a container that does not exist
+    // is a 404 rather than a 200 stream carrying one error event — which an
+    // EventSource would answer by reconnecting into a loop.
+    const frames = await client.docker.logStream(id, controller.signal, logOptions(req));
+
+    // Headers first: an SSE client waits for them before it considers itself
+    // connected, and until they are sent an error can still become a status.
+    res.writeHead(200, {
+      'content-type': 'text/event-stream',
+      'cache-control': 'no-cache, no-transform',
+      connection: 'keep-alive',
+      // Proxies that buffer would hold every line until the stream ended,
+      // which for a follow stream is never.
+      'x-accel-buffering': 'no',
+    });
+    res.write(`event: open\ndata: ${JSON.stringify({ id, instance })}\n\n`);
+
+    req.on('close', () => {
+      controller.abort();
+      release?.();
+    });
+
+    for await (const frame of frames) {
+      for (const line of toLines([frame])) {
+        res.write(`data: ${JSON.stringify(line)}\n\n`);
+      }
+    }
+    // Docker ended it: a container that stopped, or a non-follow log that ran
+    // out. Say so rather than letting the browser reconnect into a loop.
+    res.write('event: end\ndata: {}\n\n');
+    res.end();
+  } catch (cause) {
+    const failure = describeStreamFailure(cause);
+    deps.log(`log stream ${instance}/${id}: ${failure.error}`);
+    if (res.headersSent) {
+      // Mid-stream: the status is long gone, so the failure travels as an
+      // event the browser can show beside the lines it already has.
+      res.write(`event: error\ndata: ${JSON.stringify(failure)}\n\n`);
+      res.end();
+    } else {
+      res.status(failure.status).json({ error: failure.error, hint: failure.hint });
+    }
+  } finally {
+    release?.();
+  }
+}
+
+function describeStreamFailure(cause: unknown): {
+  status: number;
+  error: string;
+  hint?: string;
+} {
+  if (cause instanceof UnknownInstanceError) return { status: 404, error: cause.message };
+  if (cause instanceof StreamLimitError) {
+    return { status: cause.status, error: cause.message, hint: cause.hint };
+  }
+  if (cause instanceof PortainerError) {
+    return { status: cause.facadeStatus, error: cause.message, hint: cause.hint };
+  }
+  // An abort is how this stream is supposed to end, not a failure to report.
+  if (cause instanceof Error && cause.name === 'AbortError') {
+    return { status: 200, error: 'stream closed' };
+  }
+  return { status: 500, error: cause instanceof Error ? cause.message : String(cause) };
 }
 
 /**
