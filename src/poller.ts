@@ -1,7 +1,9 @@
 import type { TelemetryLevel } from './config';
 import { DeltaBuilder, type InstanceSnapshot, type MetaValue, type PathValue } from './deltas';
 import { PortainerError } from './errors';
+import { assignKeys } from './paths';
 import type { InstanceRegistry } from './registry';
+import type { Notification, Watchdog } from './watchdog';
 
 /**
  * The loop that turns Portainer into boat data.
@@ -20,6 +22,21 @@ export interface PollerDeps {
   pathPrefix: string;
   /** How much to publish. 'off' is handled by not constructing a poller. */
   level: Exclude<TelemetryLevel, 'off'>;
+  /** Raises and clears container alarms; absent when nothing is watched. */
+  watchdog?: Watchdog;
+  publishNotifications?: (notifications: Notification[]) => void;
+  /**
+   * Told which container keys exist after each poll, so PUT handlers can be
+   * registered for paths that only become known when a container appears.
+   */
+  onKeys?: (instance: string, keys: string[], containers: KeyedContainer[]) => void;
+}
+
+/** One container as the poller saw it, paired with the key it publishes under. */
+export interface KeyedContainer {
+  key: string;
+  id: string;
+  name?: string;
 }
 
 export class DeltaPoller {
@@ -53,6 +70,11 @@ export class DeltaPoller {
     for (const builder of this.builders.values()) values.push(...builder.clear());
     this.builders.clear();
     if (values.length > 0) this.deps.publish(values, []);
+
+    // An alarm nobody is maintaining is worse than no alarm: it reads as a
+    // live problem while the thing that would clear it is no longer running.
+    const cleared = this.deps.watchdog?.clear() ?? [];
+    if (cleared.length > 0) this.deps.publishNotifications?.(cleared);
   }
 
   /** Exposed for tests, which drive the loop rather than waiting on a timer. */
@@ -75,12 +97,23 @@ export class DeltaPoller {
 
       const values: PathValue[] = [];
       const meta: MetaValue[] = [];
+      const notifications: Notification[] = [];
+
       for (const { name, snapshot } of snapshots) {
         const built = this.builderFor(name).build(snapshot);
         values.push(...built.values);
         meta.push(...built.meta);
+
+        if (this.deps.watchdog) {
+          notifications.push(...this.deps.watchdog.evaluate(name, snapshot));
+        }
+        if (this.deps.onKeys && snapshot.reachable) {
+          this.deps.onKeys(name, ...describeKeys(snapshot));
+        }
       }
+
       if (values.length > 0 || meta.length > 0) this.deps.publish(values, meta);
+      if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
     } finally {
       this.polling = false;
     }
@@ -115,4 +148,20 @@ export class DeltaPoller {
       return { reachable: false, containers: [], error: message };
     }
   }
+}
+
+/**
+ * The keys this snapshot's containers publish under, with the ids behind them,
+ * so a PUT on a readable path can reach the right container.
+ */
+function describeKeys(snapshot: InstanceSnapshot): [string[], KeyedContainer[]] {
+  const assigned = assignKeys(snapshot.containers);
+  const containers: KeyedContainer[] = [];
+  for (const container of snapshot.containers) {
+    const key = assigned.get(container.Id)?.key;
+    if (!key) continue;
+    const name = container.Names?.[0]?.replace(/^\//, '');
+    containers.push(name ? { key, id: container.Id, name } : { key, id: container.Id });
+  }
+  return [containers.map((entry) => entry.key), containers];
 }

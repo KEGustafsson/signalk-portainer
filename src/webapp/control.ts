@@ -54,7 +54,15 @@ export function normalizeControl(body: unknown): ControlState | undefined {
   };
 }
 
-export const CONTAINER_ACTIONS = ['start', 'stop', 'restart', 'kill', 'remove'] as const;
+export const CONTAINER_ACTIONS = [
+  'start',
+  'stop',
+  'restart',
+  'kill',
+  'pause',
+  'unpause',
+  'remove',
+] as const;
 export type ContainerAction = (typeof CONTAINER_ACTIONS)[number];
 
 export interface ActionState {
@@ -68,6 +76,8 @@ const LABELS: Record<ContainerAction, string> = {
   stop: 'Stop',
   restart: 'Restart',
   kill: 'Kill',
+  pause: 'Pause',
+  unpause: 'Resume',
   remove: 'Remove',
 };
 
@@ -104,18 +114,16 @@ export function requiresForceToRemove(container: DockerContainer): boolean {
  * what the word says.
  *
  * A paused container is running, so Start would be refused as "already
- * started"; Kill is refused too, since Docker wants it unpaused first. What it
- * actually needs is unpause, which the facade does not expose yet — until it
- * does, the panel offers only what the daemon will accept rather than buttons
- * that turn into 409s.
+ * started" and Kill as "unpause it first". What it actually needs is Resume,
+ * which is offered first because it is the way out of the paused state.
  */
 export function actionsFor(container: DockerContainer): ContainerAction[] {
   switch (container.State) {
     case 'running':
     case 'restarting':
-      return ['stop', 'restart', 'kill', 'remove'];
+      return ['stop', 'restart', 'pause', 'kill', 'remove'];
     case 'paused':
-      return ['stop', 'restart', 'remove'];
+      return ['unpause', 'stop', 'restart', 'remove'];
     default:
       return ['start', 'remove'];
   }
@@ -160,13 +168,16 @@ export function actionState(
  * nothing happens.
  */
 export function needsConfirmation(action: ContainerAction): boolean {
-  return action !== 'start';
+  // Resuming a paused container is the same kind of act as starting a stopped
+  // one: the worst case is that nothing happens.
+  return action !== 'start' && action !== 'unpause';
 }
 
 /** Bootstrap button styling: destructive actions must not look routine. */
 export function actionVariant(action: ContainerAction): string {
   switch (action) {
     case 'start':
+    case 'unpause':
       return 'outline-success';
     case 'kill':
     case 'remove':

@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M3a — Signal K deltas.** Read-only APIs, the admin-UI panel,
-> container lifecycle behind its guards, and container state published into the
-> Signal K data model. Watchdog notifications and PUT handlers are M3b.
+> **Status: M3 — Signal K native.** Read-only APIs, the admin-UI panel,
+> container lifecycle behind its guards, container state in the Signal K data
+> model, watchdog alarms, and PUT control from any Signal K client.
 
 ## Documents
 
@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M3a)
+## What works today (M3)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -61,13 +61,26 @@ K client can start or stop a container.
 
   | Level | Publishes |
   | --- | --- |
-  | `off` | nothing — no polling at all; the facade and the panel still work |
+  | `off` | nothing — no polling at all, unless a watchdog is configured; the facade and the panel still work |
   | `health` | instance reachability and version, running/total counts, and each container's state and health |
   | `full` | the above plus each container's image, name and short id |
 
   `health` is the default: it is what a dashboard and the watchdog need, without
   carrying an image name and a container id for every container through the
   delta stream and the logs on every poll.
+
+- **Watchdog alarms** — list the containers that must be running, and one that
+  is not raises a standard Signal K notification, so the chartplotter beeps at
+  3am instead of the crew finding a gap in the track next morning. Cleared
+  automatically when the container comes back. An unreachable Portainer raises
+  one alarm of its own rather than one per container: a network blip is not
+  evidence that anything stopped.
+
+- **PUT control** — writing `running`, `stopped` or `restart` to a container's
+  `…containers.<key>.state` path starts, stops or restarts it, so a dashboard
+  button or an automation rule can do what the panel does. Registered only when
+  `allowPutControl` is set, subject to the same self-protection, and answered
+  `PENDING` until Docker actually finishes.
 
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
@@ -86,7 +99,7 @@ K client can start or stop a container.
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
   | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
   | `GET /control` | what the UI may offer, and whether self-protection is active |
-  | `POST /containers/:id/:action` | `start` · `stop` · `restart` · `kill` |
+  | `POST /containers/:id/:action` | `start` · `stop` · `restart` · `kill` · `pause` · `unpause` |
   | `DELETE /containers/:id` | remove (`?force=` `?removeVolumes=`) |
 
 ### Guards on the mutating routes
@@ -130,7 +143,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 301 unit tests, no network required, 80% coverage enforced
+npm test           # 340 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -173,6 +186,21 @@ compose up` recreating a container does not move its paths and take every
 dashboard gauge with it. Two containers that would normalise to the same key
 get the short id appended rather than sharing a path and flickering between
 each other.
+
+### Notifications
+
+```text
+notifications.system.docker.<instance>.status               instance reachability
+notifications.system.docker.<instance>.containers.<key>     a watched container
+```
+
+Raised on the transition, not on every poll — Signal K keeps the last value for
+clients that connect later, and re-sending an unchanged alarm every 30 seconds
+is noise. A watch names its container however the operator knows it: the
+container name, the normalised path key, a compose service key, or an id prefix.
+
+Nothing is published here unless `watchdog` lists something. An alarm the
+operator did not ask for teaches them to ignore the channel.
 
 A container that disappears has its paths published once as `null` and then
 dropped, so a dashboard clears instead of showing a gauge for something that no

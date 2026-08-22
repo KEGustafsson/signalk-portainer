@@ -9,6 +9,7 @@ const createApp = () => {
   const errors: string[] = [];
   const debug: string[] = [];
   const deltas: unknown[] = [];
+  const puts: { context: string; path: string; handler: unknown }[] = [];
   const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
     enabled: true,
   });
@@ -20,8 +21,11 @@ const createApp = () => {
     handleMessage: (_id: string, message: unknown) => {
       deltas.push(message);
     },
+    registerPutHandler: (context: string, path: string, handler: unknown) => {
+      puts.push({ context, path, handler });
+    },
   } as SignalKApp;
-  return { app, statuses, errors, debug, deltas };
+  return { app, statuses, errors, debug, deltas, puts };
 };
 
 const noopRestart = (): void => {};
@@ -120,6 +124,166 @@ describe('plugin lifecycle', () => {
     );
     expect(paths.map((entry) => entry.path)).toContain('system.docker.boat.status.reachable');
     expect(paths.some((entry) => entry.path.includes('.containers.'))).toBe(true);
+
+    instance.stop();
+  });
+
+  it('raises a Signal K alarm when a watched container is not running', async () => {
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, [{ ...fixtures.containers[1], State: 'exited' }])
+      .persist();
+
+    const { app, deltas } = createApp();
+    const instance = plugin(app);
+
+    instance.start(
+      {
+        ...validOptions,
+        control: { watchdog: [{ instance: 'boat', container: 'ais-logger' }] },
+      },
+      noopRestart,
+    );
+    await flush();
+    await flush();
+    await flush();
+
+    const values = deltas.flatMap((delta) =>
+      (
+        (delta as { updates?: { values?: { path: string; value: unknown }[] }[] }).updates ?? []
+      ).flatMap((update) => update.values ?? []),
+    );
+    const alarm = values.find(
+      (entry) => entry.path === 'notifications.system.docker.boat.containers.ais_logger',
+    );
+    expect(alarm?.value).toMatchObject({ state: 'alarm' });
+    // The instance itself is reachable, so that notification stays normal.
+    const status = values.find((entry) => entry.path === 'notifications.system.docker.boat.status');
+    expect(status?.value).toMatchObject({ state: 'normal' });
+
+    instance.stop();
+  });
+
+  it('raises no notifications at all when nothing is configured to be watched', async () => {
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, deltas } = createApp();
+    const instance = plugin(app);
+
+    instance.start(validOptions, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    // An alarm the operator did not ask for teaches them to ignore the channel.
+    const values = deltas.flatMap((delta) =>
+      ((delta as { updates?: { values?: { path: string }[] }[] }).updates ?? []).flatMap(
+        (update) => update.values ?? [],
+      ),
+    );
+    expect(values.some((entry) => entry.path.startsWith('notifications.'))).toBe(false);
+
+    instance.stop();
+  });
+
+  it('registers a PUT handler for each container it discovers', async () => {
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, puts } = createApp();
+    const instance = plugin(app);
+
+    instance.start(validOptions, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    expect(puts.length).toBeGreaterThan(0);
+    expect(puts.every((entry) => entry.path.endsWith('.state'))).toBe(true);
+    expect(puts.every((entry) => entry.context === 'vessels.self')).toBe(true);
+
+    instance.stop();
+  });
+
+  it('registers no PUT handlers when there are no published paths to write to', async () => {
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    // Served, so that a poller which should not exist would find containers
+    // and register handlers for them — the test would then fail, as it should.
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, puts } = createApp();
+    const instance = plugin(app);
+
+    instance.start({ ...validOptions, telemetry: { level: 'off' } }, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    // PUT writes to a published path; with none published there is nothing to
+    // write to, and the REST facade remains the way to control containers.
+    expect(puts).toHaveLength(0);
 
     instance.stop();
   });

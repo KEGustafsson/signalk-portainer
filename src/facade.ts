@@ -15,7 +15,7 @@ export interface FacadeDeps {
   log: (message: string) => void;
 }
 
-const LIFECYCLE_ACTIONS = ['start', 'stop', 'restart', 'kill'] as const;
+const LIFECYCLE_ACTIONS = ['start', 'stop', 'restart', 'kill', 'pause', 'unpause'] as const;
 type LifecycleAction = (typeof LIFECYCLE_ACTIONS)[number];
 
 function isLifecycleAction(value: string): value is LifecycleAction {
@@ -214,6 +214,12 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
           break;
         case 'kill':
           await client.docker.killContainer(id);
+          break;
+        case 'pause':
+          await client.docker.pauseContainer(id);
+          break;
+        case 'unpause':
+          await client.docker.unpauseContainer(id);
           break;
       }
 

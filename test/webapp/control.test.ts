@@ -105,6 +105,7 @@ describe('actionsFor', () => {
     expect(actionsFor(container({ State: 'running' }))).toEqual([
       'stop',
       'restart',
+      'pause',
       'kill',
       'remove',
     ]);
@@ -113,14 +114,21 @@ describe('actionsFor', () => {
     expect(actionsFor(container({ State: 'restarting' }))).toContain('stop');
   });
 
-  it('does not offer a paused container the actions Docker would refuse', () => {
+  it('offers a paused container the way out, and not what Docker would refuse', () => {
     const actions = actionsFor(container({ State: 'paused' }));
 
     // Paused is running, so Start is refused as "already started", and Docker
-    // wants a paused container unpaused before it will kill it.
+    // wants a paused container unpaused before it will kill it. Resume comes
+    // first because it is the way out of the state.
     expect(actions).not.toContain('start');
     expect(actions).not.toContain('kill');
-    expect(actions).toEqual(['stop', 'restart', 'remove']);
+    expect(actions).toEqual(['unpause', 'stop', 'restart', 'remove']);
+  });
+
+  it('does not ask before resuming, as with starting', () => {
+    // The worst case of resuming is that nothing happens.
+    expect(needsConfirmation('unpause')).toBe(false);
+    expect(needsConfirmation('pause')).toBe(true);
   });
 });
 

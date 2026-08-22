@@ -8,6 +8,7 @@ import type { Plugin, PluginConstructor, ServerAPI } from '@signalk/server-api';
 export type SignalKApp = Pick<
   ServerAPI,
   'debug' | 'error' | 'setPluginStatus' | 'setPluginError' | 'handleMessage'
->;
+> &
+  Partial<Pick<ServerAPI, 'registerPutHandler'>>;
 
 export type { Plugin as SignalKPlugin, PluginConstructor };

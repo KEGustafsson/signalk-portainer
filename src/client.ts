@@ -48,6 +48,9 @@ export interface DockerApi {
   stopContainer(id: string, timeoutSeconds?: number): Promise<void>;
   restartContainer(id: string, timeoutSeconds?: number): Promise<void>;
   killContainer(id: string, signal?: string): Promise<void>;
+  /** Freezes the processes; the container stays "running" to the daemon. */
+  pauseContainer(id: string): Promise<void>;
+  unpauseContainer(id: string): Promise<void>;
   removeContainer(id: string, opts?: { force?: boolean; removeVolumes?: boolean }): Promise<void>;
 }
 
@@ -221,6 +224,10 @@ export class PortainerClient {
 
       restartContainer: (id, timeoutSeconds) =>
         mutate('POST', `/containers/${encode(id)}/restart${seconds(timeoutSeconds)}`),
+
+      pauseContainer: (id) => mutate('POST', `/containers/${encode(id)}/pause`),
+
+      unpauseContainer: (id) => mutate('POST', `/containers/${encode(id)}/unpause`),
 
       killContainer: (id, signal) =>
         mutate(
