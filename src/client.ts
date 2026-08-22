@@ -5,11 +5,40 @@ import { redactValue } from './redact';
 import {
   EDGE_ENVIRONMENT_TYPES,
   type Capabilities,
+  type DockerContainer,
+  type DockerContainerInspect,
+  type DockerDiskUsage,
+  type DockerImage,
   type DockerInfo,
+  type DockerNetwork,
+  type DockerNode,
+  type DockerService,
+  type DockerVolume,
+  type DockerVolumeList,
   type Environment,
   type EnvironmentHealth,
   type PortainerStatus,
+  type Stack,
 } from './types';
+
+/**
+ * Read-only slice of the Docker Engine API, reached through Portainer's docker
+ * proxy. The environment id is already bound to the client, so no call site
+ * passes one.
+ */
+export interface DockerApi {
+  info(): Promise<DockerInfo>;
+  listContainers(all?: boolean): Promise<DockerContainer[]>;
+  inspectContainer(id: string): Promise<DockerContainerInspect>;
+  listImages(): Promise<DockerImage[]>;
+  listVolumes(): Promise<DockerVolume[]>;
+  listNetworks(): Promise<DockerNetwork[]>;
+  diskUsage(): Promise<DockerDiskUsage>;
+  /** Swarm only — callers must check capabilities().swarm first. */
+  listServices(): Promise<DockerService[]>;
+  /** Swarm only — callers must check capabilities().swarm first. */
+  listNodes(): Promise<DockerNode[]>;
+}
 
 /** A JWT is valid for ~8h; renew at 7h so a long poll never straddles expiry. */
 const JWT_MAX_AGE_MS = 7 * 60 * 60 * 1000;
@@ -65,6 +94,9 @@ export class PortainerClient {
   private jwt: { token: string; issuedAt: number } | undefined;
   private jwtInFlight: Promise<string> | undefined;
 
+  /** Read-only Docker surface; see {@link DockerApi}. */
+  readonly docker: DockerApi;
+
   constructor(options: PortainerClientOptions) {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.auth = options.auth;
@@ -91,6 +123,50 @@ export class PortainerClient {
       this.dispatcher = undefined;
       this.ownsDispatcher = false;
     }
+
+    this.docker = this.buildDockerApi();
+  }
+
+  private buildDockerApi(): DockerApi {
+    const proxied = async <T>(path: string, key: string, ttlMs: number): Promise<T> =>
+      this.cache.get(key, ttlMs, async () =>
+        this.json<T>('GET', `${await this.dockerBase()}${path}`),
+      );
+
+    return {
+      info: () => this.dockerInfo(),
+
+      listContainers: (all = false) =>
+        proxied<DockerContainer[]>(
+          `/containers/json${all ? '?all=true' : ''}`,
+          `containers:${all}`,
+          TTL.containers,
+        ),
+
+      // Deliberately uncached: an inspect is requested when someone opens a
+      // container, and a stale answer there is worse than an extra call.
+      inspectContainer: async (id: string) =>
+        this.json<DockerContainerInspect>(
+          'GET',
+          `${await this.dockerBase()}/containers/${encodeURIComponent(id)}/json`,
+        ),
+
+      listImages: () => proxied<DockerImage[]>('/images/json', 'images', TTL.containers),
+
+      listVolumes: async () => {
+        const list = await proxied<DockerVolumeList>('/volumes', 'volumes', TTL.containers);
+        // Docker returns null rather than [] when there are no volumes.
+        return list.Volumes ?? [];
+      },
+
+      listNetworks: () => proxied<DockerNetwork[]>('/networks', 'networks', TTL.containers),
+
+      diskUsage: () => proxied<DockerDiskUsage>('/system/df', 'df', TTL.containers),
+
+      listServices: () => proxied<DockerService[]>('/services', 'services', TTL.containers),
+
+      listNodes: () => proxied<DockerNode[]>('/nodes', 'nodes', TTL.containers),
+    };
   }
 
   get authMode(): AuthMode {
@@ -298,6 +374,24 @@ export class PortainerClient {
       if (status?.Version) result.portainerVersion = status.Version;
       return result;
     });
+  }
+
+  /**
+   * Stacks belonging to this client's environment. Portainer returns every
+   * stack it knows about, so the filtering happens here.
+   */
+  async listStacks(): Promise<Stack[]> {
+    const environmentId = await this.environmentId();
+    const all = await this.cache.get('stacks', TTL.stacks, () =>
+      this.json<Stack[]>('GET', '/api/stacks'),
+    );
+    return all.filter((stack) => stack.EndpointId === environmentId);
+  }
+
+  /** The compose or manifest file for a stack, as text. */
+  async stackFile(id: number): Promise<string> {
+    const payload = await this.json<{ StackFileContent?: string }>('GET', `/api/stacks/${id}/file`);
+    return payload.StackFileContent ?? '';
   }
 
   async dockerInfo(): Promise<DockerInfo> {
