@@ -5,6 +5,9 @@ import type { Plugin, PluginConstructor, ServerAPI } from '@signalk/server-api';
  * server's own types rather than hand-written, so contract drift is a compile
  * error instead of a runtime surprise.
  */
-export type SignalKApp = Pick<ServerAPI, 'debug' | 'error' | 'setPluginStatus' | 'setPluginError'>;
+export type SignalKApp = Pick<
+  ServerAPI,
+  'debug' | 'error' | 'setPluginStatus' | 'setPluginError' | 'handleMessage'
+>;
 
 export type { Plugin as SignalKPlugin, PluginConstructor };

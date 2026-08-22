@@ -6,7 +6,9 @@ import {
   type PluginConfig,
   type RawConfig,
 } from './config';
+import type { MetaValue, PathValue } from './deltas';
 import { registerRoutes } from './facade';
+import { DeltaPoller } from './poller';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
 import { detectSelfContainer, type SelfContainer } from './self';
@@ -17,11 +19,28 @@ const PLUGIN_ID = 'signalk-portainer';
 const plugin = (app: SignalKApp): SignalKPlugin => {
   let registry: InstanceRegistry | undefined;
   let config: PluginConfig | undefined;
+  let poller: DeltaPoller | undefined;
   // Detected once at load: the container id cannot change under a running
   // process, and probing /proc on every request would be wasted work.
   const self: SelfContainer = detectSelfContainer();
 
   const log = (message: string): void => app.debug(redactText(message));
+
+  /**
+   * One delta carrying this poll's values and any first-time metadata.
+   *
+   * Both go in a single message so a dashboard never renders a numeric path for
+   * a moment before learning its units.
+   */
+  const publish = (values: PathValue[], meta: MetaValue[]): void => {
+    const updates: Record<string, unknown>[] = [];
+    if (values.length > 0) updates.push({ values });
+    if (meta.length > 0) updates.push({ meta });
+    if (updates.length === 0) return;
+    app.handleMessage(PLUGIN_ID, {
+      updates,
+    } as Parameters<typeof app.handleMessage>[1]);
+  };
 
   // Redaction happens once, here, so no host callback can ever receive a raw
   // message: setPluginStatus/setPluginError persist their text in the server.
@@ -90,7 +109,23 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         }
         setStatus(`Starting — ${registry.names.length} instance(s): ${registry.names.join(', ')}`);
         void reportHealth();
+
+        // 'off' is honoured by never constructing the poller, so a plugin the
+        // operator told to stay quiet issues no polls at all.
+        if (config.telemetry.level !== 'off') {
+          poller = new DeltaPoller({
+            registry: () => registry,
+            publish,
+            log,
+            intervalMs: config.telemetry.intervalSeconds * 1000,
+            pathPrefix: config.telemetry.pathPrefix,
+            level: config.telemetry.level,
+          });
+          poller.start();
+        }
       } catch (cause) {
+        poller?.stop();
+        poller = undefined;
         registry = undefined;
         config = undefined;
         if (cause instanceof ConfigError) setError(cause.message);
@@ -99,6 +134,10 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     },
 
     stop(): void {
+      // Before the registry closes: stopping clears the published paths, and
+      // that clearing delta has to go out while the plugin still can send it.
+      poller?.stop();
+      poller = undefined;
       registry?.close();
       registry = undefined;
       config = undefined;

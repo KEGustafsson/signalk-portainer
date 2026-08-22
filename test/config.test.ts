@@ -101,6 +101,47 @@ describe('normalizeConfig', () => {
     expect(config.telemetry.pathPrefix).toBe('system.docker');
   });
 
+  describe('telemetry level', () => {
+    it('defaults to health — useful data without the identifying strings', () => {
+      expect(normalizeConfig({ instances: [validInstance] }).telemetry.level).toBe('health');
+    });
+
+    it.each([['off'], ['health'], ['full']])('accepts %s', (level) => {
+      expect(
+        normalizeConfig({ instances: [validInstance], telemetry: { level } }).telemetry.level,
+      ).toBe(level);
+    });
+
+    it('falls back to health rather than trusting an unknown value', () => {
+      expect(
+        normalizeConfig({ instances: [validInstance], telemetry: { level: 'everything' } })
+          .telemetry.level,
+      ).toBe('health');
+    });
+
+    it('reads the boolean this setting used to be', () => {
+      // A configuration saved by an earlier build must not silently start
+      // publishing again after the operator turned it off.
+      expect(
+        normalizeConfig({ instances: [validInstance], telemetry: { enabled: false } }).telemetry
+          .level,
+      ).toBe('off');
+      expect(
+        normalizeConfig({ instances: [validInstance], telemetry: { enabled: true } }).telemetry
+          .level,
+      ).toBe('full');
+    });
+
+    it('prefers the explicit level over the old boolean', () => {
+      expect(
+        normalizeConfig({
+          instances: [validInstance],
+          telemetry: { enabled: true, level: 'off' },
+        }).telemetry.level,
+      ).toBe('off');
+    });
+  });
+
   it('defaults control to the safe settings', () => {
     const config = normalizeConfig({ instances: [validInstance] });
     expect(config.control.allowDestructive).toBe(false);

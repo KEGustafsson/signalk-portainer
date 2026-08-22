@@ -10,10 +10,27 @@ export interface InstanceConfig {
   environment: { id: number | null; name: string };
 }
 
+/**
+ * How much of Docker's state becomes boat data.
+ *
+ * Not a boolean, because the two useful answers are far apart: a small boat
+ * server wants to know that everything is up without carrying an image name and
+ * a container id for every container through its delta stream and its logs,
+ * while a workshop machine wants the lot.
+ *
+ * - `off`    — publish nothing; the REST facade and the panel still work.
+ * - `health` — instance reachability, container counts, and each container's
+ *              state and health. Enough for a dashboard and the watchdog.
+ * - `full`   — the above plus image, name and id per container.
+ */
+export type TelemetryLevel = 'off' | 'health' | 'full';
+
+export const TELEMETRY_LEVELS: readonly TelemetryLevel[] = ['off', 'health', 'full'];
+
 export interface PluginConfig {
   instances: InstanceConfig[];
   telemetry: {
-    enabled: boolean;
+    level: TelemetryLevel;
     intervalSeconds: number;
     emitStats: boolean;
     pathPrefix: string;
@@ -116,7 +133,17 @@ export const PLUGIN_SCHEMA = {
       type: 'object',
       title: 'Signal K telemetry',
       properties: {
-        enabled: { type: 'boolean', title: 'Publish deltas', default: true },
+        level: {
+          type: 'string',
+          title: 'Publish deltas',
+          enum: ['off', 'health', 'full'],
+          enumNames: [
+            'Off — no Signal K paths',
+            'Health — status, counts, container state and health',
+            'Full — also image, name and id per container',
+          ],
+          default: 'health',
+        },
         intervalSeconds: { type: 'number', title: 'Poll interval (s)', default: 30 },
         emitStats: {
           type: 'boolean',
@@ -170,10 +197,24 @@ interface RawInstance {
 
 export interface RawConfig {
   instances?: RawInstance[];
-  telemetry?: Partial<PluginConfig['telemetry']>;
+  telemetry?: RawTelemetry;
   control?: Omit<Partial<PluginConfig['control']>, 'watchdog'> & {
     watchdog?: { instance?: string; container?: string }[];
   };
+}
+
+/**
+ * The telemetry block as it arrives from the admin UI. `level` is typed loosely
+ * because the UI can hand back anything, and `enabled` is the boolean this
+ * setting used to be, kept readable for migration.
+ */
+interface RawTelemetry {
+  level?: string;
+  /** @deprecated superseded by `level`; still read so old options keep working. */
+  enabled?: boolean;
+  intervalSeconds?: number;
+  emitStats?: boolean;
+  pathPrefix?: string;
 }
 
 /** Validates admin-UI input into the shape the rest of the plugin relies on. */
@@ -191,7 +232,7 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
   }
 
   const telemetry = {
-    enabled: raw?.telemetry?.enabled ?? true,
+    level: telemetryLevel(raw?.telemetry),
     intervalSeconds: Math.max(5, raw?.telemetry?.intervalSeconds ?? 30),
     emitStats: raw?.telemetry?.emitStats ?? false,
     pathPrefix: (raw?.telemetry?.pathPrefix || 'system.docker').replace(/\.+$/, ''),
@@ -214,6 +255,20 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
       watchdog,
     },
   };
+}
+
+/**
+ * Reads the publishing level, accepting the boolean this setting used to be so
+ * a configuration saved by an earlier build keeps working rather than silently
+ * reverting to the default.
+ */
+function telemetryLevel(raw: RawTelemetry | undefined): TelemetryLevel {
+  const level = raw?.level;
+  if (typeof level === 'string' && (TELEMETRY_LEVELS as string[]).includes(level)) {
+    return level as TelemetryLevel;
+  }
+  if (typeof raw?.enabled === 'boolean') return raw.enabled ? 'full' : 'off';
+  return 'health';
 }
 
 function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>): InstanceConfig {
