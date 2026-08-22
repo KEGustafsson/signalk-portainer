@@ -23,14 +23,20 @@ interface FacadeError {
   hint?: string;
 }
 
-export async function apiGet<T>(path: string, instance?: string, signal?: AbortSignal): Promise<T> {
-  // Some tab paths already carry a query (?all=true), so the separator has to
-  // be chosen rather than assumed — appending a second '?' makes the facade
-  // ignore the instance and silently serve the default one.
+async function request<T>(
+  method: string,
+  path: string,
+  instance?: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  // Some paths already carry a query (?all=true, ?force=true), so the separator
+  // has to be chosen rather than assumed — appending a second '?' makes the
+  // facade ignore the instance and silently serve the default one.
   const separator = path.includes('?') ? '&' : '?';
   const query = instance ? `${separator}instance=${encodeURIComponent(instance)}` : '';
 
   const response = await fetch(`${BASE}${path}${query}`, {
+    method,
     credentials: 'include',
     headers: { accept: 'application/json' },
     ...(signal ? { signal } : {}),
@@ -63,4 +69,21 @@ export async function apiGet<T>(path: string, instance?: string, signal?: AbortS
   }
 
   return body as T;
+}
+
+export async function apiGet<T>(path: string, instance?: string, signal?: AbortSignal): Promise<T> {
+  return request<T>('GET', path, instance, signal);
+}
+
+/**
+ * A state-changing call. Separate from apiGet so a mutation is never issued by
+ * a path that reads like a read, and so every call site has to name its method.
+ */
+export async function apiSend<T>(
+  method: 'POST' | 'DELETE',
+  path: string,
+  instance?: string,
+  signal?: AbortSignal,
+): Promise<T> {
+  return request<T>(method, path, instance, signal);
 }

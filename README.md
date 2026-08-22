@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M2a — container lifecycle (server side).** Read-only APIs, the
-> admin-UI panel, and container start/stop/restart/kill/remove behind their
-> guards. The UI buttons are M2b; delta publishing is M3.
+> **Status: M2 — container lifecycle.** Read-only APIs, the admin-UI panel,
+> and container start/stop/restart/kill/remove behind their guards, with
+> buttons and a confirmation step in the panel. Delta publishing is M3.
 
 ## Documents
 
@@ -37,20 +37,23 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M2a)
+## What works today (M2)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
 - The plugin resolves each instance's Docker environment, probes Swarm support,
   and reports connected versions in its Signal K plugin status.
 - An **embedded panel in the Signal K admin UI** with an instance selector and
-  read-only tables for environments, containers, stacks, images, volumes and
-  networks — plus services and nodes when the environment is a Swarm. It polls
-  every 10s and surfaces facade errors with their hint rather than an empty
-  table.
+  tables for environments, containers, stacks, images, volumes and networks —
+  plus services and nodes when the environment is a Swarm. It polls every 10s
+  and surfaces facade errors with their hint rather than an empty table.
 - **Container lifecycle** — start, stop, restart, kill and remove, each behind
-  the guards below. Exposed by the API only for now; the panel's buttons are
-  M2b.
+  the guards below, from the API and from buttons on the Containers tab.
+  Everything except starting asks first, in a dialog that names the container
+  and says what the action does to it. The container running Signal K is
+  labelled as such and its buttons are disabled. A button the configuration
+  does not allow is disabled with the setting to change as its tooltip, rather
+  than left to fail as a 403 on click.
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
@@ -112,7 +115,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 197 unit tests, no network required, 80% coverage enforced
+npm test           # 248 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

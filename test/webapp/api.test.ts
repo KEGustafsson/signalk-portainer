@@ -1,4 +1,4 @@
-import { ApiError, apiGet } from '../../src/webapp/api';
+import { ApiError, apiGet, apiSend } from '../../src/webapp/api';
 
 describe('apiGet', () => {
   const fetchMock = jest.fn();
@@ -106,5 +106,51 @@ describe('apiGet', () => {
 
     expect(error.status).toBe(502);
     expect(error.message).toContain('502');
+  });
+});
+
+describe('apiSend', () => {
+  const fetchMock = jest.fn();
+
+  beforeEach(() => {
+    fetchMock.mockReset();
+    global.fetch = fetchMock as unknown as typeof fetch;
+  });
+
+  it('sends the method it was given, with the session cookie', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
+
+    await apiSend('POST', '/containers/abc/stop', 'boat');
+
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/plugins/signalk-portainer/api/containers/abc/stop?instance=boat',
+      expect.objectContaining({ method: 'POST', credentials: 'include' }),
+    );
+  });
+
+  it('joins the instance onto a path that already has a query', async () => {
+    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+
+    await apiSend('DELETE', '/containers/abc?force=false&removeVolumes=true', 'shore');
+
+    // A second '?' would make the facade ignore the instance and act on the
+    // default Portainer — the wrong boat entirely.
+    expect(fetchMock.mock.calls[0]?.[0]).toBe(
+      '/plugins/signalk-portainer/api/containers/abc?force=false&removeVolumes=true&instance=shore',
+    );
+  });
+
+  it('surfaces a policy refusal with its hint', async () => {
+    fetchMock.mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: 'Container control is disabled', hint: 'enable it' }),
+    });
+
+    const error = await apiSend('POST', '/containers/abc/stop').catch((cause: unknown) => cause);
+
+    expect(error).toBeInstanceOf(ApiError);
+    expect((error as ApiError).status).toBe(403);
+    expect((error as ApiError).hint).toBe('enable it');
   });
 });
