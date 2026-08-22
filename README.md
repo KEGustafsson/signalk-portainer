@@ -9,8 +9,10 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: design stage.** No implementation yet. The branch was reset to a
-> clean slate and currently contains the research and the plan only.
+> **Status: M0 — skeleton and client.** The Portainer client, instance
+> registry, configuration validation and the `/instances` + `/health` facade
+> routes are implemented and tested. The UI, delta publishing and container
+> lifecycle actions land in M1–M3.
 
 ## Documents
 
@@ -30,6 +32,24 @@ container state into Signal K paths under `system.docker.<instance>.*`,
 watchdog notifications that raise a Signal K alarm when a container that should
 be running is not, and PUT handlers so any Signal K client can start or stop a
 container.
+
+## What works today (M0)
+
+- Configure one or more Portainer instances (protocol, host, port, base path,
+  TLS, API token or username/password, environment).
+- The plugin resolves each instance's Docker environment, probes Swarm support,
+  and reports connected versions in its Signal K plugin status.
+- Two facade routes, authenticated by Signal K:
+  `GET /plugins/signalk-portainer/api/instances` and `.../api/health`.
+
+Requires Node.js 20.18.1 or newer (the version `undici` needs).
+
+```bash
+npm install     # install dependencies
+npm test        # 93 unit tests, no network required, 80% coverage enforced
+npm run lint
+npm run build   # emits dist/
+```
 
 ## Design decisions
 
