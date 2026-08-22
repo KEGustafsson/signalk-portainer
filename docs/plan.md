@@ -107,7 +107,7 @@ is configuration, never a migration.
     }
   ],
   "telemetry": {
-    "enabled": true,
+    "level": "health",              // off | health | full — see §6.1
     "intervalSeconds": 30,
     "emitStats": false,             // one API call per container per tick
     "pathPrefix": "system.docker"
@@ -295,12 +295,26 @@ container id changes every recreate and the container name can change with it;
 the service identity does not. Names are normalised — lowercased, non-alphanumerics
 to `_` — so paths stay valid.
 
-Each container also publishes `$source` metadata carrying the real container id
-and name, so the readable path never costs you the ability to identify the exact
-container.
+Each container also publishes its real id and name as paths (`.id`, `.name`),
+so the readable key never costs you the ability to identify the exact container.
+
+> Implemented in M3a as paths rather than as `$source` metadata, as this section
+> originally proposed. A `SourceRef` encoding the container id would change on
+> every recreate — the very thing the key resolution above exists to avoid — and
+> would break source-based filtering for anyone using it. They are published at
+> the `full` level only; see the telemetry levels below.
 
 When a container disappears, its paths are emitted once with `null` and then
-dropped, so stale rows do not linger in dashboards forever.
+dropped, so stale rows do not linger in dashboards forever. Stopping the plugin
+clears them the same way.
+
+**Publishing level** (`telemetry.level`) decides how much of this is published.
+`off` polls nothing at all; `health` publishes the instance status paths plus
+each container's `state` and `health`; `full` adds `image`, `name` and `id`.
+`health` is the default — it is what a dashboard and the watchdog read, and the
+identifying strings never change, so republishing them every poll costs
+bandwidth and log volume for no new information. The level is not a security
+boundary: everything remains available through the REST facade regardless.
 
 ### 6.2 Metadata
 
@@ -369,7 +383,8 @@ process is a footgun.
 | **M0** | Skeleton + client | Repo scaffold (TS, jest, eslint, webpack), `PortainerClient` with auth/TLS/env-resolution/capability probe, `InstanceRegistry`, `/instances` + `/health`, plugin status text. Unit tests against recorded fixtures. |
 | **M1** | Read-only UI | Embedded webapp: instance selector, environments, containers, stacks, images/volumes/networks tables. Polling, no mutation. |
 | **M2** | Container lifecycle | start/stop/restart/kill + self-protection + destructive guard. |
-| **M3** | Signal K native | Delta poller with the §6.1 key resolution, meta deltas, watchdog notifications, PUT handlers. |
+| **M3a** | Signal K deltas | Delta poller with the §6.1 key resolution, meta deltas, and the off/health/full publishing levels. |
+| **M3b** | Signal K native | Watchdog notifications and PUT handlers. |
 | **M4** | Logs | SSE log streaming with frame demux, tail/since controls, download. |
 | **M5** | Stacks write | compose editor, env vars, update/redeploy (incl. git redeploy), create from string/repository; swarm variants when `capabilities.swarm`. |
 | **M6** | Console | WebSocket relay to `/api/websocket/exec` for an interactive shell. |

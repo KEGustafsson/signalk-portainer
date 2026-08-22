@@ -8,16 +8,20 @@ const createApp = () => {
   const statuses: string[] = [];
   const errors: string[] = [];
   const debug: string[] = [];
+  const deltas: unknown[] = [];
   const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
     enabled: true,
   });
-  const app: SignalKApp = {
+  const app = {
     debug: debugFn,
     error: (message: string) => errors.push(message),
     setPluginStatus: (message: string) => statuses.push(message),
     setPluginError: (message: string) => errors.push(message),
-  };
-  return { app, statuses, errors, debug };
+    handleMessage: (_id: string, message: unknown) => {
+      deltas.push(message);
+    },
+  } as SignalKApp;
+  return { app, statuses, errors, debug, deltas };
 };
 
 const noopRestart = (): void => {};
@@ -80,6 +84,74 @@ describe('plugin lifecycle', () => {
 
     instance.stop();
     expect(statuses.at(-1)).toBe('Stopped');
+  });
+
+  it('publishes container deltas once started', async () => {
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, deltas } = createApp();
+    const instance = plugin(app);
+
+    instance.start({ ...validOptions, telemetry: { level: 'full' } }, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    const paths = deltas.flatMap((delta) =>
+      ((delta as { updates?: { values?: { path: string }[] }[] }).updates ?? []).flatMap(
+        (update) => update.values ?? [],
+      ),
+    );
+    expect(paths.map((entry) => entry.path)).toContain('system.docker.boat.status.reachable');
+    expect(paths.some((entry) => entry.path.includes('.containers.'))).toBe(true);
+
+    instance.stop();
+  });
+
+  it('publishes nothing when telemetry is off', async () => {
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+
+    const { app, deltas } = createApp();
+    const instance = plugin(app);
+
+    instance.start({ ...validOptions, telemetry: { level: 'off' } }, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    // No container list was even requested: the poller is not constructed.
+    expect(deltas).toHaveLength(0);
+    instance.stop();
   });
 
   it('comes up even when Portainer is unreachable, and says why', async () => {

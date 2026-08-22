@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M2 — container lifecycle.** Read-only APIs, the admin-UI panel,
-> and container start/stop/restart/kill/remove behind their guards, with
-> buttons and a confirmation step in the panel. Delta publishing is M3.
+> **Status: M3a — Signal K deltas.** Read-only APIs, the admin-UI panel,
+> container lifecycle behind its guards, and container state published into the
+> Signal K data model. Watchdog notifications and PUT handlers are M3b.
 
 ## Documents
 
@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M2)
+## What works today (M3a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -54,6 +54,21 @@ K client can start or stop a container.
   labelled as such and its buttons are disabled. A button the configuration
   does not allow is disabled with the setting to change as its tooltip, rather
   than left to fail as a 403 on click.
+- **Signal K deltas** — container state published under
+  `system.docker.<instance>.*` on a configurable interval, with metadata so
+  dashboards render labelled values rather than bare numbers. How much is
+  published is a choice, not a switch:
+
+  | Level | Publishes |
+  | --- | --- |
+  | `off` | nothing — no polling at all; the facade and the panel still work |
+  | `health` | instance reachability and version, running/total counts, and each container's state and health |
+  | `full` | the above plus each container's image, name and short id |
+
+  `health` is the default: it is what a dashboard and the watchdog need, without
+  carrying an image name and a container id for every container through the
+  delta stream and the logs on every poll.
+
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
@@ -115,7 +130,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 248 unit tests, no network required, 80% coverage enforced
+npm test           # 294 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -137,6 +152,34 @@ available on demand from the Actions UI.
 | **Delta keys** | Compose service identity first (`project_service`), then stack, then container name, then short id — so `docker compose up` recreating a container does not move its paths. |
 
 Rationale for each is in [`docs/plan.md` §10](docs/plan.md#10-decisions).
+
+### Delta paths
+
+```
+system.docker.<instance>.status.reachable            boolean
+system.docker.<instance>.status.version              string   (Docker version)
+system.docker.<instance>.status.containersRunning    number
+system.docker.<instance>.status.containersTotal      number
+system.docker.<instance>.containers.<key>.state      running | exited | paused | …
+system.docker.<instance>.containers.<key>.health     healthy | unhealthy | starting
+system.docker.<instance>.containers.<key>.image      string   (full level)
+system.docker.<instance>.containers.<key>.name       string   (full level)
+system.docker.<instance>.containers.<key>.id         string   (full level)
+```
+
+`<key>` prefers the compose project and service (`signalk_influxdb`), then the
+Swarm service name, then the container name, then the short id — so `docker
+compose up` recreating a container does not move its paths and take every
+dashboard gauge with it. Two containers that would normalise to the same key
+get the short id appended rather than sharing a path and flickering between
+each other.
+
+A container that disappears has its paths published once as `null` and then
+dropped, so a dashboard clears instead of showing a gauge for something that no
+longer exists. Stopping the plugin clears them the same way. An unreachable
+instance publishes `status.reachable: false` and says nothing about containers —
+a failed poll knows nothing about the environment, and "0 running" would read as
+every container being down.
 
 ## License
 

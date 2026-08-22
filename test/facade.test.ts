@@ -36,7 +36,12 @@ const buildApp = (
       registry
         ? ({
             instances: [],
-            telemetry: { enabled: false, intervalSeconds: 30, emitStats: false, pathPrefix: 'x' },
+            telemetry: {
+              level: 'off' as const,
+              intervalSeconds: 30,
+              emitStats: false,
+              pathPrefix: 'x',
+            },
             control: opts.control ?? control(),
           } as PluginConfig)
         : undefined,
