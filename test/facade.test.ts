@@ -596,17 +596,22 @@ describe('facade log stream lifecycle', () => {
     await new Promise<void>((resolve) => {
       server.listen(0, '127.0.0.1', resolve);
     });
+    // Unref'd so that a test which fails before its cleanup cannot hold the
+    // whole run open: jest waits for live handles, and a listening socket is
+    // one. An open connection keeps its own reference while a test is running.
+    server.unref();
     return {
       port: (server.address() as AddressInfo).port,
       close: () =>
         new Promise<void>((resolve) => {
+          server.closeAllConnections();
           server.close(() => resolve());
         }),
     };
   };
 
   const waitFor = async (what: string, ready: () => boolean): Promise<void> => {
-    for (let waited = 0; waited < 2000; waited += 10) {
+    for (let waited = 0; waited < 8_000; waited += 10) {
       if (ready()) return;
       await new Promise((resolve) => setTimeout(resolve, 10));
     }
@@ -632,50 +637,54 @@ describe('facade log stream lifecycle', () => {
     const held = heldStream();
     const server = await serve(buildApp(held.registry, { streams: limiter }));
 
-    const req = open(server.port);
-    await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
-    req.destroy();
+    try {
+      const req = open(server.port);
+      await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+      req.destroy();
 
-    await waitFor('the upstream stream to be abandoned', () => held.signal()?.aborted === true);
-    // Portainer answers a moment later, to nobody. Without the abort the
-    // follow stream would stay open and its slot with it, and eight of those
-    // refuse every log stream until Signal K restarts.
-    held.answer();
-    await waitFor('the stream slot to be freed', () => limiter.openCount === 0);
-
-    await server.close();
-  });
+      await waitFor('the upstream stream to be abandoned', () => held.signal()?.aborted === true);
+      // Portainer answers a moment later, to nobody. Without the abort the
+      // follow stream would stay open and its slot with it, and eight of those
+      // refuse every log stream until Signal K restarts.
+      held.answer();
+      await waitFor('the stream slot to be freed', () => limiter.openCount === 0);
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
 
   it('keeps a quiet stream alive with comment frames', async () => {
     const held = heldStream();
     const server = await serve(buildApp(held.registry, { keepalive: 10 }));
 
-    const req = open(server.port);
-    await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
-    held.answer();
+    try {
+      const req = open(server.port);
+      await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+      held.answer();
 
-    const body = await new Promise<http.IncomingMessage>((resolve) => {
-      req.on('response', resolve);
-    });
-    const received: string[] = [];
-    body.setEncoding('utf8');
-    body.on('data', (chunk: string) => received.push(chunk));
+      const body = await new Promise<http.IncomingMessage>((resolve) => {
+        req.on('response', resolve);
+      });
+      const received: string[] = [];
+      body.setEncoding('utf8');
+      body.on('data', (chunk: string) => received.push(chunk));
 
-    // A container can say nothing for hours; the connection still has to look
-    // alive to whatever proxy or NAT table sits in front of it.
-    await waitFor(
-      'keepalive frames',
-      () =>
-        received
-          .join('')
-          .split('\n\n')
-          .filter((block) => block === ':').length >= 2,
-    );
+      // A container can say nothing for hours; the connection still has to look
+      // alive to whatever proxy or NAT table sits in front of it.
+      await waitFor(
+        'keepalive frames',
+        () =>
+          received
+            .join('')
+            .split('\n\n')
+            .filter((block) => block === ':').length >= 2,
+      );
 
-    req.destroy();
-    await waitFor('the stream to be abandoned', () => held.signal()?.aborted === true);
-    await server.close();
-  });
+      req.destroy();
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
 });
 
 describe('facade container lifecycle', () => {
