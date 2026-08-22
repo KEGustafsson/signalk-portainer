@@ -87,15 +87,27 @@ export class PortainerError extends Error {
     baseUrl: string,
   ): PortainerError {
     const detail = cause instanceof Error ? cause.message : String(cause);
-    const isTimeout = detail.includes('abort') || detail.includes('timeout');
     return new PortainerError({
       status: 0,
       method,
       path,
       message: `Portainer ${method} ${path} could not be reached`,
-      hint: isTimeout
+      hint: isTimeoutCause(cause)
         ? `no response from ${baseUrl} before the configured timeout`
         : `check host, port and protocol for ${baseUrl}; for a self-signed certificate supply its CA or clear rejectUnauthorized (${redactText(detail)})`,
     });
   }
+}
+
+/**
+ * `AbortSignal.timeout()` surfaces as a TimeoutError, but fetch wraps it in a
+ * generic "fetch failed" TypeError — so the name has to be read from the cause
+ * chain, not from the outermost message, or a timeout gets the TLS hint.
+ */
+function isTimeoutCause(cause: unknown, depth = 0): boolean {
+  if (depth > 5 || !(cause instanceof Error)) return false;
+  if (cause.name === 'TimeoutError' || cause.name === 'AbortError') return true;
+  const message = cause.message.toLowerCase();
+  if (message.includes('timeout') || message.includes('aborted')) return true;
+  return isTimeoutCause((cause as { cause?: unknown }).cause, depth + 1);
 }

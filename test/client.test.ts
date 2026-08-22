@@ -309,6 +309,105 @@ describe('environmentHealth', () => {
   });
 });
 
+describe('PortainerClient transport failure classification', () => {
+  it('reports a timeout as a timeout even when fetch wraps it', async () => {
+    const agent = createMockAgent();
+    const wrapped = new TypeError('fetch failed');
+    (wrapped as { cause?: unknown }).cause = Object.assign(new Error('The operation was aborted'), {
+      name: 'TimeoutError',
+    });
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .replyWithError(wrapped);
+
+    const client = createClient(agent);
+    const error = (await client.systemStatus().catch((e: unknown) => e)) as PortainerError;
+
+    expect(error.message).toContain('before the configured timeout');
+    expect(error.message).not.toContain('self-signed');
+    await agent.close();
+  });
+});
+
+describe('PortainerClient TLS and lifecycle', () => {
+  it('builds its own dispatcher when TLS options are supplied, and closes it', () => {
+    const client = new PortainerClient({
+      baseUrl: BASE_URL,
+      auth: { mode: 'apiKey', apiKey: 'ptr_x' },
+      tls: { rejectUnauthorized: false },
+    });
+
+    expect(() => client.close()).not.toThrow();
+  });
+
+  it('accepts a CA and a servername override', () => {
+    const client = new PortainerClient({
+      baseUrl: `${BASE_URL}/`,
+      auth: { mode: 'apiKey', apiKey: 'ptr_x' },
+      tls: { ca: 'PEM', servername: 'boatpi' },
+    });
+
+    expect(client.describeSelf().baseUrl).toBe(BASE_URL);
+    client.close();
+  });
+
+  it('closing a client that owns no dispatcher is a no-op', () => {
+    const client = new PortainerClient({
+      baseUrl: BASE_URL,
+      auth: { mode: 'apiKey', apiKey: 'ptr_x' },
+    });
+    expect(() => client.close()).not.toThrow();
+  });
+
+  it('drops cached reads on invalidate', async () => {
+    const agent = createMockAgent();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .times(2);
+
+    const client = createClient(agent);
+    await client.environmentId();
+    client.invalidate();
+    await client.environmentId();
+
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+    await agent.close();
+  });
+
+  it('rejects an auth response that carries no jwt', async () => {
+    const agent = createMockAgent();
+    agent.get(BASE_URL).intercept({ path: '/api/auth', method: 'POST' }).reply(200, { ok: true });
+
+    const client = createClient(agent, {
+      auth: { mode: 'userPass', username: 'admin', password: 'x' },
+    });
+    const error = await client.systemStatus().catch((e: unknown) => e);
+
+    expect((error as PortainerError).message).toMatch(/no jwt field/);
+    await agent.close();
+  });
+
+  it('surfaces a rejected username and password', async () => {
+    const agent = createMockAgent();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/auth', method: 'POST' })
+      .reply(401, { message: 'invalid credentials' });
+
+    const client = createClient(agent, {
+      auth: { mode: 'userPass', username: 'admin', password: 'wrong' },
+    });
+    const error = await client.systemStatus().catch((e: unknown) => e);
+
+    expect((error as PortainerError).status).toBe(401);
+    expect((error as PortainerError).message).toMatch(/username\/password/);
+    await agent.close();
+  });
+});
+
 describe('PortainerClient introspection', () => {
   it('never exposes credentials', () => {
     const client = new PortainerClient({

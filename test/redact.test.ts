@@ -36,4 +36,53 @@ describe('redactValue', () => {
   it('still scrubs credentials that appear inside ordinary string values', () => {
     expect(redactValue({ error: 'rejected ptr_abc123' })).toEqual({ error: 'rejected [redacted]' });
   });
+
+  it('matches secret keys regardless of separators or casing', () => {
+    expect(
+      redactValue({
+        api_key: 'a',
+        'api-key': 'b',
+        'X-API-Key': 'c',
+        accessToken: 'd',
+        refresh_token: 'e',
+        Cookie: 'f',
+        secret: 'g',
+      }),
+    ).toEqual({
+      api_key: '[redacted]',
+      'api-key': '[redacted]',
+      'X-API-Key': '[redacted]',
+      accessToken: '[redacted]',
+      refresh_token: '[redacted]',
+      Cookie: '[redacted]',
+      secret: '[redacted]',
+    });
+  });
+
+  it('leaves a CA certificate readable — it is public material', () => {
+    expect(redactValue({ ca: 'PEM', servername: 'boatpi' })).toEqual({
+      ca: 'PEM',
+      servername: 'boatpi',
+    });
+  });
+
+  it('preserves non-plain objects instead of reducing them to {}', () => {
+    const date = new Date('2026-01-01T00:00:00Z');
+    const error = new Error('boom');
+    const buffer = Buffer.from('hi');
+    const result = redactValue({ date, error, buffer, set: new Set([1]) });
+
+    expect(result.date).toBe(date);
+    expect(result.error).toBe(error);
+    expect(result.buffer).toBe(buffer);
+    expect(result.set).toBeInstanceOf(Set);
+  });
+
+  it('breaks cycles instead of recursing forever', () => {
+    const node: Record<string, unknown> = { name: 'local' };
+    node.self = node;
+
+    expect(() => redactValue(node)).not.toThrow();
+    expect((redactValue(node) as { self: unknown }).self).toBe('[circular]');
+  });
 });

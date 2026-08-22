@@ -2,8 +2,9 @@ import express from 'express';
 import request from 'supertest';
 import type { MockAgent } from 'undici';
 import { normalizeConfig } from '../src/config';
+import { PortainerError } from '../src/errors';
 import { registerRoutes, instanceParam } from '../src/facade';
-import { InstanceRegistry } from '../src/registry';
+import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import * as fixtures from './fixtures';
 import { createMockAgent } from './support';
 
@@ -77,6 +78,53 @@ describe('facade', () => {
     expect(res.body.instances[0].reachable).toBe(true);
     expect(res.body.instances[1].reachable).toBe(false);
     registry.close();
+  });
+});
+
+describe('facade error mapping', () => {
+  const failingRegistry = (cause: unknown): InstanceRegistry =>
+    ({
+      get names(): string[] {
+        throw cause;
+      },
+    }) as unknown as InstanceRegistry;
+
+  it('maps an unknown instance to 404', async () => {
+    const registry = failingRegistry(new UnknownInstanceError('nope', ['boat']));
+    const res = await request(buildApp(registry)).get('/api/instances');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('nope');
+  });
+
+  it('maps a Portainer failure to its facade status, with the hint', async () => {
+    const registry = failingRegistry(
+      new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: '/api/endpoints',
+        message: 'not found',
+        hint: 'ids are creation-order',
+      }),
+    );
+    const res = await request(buildApp(registry)).get('/api/instances');
+
+    expect(res.status).toBe(404);
+    expect(res.body.portainerStatus).toBe(404);
+    expect(res.body.hint).toContain('creation-order');
+  });
+
+  it('maps an unexpected failure to 500', async () => {
+    const res = await request(buildApp(failingRegistry(new Error('kaboom')))).get('/api/instances');
+
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('kaboom');
+  });
+
+  it('handles a thrown non-Error', async () => {
+    const res = await request(buildApp(failingRegistry('odd'))).get('/api/instances');
+    expect(res.status).toBe(500);
+    expect(res.body.error).toBe('odd');
   });
 });
 

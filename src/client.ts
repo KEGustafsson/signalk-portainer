@@ -131,6 +131,9 @@ export class PortainerClient {
     // A rejected JWT is renewable; a rejected API key is not.
     if (res.status === 401 && mayRetryAuth && this.auth.mode === 'userPass') {
       this.jwt = undefined;
+      // Release the connection before the retry rather than leaving the body
+      // dangling for the garbage collector.
+      await res.body?.cancel().catch(() => undefined);
       this.log('Portainer rejected the cached JWT, re-authenticating');
       return this.send(method, path, init, false);
     }
@@ -278,7 +281,14 @@ export class PortainerClient {
     return this.cache.get('capabilities', TTL.dockerInfo, async () => {
       const [info, status] = await Promise.all([
         this.dockerInfo(),
-        this.systemStatus().catch(() => undefined),
+        this.systemStatus().catch((cause: unknown) => {
+          // Swallowed so a missing version never fails the probe, but logged so
+          // an auth or TLS failure here is diagnosable rather than invisible.
+          this.log(
+            `system status probe failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+          );
+          return undefined;
+        }),
       ]);
       const swarm = info.Swarm?.LocalNodeState === 'active';
       const result: Capabilities = { swarm };

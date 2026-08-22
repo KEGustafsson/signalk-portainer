@@ -35,6 +35,13 @@ describe('InstanceRegistry', () => {
     registry.close();
   });
 
+  it('invalidates every client without touching credentials or identity', () => {
+    const registry = new InstanceRegistry(instances());
+    expect(() => registry.invalidate()).not.toThrow();
+    expect(registry.names).toEqual(['boat']);
+    registry.close();
+  });
+
   it('names the configured instances when asked for an unknown one', () => {
     const registry = new InstanceRegistry(instances());
     const error = (() => {

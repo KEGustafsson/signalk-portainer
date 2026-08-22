@@ -46,7 +46,7 @@ Requires Node.js 20.18.1 or newer (the version `undici` needs).
 
 ```bash
 npm install     # install dependencies
-npm test        # 58 unit tests, no network required
+npm test        # 93 unit tests, no network required, 80% coverage enforced
 npm run lint
 npm run build   # emits dist/
 ```
