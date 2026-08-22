@@ -44,6 +44,36 @@ export interface ContainerLookup {
   (instance: string, key: string): { id: string; name?: string } | undefined;
 }
 
+/** One container as a poll saw it, keyed by the path segment it publishes under. */
+export interface KnownContainer {
+  key: string;
+  id: string;
+  name?: string;
+}
+
+/**
+ * The lookup table after a successful poll of one instance: this instance's
+ * entries are replaced wholesale rather than merged.
+ *
+ * Merging would leave a removed container's key pointing at an id that no
+ * longer exists, so a PUT to its path would be sent to Docker and come back as
+ * a gateway error instead of the plain "no such container" the writer needs.
+ * Other instances are untouched — this poll says nothing about them.
+ */
+export function replaceKnownContainers(
+  known: ReadonlyMap<string, KnownContainer>,
+  instance: string,
+  containers: readonly KnownContainer[],
+): Map<string, KnownContainer> {
+  const next = new Map<string, KnownContainer>();
+  const prefix = `${instance}/`;
+  for (const [entry, container] of known) {
+    if (!entry.startsWith(prefix)) next.set(entry, container);
+  }
+  for (const container of containers) next.set(`${prefix}${container.key}`, container);
+  return next;
+}
+
 export class PutHandlers {
   /** Paths already registered, since keys are discovered poll by poll. */
   private readonly registered = new Set<string>();

@@ -1,6 +1,12 @@
 import type { MockAgent } from 'undici';
 import { normalizeConfig, type PluginConfig } from '../src/config';
-import { PutHandlers, type ActionHandler, type ActionResult } from '../src/put';
+import {
+  PutHandlers,
+  replaceKnownContainers,
+  type ActionHandler,
+  type ActionResult,
+  type KnownContainer,
+} from '../src/put';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
@@ -285,5 +291,57 @@ describe('PutHandlers', () => {
 
       expect(immediate).toEqual({ state: 'PENDING' });
     });
+  });
+});
+
+describe('replaceKnownContainers', () => {
+  const known = (entries: Record<string, KnownContainer>) =>
+    new Map<string, KnownContainer>(Object.entries(entries));
+
+  it('forgets a container that is no longer there', () => {
+    // Merging instead would leave the key resolving to an id that no longer
+    // exists: a PUT to its path reaches Docker and comes back a gateway error
+    // rather than saying plainly that the container is gone.
+    const before = known({
+      'boat/influx': { key: 'influx', id: 'aaa111' },
+      'boat/ais': { key: 'ais', id: 'bbb222' },
+    });
+
+    const after = replaceKnownContainers(before, 'boat', [{ key: 'influx', id: 'aaa111' }]);
+
+    expect([...after.keys()]).toEqual(['boat/influx']);
+  });
+
+  it('picks up a container that has appeared, and a new id for an old key', () => {
+    const before = known({ 'boat/influx': { key: 'influx', id: 'aaa111' } });
+
+    const after = replaceKnownContainers(before, 'boat', [
+      // Same key, recreated container: the id must follow.
+      { key: 'influx', id: 'ccc333' },
+      { key: 'ais', id: 'ddd444' },
+    ]);
+
+    expect(after.get('boat/influx')?.id).toBe('ccc333');
+    expect(after.get('boat/ais')?.id).toBe('ddd444');
+  });
+
+  it('says nothing about the instances this poll did not look at', () => {
+    const before = known({
+      'boat/influx': { key: 'influx', id: 'aaa111' },
+      'shore/backup': { key: 'backup', id: 'eee555' },
+    });
+
+    const after = replaceKnownContainers(before, 'boat', []);
+
+    expect(after.get('shore/backup')?.id).toBe('eee555');
+    expect(after.has('boat/influx')).toBe(false);
+  });
+
+  it('does not mutate the map it was given', () => {
+    const before = known({ 'boat/influx': { key: 'influx', id: 'aaa111' } });
+
+    replaceKnownContainers(before, 'boat', []);
+
+    expect(before.has('boat/influx')).toBe(true);
   });
 });

@@ -134,6 +134,63 @@ describe('Watchdog', () => {
     });
   });
 
+  describe('the path a watch publishes to', () => {
+    // A watch written as an id prefix resolves to the container's own key while
+    // it exists, and to the configured string while it does not. Those are two
+    // different paths, and an alarm left on the abandoned one never clears.
+    const byId = () =>
+      new Watchdog('system.docker', [{ instance: 'boat', container: 'c1f0e2a3b4c5' }]);
+    const composed = (state = 'running') =>
+      container({
+        State: state,
+        Names: ['/signalk-ais-1'],
+        Labels: {
+          'com.docker.compose.project': 'signalk',
+          'com.docker.compose.service': 'ais',
+        },
+      });
+
+    it('keeps using the container key after the container disappears', () => {
+      const watchdog = byId();
+      watchdog.evaluate('boat', up([composed()]));
+
+      const notifications = watchdog.evaluate('boat', up([]));
+
+      // The instance status was already normal, so only the container changes.
+      expect(states(notifications)).toEqual({
+        'notifications.system.docker.boat.containers.signalk_ais': 'alarm',
+      });
+    });
+
+    it('clears the alarm on the same path when the container comes back', () => {
+      const watchdog = byId();
+      watchdog.evaluate('boat', up([composed()]));
+      watchdog.evaluate('boat', up([]));
+
+      const notifications = watchdog.evaluate('boat', up([composed()]));
+
+      // Not a new path with the old one left in alarm.
+      expect(states(notifications)).toEqual({
+        'notifications.system.docker.boat.containers.signalk_ais': 'normal',
+      });
+    });
+
+    it('clears the path it abandons when the watch resolves to a key', () => {
+      const watchdog = byId();
+      // Never seen before: the configured string names the path.
+      watchdog.evaluate('boat', up([]));
+
+      const notifications = watchdog.evaluate('boat', up([composed('exited')]));
+
+      // The old path is taken down as the new one is raised, rather than being
+      // left holding an alarm nothing will ever clear.
+      expect(states(notifications)).toEqual({
+        'notifications.system.docker.boat.containers.c1f0e2a3b4c5': 'normal',
+        'notifications.system.docker.boat.containers.signalk_ais': 'alarm',
+      });
+    });
+  });
+
   describe('when the instance is unreachable', () => {
     it('alarms on the instance and says nothing about its containers', () => {
       const watchdog = watching();

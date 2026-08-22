@@ -9,7 +9,7 @@ import {
 import type { MetaValue, PathValue } from './deltas';
 import { registerRoutes } from './facade';
 import { DeltaPoller, type KeyedContainer } from './poller';
-import { PutHandlers, type ActionHandler } from './put';
+import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
 import { detectSelfContainer, type SelfContainer } from './self';
@@ -169,9 +169,10 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
             watchdog,
             publishNotifications,
             onKeys: (instance, keys, containers) => {
-              for (const container of containers) {
-                seen.set(`${instance}/${container.key}`, container);
-              }
+              // Replaced, not merged: a container that has gone must stop
+              // resolving, or a PUT to its path reaches Docker and fails as a
+              // gateway error instead of saying plainly that it is not there.
+              seen = replaceKnownContainers(seen, instance, containers);
               puts?.register(instance, keys, prefix);
             },
           });

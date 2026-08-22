@@ -51,6 +51,16 @@ function matches(container: DockerContainer, key: string, wanted: string): boole
 export class Watchdog {
   /** Last state published per path, so an alarm is raised once, not per poll. */
   private readonly states = new Map<string, AlarmState>();
+  /**
+   * The path each configured watch currently publishes to.
+   *
+   * A watch written as an id prefix resolves to the container's key while the
+   * container exists, and to the configured string while it does not — two
+   * different paths for one watch. Without remembering which one is in use, an
+   * alarm raised on the second would still be standing after the container
+   * came back and cleared the first.
+   */
+  private readonly paths = new Map<string, string>();
 
   constructor(
     private readonly prefix: string,
@@ -96,10 +106,35 @@ export class Watchdog {
         matches(container, keys.get(container.Id)?.key ?? '', entry.container),
       );
 
-      const key = found
-        ? (keys.get(found.Id)?.key ?? normalizeSegment(entry.container))
-        : normalizeSegment(entry.container);
-      const path = joinPath('notifications', this.prefix, instance, 'containers', key);
+      // While the container exists its own key names the path, so the alarm
+      // sits beside the container's data paths. While it does not, the last
+      // path used is kept — and the configured name only when there is none.
+      const identity = `${entry.instance}/${entry.container}`;
+      const previous = this.paths.get(identity);
+      const resolved = found ? keys.get(found.Id)?.key : undefined;
+      const path = resolved
+        ? joinPath('notifications', this.prefix, instance, 'containers', resolved)
+        : (previous ??
+          joinPath(
+            'notifications',
+            this.prefix,
+            instance,
+            'containers',
+            normalizeSegment(entry.container),
+          ));
+
+      // The watch moved paths — clear the one being abandoned, or its alarm
+      // stands forever with nothing left to take it down.
+      if (previous && previous !== path) {
+        this.push(
+          notifications,
+          previous,
+          'normal',
+          `Container ${entry.container} is now reported under a different key`,
+        );
+        this.states.delete(previous);
+      }
+      this.paths.set(identity, path);
 
       if (!found) {
         // Missing is worse than stopped, not better: a container that was
