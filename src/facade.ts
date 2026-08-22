@@ -166,7 +166,27 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
    * unlimited: this is a compose file, not an upload endpoint, and an
    * unbounded body is a way to make Signal K run out of memory.
    */
-  const body = express.json({ limit: '512kb' });
+  const parseJson = express.json({ limit: '512kb' });
+  const body = (req: Request, res: Response, next: (cause?: unknown) => void): void => {
+    parseJson(req, res, (cause?: unknown) => {
+      if (!cause) {
+        next();
+        return;
+      }
+      // Express would answer these itself, with an HTML page. Every other route
+      // here answers { error, hint }, and a client that parses the answer
+      // should not have to make an exception for two of them.
+      const tooLarge = (cause as { type?: string }).type === 'entity.too.large';
+      res.status(tooLarge ? 413 : 400).json({
+        error: tooLarge
+          ? 'The request body is larger than 512kb'
+          : 'The request body is not valid JSON',
+        hint: tooLarge
+          ? 'this route takes a compose file, not an upload'
+          : 'send a JSON object with content-type: application/json',
+      });
+    });
+  };
 
   router.post(
     '/api/stacks',
@@ -179,7 +199,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
           ? await client.createStackFromString(create)
           : await client.createStackFromRepository(create);
 
-      audit(deps, req, `stack create ${create.name}`, create.name);
+      audit(deps, req, 'create', create.name, undefined, 'stack');
       return { ok: true, stack: created };
     }),
   );
@@ -207,7 +227,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       else if (action === 'stop') await client.stopStack(id);
       else await client.redeployStack(id, readRedeploy(req));
 
-      audit(deps, req, `stack ${action}`, String(id));
+      audit(deps, req, action, String(id), undefined, 'stack');
       return { id, action, ok: true };
     }),
   );
@@ -218,14 +238,26 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     withClient(deps, async (req, client) => {
       const id = stackId(req, 'PUT', '/api/stacks/:id');
       requireControlEnabled(deps);
-      // A redeploy restarts every container in the stack, Signal K included.
+      // An update restarts every container in the stack, Signal K included.
       await requireStackNotSelf(deps, client, id, 'update');
 
       const update = readStackUpdate(req);
-      await client.updateStack(id, update);
+      const result = await client.updateStack(id, update);
 
-      audit(deps, req, `stack update${update.prune ? ' --prune' : ''}`, String(id));
-      return { id, action: 'update', ok: true };
+      audit(deps, req, `update${update.prune ? ' --prune' : ''}`, String(id), undefined, 'stack');
+      return {
+        id,
+        action: 'update',
+        ok: true,
+        // Said out loud rather than left to be discovered when the webhook
+        // stops firing: Portainer drops auto-update on every stack update.
+        ...(result.autoUpdateRemoved
+          ? {
+              warning:
+                'Portainer removed this stack’s auto-update settings; its webhook URL no longer works and has to be recreated',
+            }
+          : {}),
+      };
     }),
   );
 
@@ -241,7 +273,14 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
 
       await client.deleteStack(id, { removeVolumes });
 
-      audit(deps, req, `stack delete${removeVolumes ? ' --volumes' : ''}`, String(id));
+      audit(
+        deps,
+        req,
+        `delete${removeVolumes ? ' --volumes' : ''}`,
+        String(id),
+        undefined,
+        'stack',
+      );
       return { id, action: 'delete', removeVolumes, ok: true };
     }),
   );
@@ -543,6 +582,7 @@ function audit(
   action: string,
   reference: string,
   canonical?: string,
+  kind = 'container',
 ): void {
   const instance = instanceParam(req) ?? 'default instance';
   // The reference as asked for, plus what it resolved to when they differ —
@@ -551,7 +591,7 @@ function audit(
     canonical && !canonical.startsWith(reference)
       ? `${reference} (${canonical.slice(0, 12)})`
       : reference;
-  deps.log(`container ${action}: ${target} on ${instance}`);
+  deps.log(`${kind} ${action}: ${target} on ${instance}`);
 }
 
 const STACK_ACTIONS = ['start', 'stop', 'redeploy'] as const;
@@ -647,7 +687,6 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
     env?: unknown;
     username?: unknown;
     password?: unknown;
-    tlsSkipVerify?: unknown;
   };
 
   if (typeof payload.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(payload.name)) {
@@ -687,7 +726,6 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
     ...(typeof payload.composeFile === 'string' ? { composeFile: payload.composeFile } : {}),
     ...(env ? { env } : {}),
     ...(authentication ? { authentication } : {}),
-    tlsSkipVerify: payload.tlsSkipVerify === true,
   };
 }
 

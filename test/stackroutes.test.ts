@@ -238,6 +238,70 @@ describe('facade stack writes', () => {
       expect(res.body.stack).toMatchObject({ Id: 11, Name: 'weather' });
     });
 
+    it('creates from a repository, mapping every field the route accepts', async () => {
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      let body: Record<string, unknown> = {};
+      boat()
+        .intercept({
+          path: '/api/stacks/create/standalone/repository?endpointId=1',
+          method: 'POST',
+          body: (value: string) => {
+            body = JSON.parse(value) as Record<string, unknown>;
+            return true;
+          },
+        })
+        .reply(200, { Id: 12, Name: 'weather', Type: 2, EndpointId: 1 });
+
+      const res = await request(app()).post('/api/stacks').send({
+        name: 'weather',
+        repositoryUrl: 'https://example.test/boat/stacks',
+        reference: 'refs/heads/main',
+        composeFile: 'boat/docker-compose.yml',
+        username: 'deploy',
+        password: 'secret',
+      });
+
+      expect(res.status).toBe(200);
+      expect(body.RepositoryURL).toBe('https://example.test/boat/stacks');
+      expect(body.RepositoryReferenceName).toBe('refs/heads/main');
+      expect(body.ComposeFile).toBe('boat/docker-compose.yml');
+      expect(body.RepositoryAuthentication).toBe(true);
+      expect(body.RepositoryUsername).toBe('deploy');
+    });
+
+    it('never lets a request turn off certificate verification', async () => {
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      let body: Record<string, unknown> = {};
+      boat()
+        .intercept({
+          path: '/api/stacks/create/standalone/repository?endpointId=1',
+          method: 'POST',
+          body: (value: string) => {
+            body = JSON.parse(value) as Record<string, unknown>;
+            return true;
+          },
+        })
+        .reply(200, { Id: 13, Name: 'weather', Type: 2, EndpointId: 1 });
+
+      await request(app()).post('/api/stacks').send({
+        name: 'weather',
+        repositoryUrl: 'https://example.test/boat/stacks',
+        tlsSkipVerify: true,
+      });
+
+      // Whether a certificate is checked is the operator's configuration, not
+      // a field any caller past allowPutControl gets to set per request.
+      expect(body.TLSSkipVerify).toBe(false);
+    });
+
     it('refuses a name Docker would not accept', async () => {
       const res = await request(app())
         .post('/api/stacks')
@@ -303,6 +367,73 @@ describe('facade stack writes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.removeVolumes).toBe(true);
+    });
+  });
+
+  describe('the body contract', () => {
+    it('answers malformed JSON in the same shape as everything else', async () => {
+      // Express would answer this itself, with an HTML page.
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .set('content-type', 'application/json')
+        .send('{ not json');
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('not valid JSON');
+      expect(res.body.hint).toBeTruthy();
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('answers an oversized body as JSON too, and never reads it', async () => {
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .set('content-type', 'application/json')
+        .send(JSON.stringify({ content: 'x'.repeat(600 * 1024) }));
+
+      expect(res.status).toBe(413);
+      expect(res.body.error).toContain('larger than 512kb');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+  });
+
+  describe('audit', () => {
+    it('calls a stack a stack', async () => {
+      const lines: string[] = [];
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3/start?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+
+      await request(app({ log: (m) => lines.push(m) })).post('/api/stacks/3/start');
+
+      // "container start" would be the wrong noun for a stack.
+      expect(lines).toContain('stack start: 3 on default instance');
+    });
+  });
+
+  describe('a stack that lives in git', () => {
+    it('is not updated through the file route', async () => {
+      withStacks();
+      withContainers();
+
+      const res = await request(app())
+        .put('/api/stacks/5')
+        .send({ content: 'services:\n  web:\n' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.hint).toContain('detach it from git');
+    });
+
+    it('is redeployed instead', async () => {
+      withStacks();
+      withContainers();
+      boat()
+        .intercept({ path: '/api/stacks/5/git/redeploy?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[2]);
+
+      const res = await request(app()).post('/api/stacks/5/redeploy');
+
+      expect(res.status).toBe(200);
     });
   });
 

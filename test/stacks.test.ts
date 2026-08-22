@@ -40,7 +40,7 @@ describe('PortainerClient stack writes', () => {
   const jsonBody = (body: unknown): Record<string, unknown> =>
     JSON.parse(String(body)) as Record<string, unknown>;
 
-  it('starts and stops a stack against its own environment', async () => {
+  it('starts a stack against its own environment', async () => {
     const pool = withStacks();
     pool
       .intercept({ path: '/api/stacks/3/start?endpointId=1', method: 'POST' })
@@ -149,6 +149,55 @@ describe('PortainerClient stack writes', () => {
     });
 
     expect(body.Env).toEqual([{ name: 'TZ', value: 'UTC' }]);
+  });
+
+  it('refuses to update a stack that is deployed from a repository', async () => {
+    withStacks();
+
+    const client = createClient(agent);
+    const error = await client
+      .updateStack(5, { content: 'services:\n' })
+      .catch((cause: unknown) => cause);
+
+    // Portainer's update handler detaches the stack from git and clears its
+    // auto-update settings. Nothing in the request says so, and the stack
+    // quietly stops being what the repository describes.
+    expect(error).toBeInstanceOf(PortainerError);
+    expect((error as PortainerError).status).toBe(400);
+    expect((error as PortainerError).hint).toMatch(/detach it from git/);
+    expect(
+      pendingPaths(agent).filter((path) => path === '/api/stacks/5?endpointId=1'),
+    ).toHaveLength(0);
+  });
+
+  it('reports that an update took the stack’s auto-update with it', async () => {
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool
+      .intercept({ path: '/api/stacks', method: 'GET' })
+      .reply(200, [{ ...fixtures.stacks[0], AutoUpdate: { Webhook: 'abc-123' } }]);
+    pool.intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' }).reply(200, {});
+
+    const client = createClient(agent);
+
+    // Portainer discards it and the request has no field that could keep it, so
+    // the only honest thing left is to say so.
+    await expect(client.updateStack(3, { content: 'services:\n' })).resolves.toEqual({
+      autoUpdateRemoved: true,
+    });
+  });
+
+  it('says nothing about auto-update for a stack that had none', async () => {
+    const pool = withStacks();
+    pool.intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' }).reply(200, {});
+
+    const client = createClient(agent);
+
+    await expect(client.updateStack(3, { content: 'services:\n' })).resolves.toEqual({
+      autoUpdateRemoved: false,
+    });
   });
 
   it('redeploys a git stack from the reference it was deployed from', async () => {

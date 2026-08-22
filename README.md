@@ -38,7 +38,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M4a)
+## What works today (M5a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -116,7 +116,12 @@ K client can start or stop a container.
 - **Stack control** — start, stop, update, redeploy, create and delete, behind
   the same guards container lifecycle uses. An update sends the compose file
   and, unless the caller says otherwise, the environment the stack already had:
-  editing a file is not a statement about its variables. `prune` is always sent
+  editing a file is not a statement about its variables. A stack deployed from
+  a repository is not updated this way at all — Portainer's update handler
+  detaches it from git and clears its auto-update settings, so the stack quietly
+  stops being what the repository describes; change the file in git and
+  redeploy. Updating a file-based stack drops any auto-update Portainer had on
+  it, which no field in the request can prevent, so the answer says so. `prune` is always sent
   explicitly and defaults to off, so a file that lost a service by accident does
   not take the service with it. A redeploy pulls from the stack's own repository
   and is refused for a stack that has none, rather than passed on to Portainer
@@ -194,7 +199,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 487 unit tests, no network required, 80% coverage enforced
+npm test           # 497 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

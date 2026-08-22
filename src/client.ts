@@ -105,6 +105,15 @@ export interface StackUpdate {
   pullImage?: boolean;
 }
 
+/** What an update changed beyond the file itself. */
+export interface StackUpdateResult {
+  /**
+   * True when the stack had a webhook or a polling interval, which Portainer
+   * discards on update and this request could not preserve.
+   */
+  autoUpdateRemoved: boolean;
+}
+
 /** A redeploy of a stack whose file lives in git; the file comes from there. */
 export interface StackRedeploy {
   prune?: boolean;
@@ -714,15 +723,34 @@ export class PortainerClient {
    * `prune` and `pullImage` are sent explicitly rather than left to Portainer's
    * defaults: pruning removes services the new file no longer mentions, and a
    * file that lost a service by accident should not take the service with it.
+   *
+   * Refused for a git-backed stack. Portainer's update handler detaches the
+   * stack from its repository and clears its auto-update settings — the stack
+   * silently stops being the thing the repository describes, and no field in
+   * this request says so. A git stack is changed in git and brought over with
+   * redeploy.
    */
-  async updateStack(id: number, update: StackUpdate): Promise<void> {
+  async updateStack(id: number, update: StackUpdate): Promise<StackUpdateResult> {
     const stack = await this.ownStack(id, 'PUT', `/api/stacks/${id}`);
+    if (stack.GitConfig?.URL) {
+      throw new PortainerError({
+        status: 400,
+        method: 'PUT',
+        path: `/api/stacks/${id}`,
+        message: `Stack ${stack.Name} is deployed from a repository`,
+        hint: 'updating it here would detach it from git and drop its auto-update settings; change the file in the repository and redeploy instead',
+      });
+    }
     await this.stackWrite('PUT', `/api/stacks/${id}?${await this.endpointQuery()}`, {
       StackFileContent: update.content,
       Env: pairs(update.env ?? stack.Env ?? []),
       Prune: update.prune === true,
       PullImage: update.pullImage === true,
     });
+    // Portainer's update handler clears AutoUpdate, and the request has no
+    // field that could have kept it. Reported rather than swallowed: a webhook
+    // that stops firing is otherwise discovered by it not firing.
+    return { autoUpdateRemoved: Boolean(stack.AutoUpdate?.Webhook ?? stack.AutoUpdate?.Interval) };
   }
 
   /**

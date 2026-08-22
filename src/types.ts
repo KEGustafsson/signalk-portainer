@@ -205,4 +205,6 @@ export interface Stack {
   UpdateDate?: number;
   Env?: { name: string; value: string }[];
   GitConfig?: { URL?: string; ReferenceName?: string; ConfigFilePath?: string } | null;
+  /** Portainer's own polling or webhook redeploy, if the stack has one. */
+  AutoUpdate?: { Interval?: string; Webhook?: string; ForcePullImage?: boolean } | null;
 }
