@@ -66,7 +66,12 @@ K client can start or stop a container.
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
   | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
 
-Requires Node.js 20.18.1 or newer (the version `undici` needs).
+Requires Node.js 22 or newer — the versions CI actually verifies.
+
+> Declaring Node 22 means Venus OS / Cerbo GX, which ships Node 20, is out of
+> scope. The Signal K shared workflow reads `engines.node` and skips its
+> ES2023 compatibility check once the declared major is 22 or above, so that
+> compatibility is no longer checked either.
 
 ```bash
 npm install        # install dependencies
