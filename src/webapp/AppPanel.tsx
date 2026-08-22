@@ -297,11 +297,9 @@ export default function AppPanel(): ReactElement {
         setDeleting(stack);
         return;
       }
-      void runStack(
-        stack,
-        () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance),
-        action === 'redeploy' ? 'redeployed' : `${action}ped`,
-      );
+      // Spelled out rather than derived: "start" + "ped" is not a word.
+      const done = action === 'redeploy' ? 'redeployed' : action === 'stop' ? 'stopped' : 'started';
+      void runStack(stack, () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance), done);
     },
     [instance, runStack],
   );

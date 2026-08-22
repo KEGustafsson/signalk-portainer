@@ -662,6 +662,22 @@ describe('AppPanel container actions', () => {
       expect(await screen.findByText(/signalk: stopped/)).toBeInTheDocument();
     });
 
+    it('says a started stack was started, not "startped"', async () => {
+      const fetchMock = stackFetch({
+        '/stacks': {
+          stacks: [{ Id: 3, Name: 'signalk', Type: 2, EndpointId: 1, Status: 2 }],
+        },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Start' }));
+
+      expect(await screen.findByText(/signalk: started/)).toBeInTheDocument();
+    });
+
     it('asks before deleting, and never deletes volumes by implication', async () => {
       const fetchMock = stackFetch();
       global.fetch = fetchMock as unknown as typeof fetch;

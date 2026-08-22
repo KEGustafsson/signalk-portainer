@@ -137,7 +137,11 @@ export function StackEditor({
             repositoryUrl: repositoryUrl.trim(),
             ...(reference.trim() ? { reference: reference.trim() } : {}),
             ...(composeFile.trim() ? { composeFile: composeFile.trim() } : {}),
-            ...(username ? { username, password } : {}),
+            // Sent independently: several git hosts take a token in the
+            // password field and ignore the username, and gating the pair on
+            // the username would drop the token silently.
+            ...(username ? { username } : {}),
+            ...(password ? { password } : {}),
           }
         : { content }),
       env: envForRequest(env),

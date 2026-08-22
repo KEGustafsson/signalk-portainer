@@ -215,6 +215,23 @@ describe('StackEditor', () => {
       expect(global.fetch).not.toHaveBeenCalled();
     });
 
+    it('sends a token given without a username', async () => {
+      // Several git hosts take the token in the password field and ignore the
+      // username; dropping it would clone anonymously and fail.
+      const user = userEvent.setup();
+      const { onDeploy } = renderNew();
+
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.selectOptions(screen.getByLabelText('From'), 'repository');
+      await user.type(screen.getByLabelText('Repository URL'), 'https://example.test/boat/stacks');
+      await user.type(screen.getByLabelText('Password or token'), 'ghp_secret');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      const deployment = onDeploy.mock.calls[0]?.[0] as StackDeployment;
+      expect(deployment.password).toBe('ghp_secret');
+      expect(deployment.username).toBeUndefined();
+    });
+
     it('will not create from a repository with no URL', async () => {
       const user = userEvent.setup();
       renderNew();

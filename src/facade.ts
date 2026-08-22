@@ -711,10 +711,12 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
   }
 
   const env = readEnv(payload.env, 'POST', path);
-  const authentication =
-    typeof payload.username === 'string' && typeof payload.password === 'string'
-      ? { username: payload.username, password: payload.password }
-      : undefined;
+  // Either half is enough to mean "this repository needs credentials": a token
+  // in the password field with no username is how several git hosts are
+  // reached, and requiring both would silently clone anonymously instead.
+  const username = typeof payload.username === 'string' ? payload.username : '';
+  const password = typeof payload.password === 'string' ? payload.password : '';
+  const authentication = username || password ? { username, password } : undefined;
 
   if (hasContent) {
     return { name: payload.name, content: payload.content as string, ...(env ? { env } : {}) };

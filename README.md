@@ -211,7 +211,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 544 unit tests, no network required, 80% coverage enforced
+npm test           # 547 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
