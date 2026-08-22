@@ -388,8 +388,27 @@ export class PortainerClient {
     return all.filter((stack) => stack.EndpointId === environmentId);
   }
 
-  /** The compose or manifest file for a stack, as text. */
+  /**
+   * The compose or manifest file for a stack, as text.
+   *
+   * The id is resolved against this environment's stacks first. Portainer would
+   * happily serve the file for any stack the configured credential can reach,
+   * including stacks belonging to a different environment, so the ownership
+   * check has to happen here rather than being left to Portainer.
+   */
   async stackFile(id: number): Promise<string> {
+    const stacks = await this.listStacks();
+    if (!stacks.some((stack) => stack.Id === id)) {
+      throw new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: `/api/stacks/${id}/file`,
+        message: `Stack ${id} does not belong to this environment`,
+        hint: `stacks in this environment: ${
+          stacks.map((stack) => `${stack.Id}:${stack.Name}`).join(', ') || 'none'
+        }`,
+      });
+    }
     const payload = await this.json<{ StackFileContent?: string }>('GET', `/api/stacks/${id}/file`);
     return payload.StackFileContent ?? '';
   }

@@ -169,9 +169,18 @@ describe('PortainerClient stacks', () => {
     expect(stacks.map((s) => s.Name)).toEqual(['signalk']);
   });
 
+  /** stackFile resolves ownership first, so both calls are always needed. */
+  const interceptOwnership = () => {
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    return pool;
+  };
+
   it('unwraps the stack file envelope', async () => {
-    agent
-      .get(BASE_URL)
+    interceptOwnership()
       .intercept({ path: '/api/stacks/3/file', method: 'GET' })
       .reply(200, { StackFileContent: 'services:\n  influxdb:\n' });
 
@@ -180,9 +189,23 @@ describe('PortainerClient stacks', () => {
   });
 
   it('returns an empty string when Portainer omits the file content', async () => {
-    agent.get(BASE_URL).intercept({ path: '/api/stacks/3/file', method: 'GET' }).reply(200, {});
+    interceptOwnership().intercept({ path: '/api/stacks/3/file', method: 'GET' }).reply(200, {});
 
     const client = createClient(agent);
     await expect(client.stackFile(3)).resolves.toBe('');
+  });
+
+  it('refuses a stack belonging to another environment', async () => {
+    interceptOwnership();
+
+    const client = createClient(agent);
+    // Fixture stack 9 has EndpointId 4; this client is bound to environment 1.
+    const error = await client.stackFile(9).catch((e: unknown) => e);
+
+    expect(error).toBeInstanceOf(PortainerError);
+    expect((error as PortainerError).status).toBe(404);
+    expect((error as PortainerError).message).toMatch(/does not belong to this environment/);
+    // The file was never requested: an unconsumed interceptor would remain.
+    expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 });

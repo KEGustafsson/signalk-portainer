@@ -175,18 +175,36 @@ describe('facade read routes', () => {
     expect(res.body.stacks.map((s: { Name: string }) => s.Name)).toEqual(['signalk']);
   });
 
-  it('serves a stack file and rejects a non-numeric id', async () => {
+  it('serves a stack file for a stack in this environment', async () => {
+    withEnvironment();
+    boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
     boat()
       .intercept({ path: '/api/stacks/3/file', method: 'GET' })
       .reply(200, { StackFileContent: 'services: {}' });
 
-    const ok = await request(app()).get('/api/stacks/3/file');
-    expect(ok.status).toBe(200);
-    expect(ok.body.content).toContain('services');
+    const res = await request(app()).get('/api/stacks/3/file');
 
-    const bad = await request(app()).get('/api/stacks/abc/file');
-    expect(bad.status).toBe(400);
-    expect(bad.body.error).toContain('not a number');
+    expect(res.status).toBe(200);
+    expect(res.body.content).toContain('services');
+  });
+
+  it('404s a stack file belonging to another environment', async () => {
+    withEnvironment();
+    boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+
+    // Fixture stack 9 lives in EndpointId 4; this instance is bound to 1.
+    const res = await request(app()).get('/api/stacks/9/file');
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toMatch(/does not belong to this environment/);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('rejects a non-numeric stack id before reaching Portainer', async () => {
+    const res = await request(app()).get('/api/stacks/abc/file');
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('not a number');
   });
 
   it('serves images, volumes and networks', async () => {
