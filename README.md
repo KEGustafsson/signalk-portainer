@@ -1,5 +1,7 @@
 # signalk-portainer
 
+[![SignalK Plugin CI](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml/badge.svg)](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml)
+
 A Signal K server plugin that manages [Portainer CE](https://www.portainer.io/)
 over its HTTP API — containers, stacks, images, volumes and networks — and
 publishes container health into the Signal K data model.
@@ -45,11 +47,20 @@ container.
 Requires Node.js 20.18.1 or newer (the version `undici` needs).
 
 ```bash
-npm install     # install dependencies
-npm test        # 93 unit tests, no network required, 80% coverage enforced
-npm run lint
-npm run build   # emits dist/
+npm install        # install dependencies
+npm run lint       # eslint
+npm run format:check
+npm test           # 93 unit tests, no network required, 80% coverage enforced
+npm run build      # emits dist/
 ```
+
+These same commands run in CI via the Signal K project's shared
+[`plugin-ci`](https://github.com/SignalK/signalk-server/blob/master/.github/workflows/plugin-ci.yml)
+reusable workflow, on Node 22 and 24 across Linux x64, Linux arm64, macOS and
+Windows. It additionally validates the plugin entry point and schema,
+the start/stop/restart lifecycle, deprecated server API usage, npm pack
+completeness and App Store compatibility. An armv7 (Cerbo GX / Venus OS) job is
+available on demand from the Actions UI.
 
 ## Design decisions
 

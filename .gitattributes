@@ -1,0 +1,6 @@
+# Keep the working tree LF on every platform.
+#
+# Git for Windows checks out CRLF by default. Prettier's endOfLine default is
+# "lf", so without this every file reads as unformatted on Windows and
+# `npm run format:check` fails there while passing everywhere else.
+* text=auto eol=lf
