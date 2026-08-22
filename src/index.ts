@@ -8,11 +8,13 @@ import {
 } from './config';
 import type { MetaValue, PathValue } from './deltas';
 import { registerRoutes } from './facade';
-import { DeltaPoller } from './poller';
+import { DeltaPoller, type KeyedContainer } from './poller';
+import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
 import { detectSelfContainer, type SelfContainer } from './self';
 import type { SignalKApp, SignalKPlugin } from './signalk';
+import { Watchdog, type Notification } from './watchdog';
 
 const PLUGIN_ID = 'signalk-portainer';
 
@@ -20,6 +22,8 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
   let registry: InstanceRegistry | undefined;
   let config: PluginConfig | undefined;
   let poller: DeltaPoller | undefined;
+  /** Containers seen on the last poll, keyed by "<instance>/<key>", for PUT. */
+  let seen = new Map<string, KeyedContainer>();
   // Detected once at load: the container id cannot change under a running
   // process, and probing /proc on every request would be wasted work.
   const self: SelfContainer = detectSelfContainer();
@@ -40,6 +44,18 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     app.handleMessage(PLUGIN_ID, {
       updates,
     } as Parameters<typeof app.handleMessage>[1]);
+  };
+
+  /**
+   * Notifications go out as ordinary deltas on notifications.* paths, which is
+   * how every other Signal K alarm reaches a chartplotter.
+   */
+  const publishNotifications = (notifications: Notification[]): void => {
+    if (notifications.length === 0) return;
+    publish(
+      notifications.map((entry) => ({ path: entry.path, value: entry.value })),
+      [],
+    );
   };
 
   // Redaction happens once, here, so no host callback can ever receive a raw
@@ -110,16 +126,55 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         setStatus(`Starting — ${registry.names.length} instance(s): ${registry.names.join(', ')}`);
         void reportHealth();
 
-        // 'off' is honoured by never constructing the poller, so a plugin the
-        // operator told to stay quiet issues no polls at all.
-        if (config.telemetry.level !== 'off') {
+        // Only when something is actually watched. Alarms nobody asked for are
+        // worse than no alarms: the first thing an operator does with an alarm
+        // they did not configure is learn to ignore that channel.
+        const watchdog =
+          config.control.watchdog.length > 0
+            ? new Watchdog(config.telemetry.pathPrefix, config.control.watchdog)
+            : undefined;
+
+        // PUT writes to a published path, so there is nothing to register when
+        // nothing is published. The REST facade still controls containers.
+        const putsWanted = config.control.allowPutControl && config.telemetry.level !== 'off';
+        const puts =
+          putsWanted && app.registerPutHandler
+            ? new PutHandlers(
+                {
+                  registry: () => registry,
+                  config: () => config,
+                  self: () => self,
+                  log,
+                  register: (context, path, handler) =>
+                    app.registerPutHandler?.(context, path, handler as ActionHandler),
+                },
+                (instance, key) => seen.get(`${instance}/${key}`),
+              )
+            : undefined;
+
+        // 'off' means off: no polling, no paths. The one thing that still needs
+        // a poll is a configured watchdog, which cannot check a container
+        // without looking at it — it then publishes alarms and nothing else.
+        if (config.telemetry.level !== 'off' || watchdog) {
+          const prefix = config.telemetry.pathPrefix;
           poller = new DeltaPoller({
             registry: () => registry,
-            publish,
+            // A level of 'off' still polls for the watchdog, so the values are
+            // built and then dropped rather than sent.
+            publish: config.telemetry.level === 'off' ? () => undefined : publish,
             log,
             intervalMs: config.telemetry.intervalSeconds * 1000,
-            pathPrefix: config.telemetry.pathPrefix,
-            level: config.telemetry.level,
+            pathPrefix: prefix,
+            level: config.telemetry.level === 'off' ? 'health' : config.telemetry.level,
+            watchdog,
+            publishNotifications,
+            onKeys: (instance, keys, containers) => {
+              // Replaced, not merged: a container that has gone must stop
+              // resolving, or a PUT to its path reaches Docker and fails as a
+              // gateway error instead of saying plainly that it is not there.
+              seen = replaceKnownContainers(seen, instance, containers);
+              puts?.register(instance, keys, prefix);
+            },
           });
           poller.start();
         }
@@ -138,6 +193,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       // that clearing delta has to go out while the plugin still can send it.
       poller?.stop();
       poller = undefined;
+      seen = new Map();
       registry?.close();
       registry = undefined;
       config = undefined;

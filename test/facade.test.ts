@@ -344,6 +344,8 @@ describe('facade container lifecycle', () => {
     ['stop', 'stop'],
     ['restart', 'restart'],
     ['kill', 'kill'],
+    ['pause', 'pause'],
+    ['unpause', 'unpause'],
   ])('performs %s through the docker proxy', async (action, dockerPath) => {
     withEnvironment();
     boat()
@@ -369,7 +371,7 @@ describe('facade container lifecycle', () => {
 
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('Unknown container action');
-    expect(res.body.hint).toContain('start, stop, restart, kill');
+    expect(res.body.hint).toContain('start, stop, restart, kill, pause, unpause');
   });
 
   it('refuses every action on the container running Signal K', async () => {

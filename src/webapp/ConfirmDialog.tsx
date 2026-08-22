@@ -27,6 +27,8 @@ const CONSEQUENCE: Record<ContainerAction, string> = {
   stop: 'Its services stop until it is started again.',
   restart: 'Its services are interrupted while it restarts.',
   kill: 'It is sent SIGKILL immediately, with no chance to shut down cleanly.',
+  pause: 'Its processes are frozen. They stop responding but keep their memory.',
+  unpause: 'Its processes resume where they were frozen.',
   remove: 'The container is deleted. This cannot be undone.',
 };
 
@@ -135,7 +137,7 @@ export function ConfirmDialog({
             </button>
             <button
               type="button"
-              className={`btn ${action === 'start' ? 'btn-success' : 'btn-danger'}`}
+              className={`btn ${action === 'start' || action === 'unpause' ? 'btn-success' : 'btn-danger'}`}
               onClick={() => onConfirm({ force, removeVolumes })}
               disabled={busy || blocked}
               title={
