@@ -8,6 +8,7 @@ import {
   isSelfRow,
   needsConfirmation,
   normalizeControl,
+  requiresForceToRemove,
   type ControlState,
 } from '../../src/webapp/control';
 
@@ -110,6 +111,29 @@ describe('actionsFor', () => {
     expect(actionsFor(container({ State: 'exited' }))).toEqual(['start', 'remove']);
     // A restarting container is on its way up, so it is treated as running.
     expect(actionsFor(container({ State: 'restarting' }))).toContain('stop');
+  });
+
+  it('does not offer a paused container the actions Docker would refuse', () => {
+    const actions = actionsFor(container({ State: 'paused' }));
+
+    // Paused is running, so Start is refused as "already started", and Docker
+    // wants a paused container unpaused before it will kill it.
+    expect(actions).not.toContain('start');
+    expect(actions).not.toContain('kill');
+    expect(actions).toEqual(['stop', 'restart', 'remove']);
+  });
+});
+
+describe('requiresForceToRemove', () => {
+  it.each([['running'], ['restarting'], ['paused']])(
+    'requires force to remove a %s container',
+    (state) => {
+      expect(requiresForceToRemove(container({ State: state }))).toBe(true);
+    },
+  );
+
+  it.each([['exited'], ['created'], ['dead']])('removes a %s container without force', (state) => {
+    expect(requiresForceToRemove(container({ State: state }))).toBe(false);
   });
 });
 

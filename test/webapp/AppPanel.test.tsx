@@ -471,6 +471,68 @@ describe('AppPanel container actions', () => {
     expect(actionsFor('ais-logger').getByRole('button', { name: 'Start' })).toBeEnabled();
   });
 
+  it('does not paint the old instance over the one just selected', async () => {
+    // The action is bound to the instance it started on. If the operator
+    // switches while it is in flight, its refresh must not come back and
+    // overwrite the new instance's table with the old instance's containers.
+    let releasePost: (() => void) | undefined;
+    const shoreOnly = [
+      {
+        Id: '9999aaaa8888',
+        Names: ['/shore-only'],
+        Image: 'nginx',
+        Created: 0,
+        State: 'running',
+        Status: 'Up',
+      },
+    ];
+    const ok = (body: unknown) =>
+      Promise.resolve({ ok: true, status: 200, json: async () => body });
+
+    global.fetch = jest.fn((input: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Promise((resolve) => {
+          releasePost = () => resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+        });
+      }
+      const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+      const onShore = input.includes('instance=shore');
+      switch (path) {
+        case '/instances':
+          return ok({
+            instances: [
+              { name: 'boat', isDefault: true },
+              { name: 'shore', isDefault: false },
+            ],
+          });
+        case '/capabilities':
+          return ok({ capabilities: { swarm: false } });
+        case '/control':
+          return ok(control);
+        case '/containers':
+          return ok({ containers: onShore ? shoreOnly : containers });
+        default:
+          return ok({});
+      }
+    }) as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('ais-logger');
+
+    await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(releasePost).toBeDefined());
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+    await screen.findByText('shore-only');
+
+    releasePost?.();
+
+    await waitFor(() => expect(screen.getByText('shore-only')).toBeInTheDocument());
+    // Without the guard the stale refresh renders boat's containers here.
+    expect(screen.queryByText('ais-logger')).toBeNull();
+  });
+
   it('warns when the plugin cannot identify its own container', async () => {
     global.fetch = routeFetch({
       '/control': {

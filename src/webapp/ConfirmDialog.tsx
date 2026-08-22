@@ -1,7 +1,12 @@
 import type { ReactElement } from 'react';
 import { useEffect, useRef, useState } from 'react';
 import type { DockerContainer } from '../types';
-import { actionLabel, type ContainerAction, type RemoveOptions } from './control';
+import {
+  actionLabel,
+  requiresForceToRemove,
+  type ContainerAction,
+  type RemoveOptions,
+} from './control';
 import { containerName, shortId } from './format';
 
 /**
@@ -42,7 +47,11 @@ export function ConfirmDialog({
 
   const { container, action } = request;
   const name = containerName(container.Names);
-  const running = container.State === 'running' || container.State === 'restarting';
+  // Paused counts as running here: Docker will not remove either without force.
+  const needsForce = requiresForceToRemove(container);
+  // Removing without the box ticked would be refused by Docker with a 409, so
+  // the dialog does not offer to send it.
+  const blocked = action === 'remove' && needsForce && !force;
 
   // Focus lands on Cancel, not Confirm: a stray Enter should do nothing.
   useEffect(() => {
@@ -51,11 +60,14 @@ export function ConfirmDialog({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape') onCancel();
+      // Escape is ignored while the request is in flight, for the same reason
+      // Cancel is disabled: closing the dialog would not stop it, it would only
+      // take away the operator's sight of it.
+      if (event.key === 'Escape' && !busy) onCancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
-  }, [onCancel]);
+  }, [busy, onCancel]);
 
   return (
     <div
@@ -80,7 +92,7 @@ export function ConfirmDialog({
 
             {action === 'remove' ? (
               <div className="mt-3">
-                {running ? (
+                {needsForce ? (
                   <div className="form-check">
                     <input
                       className="form-check-input"
@@ -90,7 +102,7 @@ export function ConfirmDialog({
                       onChange={(event) => setForce(event.target.checked)}
                     />
                     <label className="form-check-label" htmlFor="portainer-confirm-force">
-                      Force — the container is running and cannot be removed otherwise
+                      Force — the container is {container.State} and cannot be removed otherwise
                     </label>
                   </div>
                 ) : null}
@@ -125,7 +137,12 @@ export function ConfirmDialog({
               type="button"
               className={`btn ${action === 'start' ? 'btn-success' : 'btn-danger'}`}
               onClick={() => onConfirm({ force, removeVolumes })}
-              disabled={busy}
+              disabled={busy || blocked}
+              title={
+                blocked
+                  ? 'Tick Force: Docker will not remove a container that is still running'
+                  : undefined
+              }
             >
               {busy ? 'Working…' : actionLabel(action)}
             </button>

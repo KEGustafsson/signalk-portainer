@@ -82,6 +82,58 @@ describe('ConfirmDialog', () => {
     expect(onConfirm).toHaveBeenCalledWith({ force: true, removeVolumes: false });
   });
 
+  it('ignores Escape while the request is in flight', async () => {
+    const onCancel = jest.fn();
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialog
+        request={{ container: container(), action: 'stop' }}
+        busy
+        onCancel={onCancel}
+        onConfirm={() => {}}
+      />,
+    );
+
+    await user.keyboard('{Escape}');
+
+    // Closing would not stop the request, only hide it from the operator.
+    expect(onCancel).not.toHaveBeenCalled();
+  });
+
+  it('will not submit a removal Docker would refuse', async () => {
+    const onConfirm = jest.fn();
+    const user = userEvent.setup();
+    render(
+      <ConfirmDialog
+        request={{ container: container({ State: 'running' }), action: 'remove' }}
+        busy={false}
+        onCancel={() => {}}
+        onConfirm={onConfirm}
+      />,
+    );
+
+    // The dialog says force is required, so it does not offer to send without.
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+
+    await user.click(screen.getByLabelText(/^Force/));
+
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeEnabled();
+  });
+
+  it('asks for force on a paused container too, which Docker also refuses', () => {
+    render(
+      <ConfirmDialog
+        request={{ container: container({ State: 'paused' }), action: 'remove' }}
+        busy={false}
+        onCancel={() => {}}
+        onConfirm={() => {}}
+      />,
+    );
+
+    expect(screen.getByLabelText(/the container is paused/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
+  });
+
   it('locks both buttons while the request is in flight', () => {
     render(
       <ConfirmDialog

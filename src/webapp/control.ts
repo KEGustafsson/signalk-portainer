@@ -83,16 +83,42 @@ export function isSelfRow(control: ControlState | undefined, containerId: string
 }
 
 /**
+ * Docker refuses to remove a container that is not fully stopped — paused
+ * counts as running to the daemon — so those removals need force. The dialog
+ * and the button share this rule rather than each deciding for itself.
+ */
+export function requiresForceToRemove(container: DockerContainer): boolean {
+  return (
+    container.State === 'running' ||
+    container.State === 'restarting' ||
+    container.State === 'paused'
+  );
+}
+
+/**
  * Which actions are worth showing for a container in this state.
  *
  * A stopped container has nothing to stop or kill, and offering it reads as a
  * bug rather than as a safeguard. Restart is offered only for a running
  * container for the same reason: Docker would start a stopped one, which is not
  * what the word says.
+ *
+ * A paused container is running, so Start would be refused as "already
+ * started"; Kill is refused too, since Docker wants it unpaused first. What it
+ * actually needs is unpause, which the facade does not expose yet — until it
+ * does, the panel offers only what the daemon will accept rather than buttons
+ * that turn into 409s.
  */
 export function actionsFor(container: DockerContainer): ContainerAction[] {
-  const running = container.State === 'running' || container.State === 'restarting';
-  return running ? ['stop', 'restart', 'kill', 'remove'] : ['start', 'remove'];
+  switch (container.State) {
+    case 'running':
+    case 'restarting':
+      return ['stop', 'restart', 'kill', 'remove'];
+    case 'paused':
+      return ['stop', 'restart', 'remove'];
+    default:
+      return ['start', 'remove'];
+  }
 }
 
 /** Whether an action may be offered, and the reason when it may not. */

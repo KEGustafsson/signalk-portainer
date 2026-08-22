@@ -106,6 +106,10 @@ export default function AppPanel(): ReactElement {
   // A stalled request would otherwise stay open while every poll starts
   // another, so each new request cancels the one before it.
   const inFlight = useRef<AbortController | undefined>(undefined);
+  // Which instance is selected right now, readable from inside an async action
+  // that started before the operator switched.
+  const selected = useRef<string | undefined>(instance);
+  selected.current = instance;
 
   const activeTab = useMemo(
     () => TABS.find((candidate) => candidate.id === tab) ?? TABS[1]!,
@@ -206,9 +210,10 @@ export default function AppPanel(): ReactElement {
     ): Promise<void> => {
       setBusyId(container.Id);
       setActionResult(undefined);
+      const startedOn = instance;
       const { method, path } = actionRequest(container.Id, action, options);
       try {
-        await apiSend(method, path, instance);
+        await apiSend(method, path, startedOn);
         setConfirming(undefined);
         setActionResult({
           ok: true,
@@ -216,7 +221,12 @@ export default function AppPanel(): ReactElement {
         });
         // Straight to a fresh read: the table is the confirmation that it
         // worked, and the 10s poll is too slow to feel like one.
-        await load();
+        //
+        // Unless the operator has switched instance while this was in flight:
+        // `load` is bound to the instance the action started on, and running it
+        // now would abort the new instance's request and paint its table with
+        // the old one's containers. The switch has already started its own load.
+        if (selected.current === startedOn) await load();
       } catch (cause) {
         setConfirming(undefined);
         setActionResult({ ok: false, error: asApiError(cause) });
