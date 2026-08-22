@@ -43,7 +43,8 @@ const control = {
 
 /** Routes each facade path to a canned response. */
 function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
-  return jest.fn((input: string) => {
+  return jest.fn((input: string, init?: RequestInit) => {
+    void init;
     const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
     const table: Record<string, unknown> = {
       '/instances': { instances: [{ name: 'boat', isDefault: true }] },
@@ -601,5 +602,171 @@ describe('AppPanel container actions', () => {
     await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
 
     await waitFor(() => expect(screen.queryByText('Logs — signalk_influxdb')).toBeNull());
+  });
+  describe('stacks', () => {
+    const stacksControl = { ...control, allowDestructive: true };
+
+    const stackFetch = (overrides: Record<string, unknown> = {}) =>
+      routeFetch({
+        '/control': stacksControl,
+        '/stacks': {
+          stacks: [
+            { Id: 3, Name: 'signalk', Type: 2, EndpointId: 1, Status: 1 },
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+            },
+          ],
+        },
+        ...overrides,
+      });
+
+    /** Opens the Stacks tab and waits for its rows. */
+    const openStacks = async (user: ReturnType<typeof userEvent.setup>) => {
+      render(<AppPanel />);
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('button', { name: 'Stacks' }));
+      await screen.findByRole('group', { name: 'Actions for signalk' });
+    };
+
+    it('offers redeploy only for the stack that has a repository', async () => {
+      global.fetch = stackFetch() as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const plain = screen.getByRole('group', { name: 'Actions for signalk' });
+      const git = screen.getByRole('group', { name: 'Actions for from-git' });
+      expect(within(plain).queryByRole('button', { name: 'Redeploy' })).toBeNull();
+      expect(within(git).getByRole('button', { name: 'Redeploy' })).toBeEnabled();
+    });
+
+    it('stops a stack and re-reads immediately', async () => {
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Stop' }));
+
+      await waitFor(() => {
+        const calls = fetchMock.mock.calls.map(
+          (call) => `${String(call[1]?.method ?? 'GET')} ${String(call[0])}`,
+        );
+        expect(calls).toContain('POST /plugins/signalk-portainer/api/stacks/3/stop?instance=boat');
+      });
+      expect(await screen.findByText(/signalk: stopped/)).toBeInTheDocument();
+    });
+
+    it('asks before deleting, and never deletes volumes by implication', async () => {
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Delete' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText('Delete signalk?')).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+      await waitFor(() => {
+        const calls = fetchMock.mock.calls.map((call) => String(call[0]));
+        expect(
+          calls.some((path) => path.includes('/stacks/3?removeVolumes=false&instance=boat')),
+        ).toBe(true);
+      });
+    });
+
+    it('disables the destructive button when the configuration does not allow it', async () => {
+      global.fetch = stackFetch({ '/control': control }) as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      const remove = within(row).getByRole('button', { name: 'Delete' });
+      expect(remove).toBeDisabled();
+      expect(remove).toHaveAttribute('title', expect.stringContaining('destructive'));
+    });
+
+    it('opens the editor on a row and sends the edited file back', async () => {
+      const fetchMock = stackFetch({
+        '/stacks/3/file': { content: 'services:\n  influxdb:\n' },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Edit' }));
+
+      const file = await screen.findByLabelText('Compose file');
+      await waitFor(() => expect(file).toHaveValue('services:\n  influxdb:\n'));
+      await user.type(file, '  web:\n');
+      await user.click(screen.getByRole('button', { name: 'Deploy' }));
+
+      await waitFor(() => {
+        const put = fetchMock.mock.calls.find((call) => call[1]?.method === 'PUT');
+        expect(String(put?.[0])).toContain('/stacks/3?instance=boat');
+        expect(JSON.parse(String(put?.[1]?.body)).content).toContain('web:');
+      });
+    });
+
+    it('creates a stack from the New stack button', async () => {
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      await user.click(screen.getByRole('button', { name: 'New stack' }));
+      await user.type(screen.getByLabelText('Name'), 'weather');
+      await user.type(screen.getByLabelText('Compose file'), 'services:\n');
+      await user.click(screen.getByRole('button', { name: 'Create' }));
+
+      await waitFor(() => {
+        const post = fetchMock.mock.calls.find(
+          (call) => call[1]?.method === 'POST' && String(call[0]).includes('/api/stacks?'),
+        );
+        expect(JSON.parse(String(post?.[1]?.body)).name).toBe('weather');
+      });
+    });
+
+    it('closes the editor when the instance changes', async () => {
+      // A stack id belongs to one Portainer; the other knows nothing about it.
+      global.fetch = stackFetch({
+        '/instances': {
+          instances: [
+            { name: 'boat', isDefault: true },
+            { name: 'shore', isDefault: false },
+          ],
+        },
+        '/stacks/3/file': { content: 'services:\n' },
+      }) as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Edit' }));
+      await screen.findByText('Stack — signalk');
+
+      await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+
+      await waitFor(() => expect(screen.queryByText('Stack — signalk')).toBeNull());
+    });
+
+    it('will not offer a new stack while control is disabled', async () => {
+      global.fetch = stackFetch({
+        '/control': { ...control, allowPutControl: false },
+      }) as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      expect(screen.getByRole('button', { name: 'New stack' })).toBeDisabled();
+    });
   });
 });

@@ -18,6 +18,13 @@ import {
   type ControlState,
 } from './control';
 import { containerName, formatAge, formatBytes, shortId, stateColour } from './format';
+import {
+  isActive,
+  stackActionLabel,
+  stackActionState,
+  stackActionsFor,
+  type StackAction,
+} from './stackcontrol';
 
 export interface EnvironmentRow {
   id: number;
@@ -204,26 +211,72 @@ function ActionButtons({
   );
 }
 
-export function StacksTable({ rows }: { rows: Stack[] }): ReactElement {
+export interface StackActionsProps {
+  control?: ControlState;
+  /** Id of the stack a request is currently in flight for. */
+  busyId?: number;
+  onAction: (stack: Stack, action: StackAction) => void;
+}
+
+export function StacksTable({
+  rows,
+  actions,
+}: {
+  rows: Stack[];
+  /** Omitted for a read-only panel; no column is rendered then. */
+  actions?: StackActionsProps;
+}): ReactElement {
+  const headers = ['Name', 'Status', 'Type', 'Source'];
+  if (actions) headers.push('Actions');
+
   return (
-    <Table headers={['Name', 'Status', 'Type', 'Source']}>
+    <Table headers={headers}>
       {rows.length === 0 ? (
-        <EmptyRow columns={4} message="No stacks in this environment" />
+        <EmptyRow columns={headers.length} message="No stacks in this environment" />
       ) : (
         rows.map((row) => (
           <tr key={row.Id}>
             <td>{row.Name}</td>
             <td>
-              <span className={`badge bg-${row.Status === 1 ? 'success' : 'secondary'}`}>
-                {row.Status === 1 ? 'active' : 'inactive'}
+              <span className={`badge bg-${isActive(row) ? 'success' : 'secondary'}`}>
+                {isActive(row) ? 'active' : 'inactive'}
               </span>
             </td>
             <td>{row.Type === 1 ? 'Swarm' : row.Type === 3 ? 'Kubernetes' : 'Compose'}</td>
             <td className="small text-muted">{row.GitConfig?.URL ?? 'file'}</td>
+            {actions ? (
+              <td>
+                <StackButtons row={row} actions={actions} />
+              </td>
+            ) : null}
           </tr>
         ))
       )}
     </Table>
+  );
+}
+
+function StackButtons({ row, actions }: { row: Stack; actions: StackActionsProps }): ReactElement {
+  const busy = actions.busyId === row.Id;
+  return (
+    <div className="btn-group btn-group-sm" role="group" aria-label={`Actions for ${row.Name}`}>
+      {stackActionsFor(row).map((action) => {
+        const state = stackActionState(actions.control, row, action);
+        return (
+          <button
+            key={action}
+            type="button"
+            className={`btn btn-outline-${action === 'delete' ? 'danger' : 'secondary'}`}
+            // A disabled button carries the setting that would enable it.
+            title={state.reason}
+            disabled={!state.enabled || busy}
+            onClick={() => actions.onAction(row, action)}
+          >
+            {stackActionLabel(action)}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

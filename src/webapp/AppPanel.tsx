@@ -13,6 +13,9 @@ import type {
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
 import { LogViewer } from './LogViewer';
+import { StackDeleteDialog } from './StackDeleteDialog';
+import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
+import { normalizeStacks, type StackAction } from './stackcontrol';
 import {
   actionLabel,
   actionRequest,
@@ -34,6 +37,7 @@ import {
   VolumesTable,
   type ContainerActionsProps,
   type EnvironmentRow,
+  type StackActionsProps,
 } from './tables';
 
 const POLL_INTERVAL_MS = 10_000;
@@ -96,6 +100,14 @@ export default function AppPanel(): ReactElement {
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
   // The container whose logs are open, if any.
   const [viewing, setViewing] = useState<DockerContainer | undefined>(undefined);
+  // The stack open in the editor — an existing one, or a new one being created.
+  const [editing, setEditing] = useState<StackTarget | undefined>(undefined);
+  const [deleting, setDeleting] = useState<Stack | undefined>(undefined);
+  const [busyStack, setBusyStack] = useState<number | undefined>(undefined);
+  // Kept apart from the poll's error for the same reason a container action is.
+  const [stackResult, setStackResult] = useState<
+    { ok: true; message: string } | { ok: false; error: ApiError } | undefined
+  >(undefined);
   const [busyId, setBusyId] = useState<string | undefined>(undefined);
   // Kept apart from `error`: the poll clears that one on its next success, and
   // a refused action is exactly what the operator still needs to read.
@@ -252,6 +264,88 @@ export default function AppPanel(): ReactElement {
     [runAction],
   );
 
+  const runStack = useCallback(
+    async (stack: Stack, run: () => Promise<unknown>, done: string): Promise<{ ok: boolean }> => {
+      setBusyStack(stack.Id);
+      setStackResult(undefined);
+      const startedOn = instance;
+      try {
+        await run();
+        setStackResult({ ok: true, message: `${stack.Name}: ${done}` });
+        // Straight to a fresh read, as a container action does — the table is
+        // the confirmation, and the 10s poll is too slow to feel like one.
+        if (selected.current === startedOn) await load();
+        return { ok: true };
+      } catch (cause) {
+        setStackResult({ ok: false, error: asApiError(cause) });
+        return { ok: false };
+      } finally {
+        setBusyStack(undefined);
+      }
+    },
+    [instance, load],
+  );
+
+  const requestStackAction = useCallback(
+    (stack: Stack, action: StackAction): void => {
+      setStackResult(undefined);
+      if (action === 'edit') {
+        setEditing({ kind: 'existing', stack });
+        return;
+      }
+      if (action === 'delete') {
+        setDeleting(stack);
+        return;
+      }
+      void runStack(
+        stack,
+        () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance),
+        action === 'redeploy' ? 'redeployed' : `${action}ped`,
+      );
+    },
+    [instance, runStack],
+  );
+
+  const deployStack = useCallback(
+    async (deployment: StackDeployment): Promise<void> => {
+      const target = editing;
+      if (!target) return;
+      const body = {
+        env: deployment.env,
+        prune: deployment.prune,
+        pullImage: deployment.pullImage,
+        ...(deployment.content !== undefined ? { content: deployment.content } : {}),
+        ...(deployment.repositoryUrl !== undefined
+          ? {
+              name: deployment.name,
+              repositoryUrl: deployment.repositoryUrl,
+              ...(deployment.reference ? { reference: deployment.reference } : {}),
+              ...(deployment.composeFile ? { composeFile: deployment.composeFile } : {}),
+              ...(deployment.username ? { username: deployment.username } : {}),
+              ...(deployment.password ? { password: deployment.password } : {}),
+            }
+          : {}),
+        ...(target.kind === 'new' ? { name: deployment.name } : {}),
+      };
+
+      const stack =
+        target.kind === 'existing' ? target.stack : ({ Id: -1, Name: deployment.name } as Stack);
+
+      const outcome = await runStack(
+        stack,
+        () =>
+          target.kind === 'existing'
+            ? apiSend('PUT', `/stacks/${target.stack.Id}`, instance, undefined, body)
+            : apiSend('POST', '/stacks', instance, undefined, body),
+        target.kind === 'existing' ? 'deployed' : 'created',
+      );
+      // The editor stays open on failure, holding the file the operator wrote:
+      // closing it would throw away work an error message asked them to redo.
+      if (outcome.ok) setEditing(undefined);
+    },
+    [editing, instance, runStack],
+  );
+
   // A tab that disappears (swarm turned off) must not leave a blank panel.
   useEffect(() => {
     if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab('containers');
@@ -262,6 +356,10 @@ export default function AppPanel(): ReactElement {
   // rather than following the switch into a 404.
   useEffect(() => {
     setViewing(undefined);
+    // A stack id belongs to one Portainer, exactly as a container id does.
+    setEditing(undefined);
+    setDeleting(undefined);
+    setStackResult(undefined);
   }, [instance]);
 
   return (
@@ -336,6 +434,26 @@ export default function AppPanel(): ReactElement {
         </div>
       ) : null}
 
+      {stackResult && !editing ? (
+        <div
+          className={`alert ${stackResult.ok ? 'alert-success' : 'alert-danger'} d-flex justify-content-between align-items-start`}
+          role="alert"
+        >
+          <div>
+            <div>{stackResult.ok ? stackResult.message : stackResult.error.message}</div>
+            {!stackResult.ok && stackResult.error.hint ? (
+              <div className="small mt-1">{stackResult.error.hint}</div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label="Dismiss"
+            onClick={() => setStackResult(undefined)}
+          />
+        </div>
+      ) : null}
+
       {loading && !error ? <div className="text-muted">Loading…</div> : null}
 
       {!loading && !error ? (
@@ -343,6 +461,11 @@ export default function AppPanel(): ReactElement {
           tab={tab}
           payload={payload}
           actions={{ control, busyId, onAction: requestAction, onLogs: setViewing }}
+          stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
+          onNewStack={() => {
+            setStackResult(undefined);
+            setEditing({ kind: 'new' });
+          }}
         />
       ) : null}
 
@@ -354,6 +477,39 @@ export default function AppPanel(): ReactElement {
           container={viewing}
           instance={instance}
           onClose={() => setViewing(undefined)}
+        />
+      ) : null}
+
+      {editing ? (
+        <StackEditor
+          key={editing.kind === 'existing' ? editing.stack.Id : 'new'}
+          target={editing}
+          instance={instance}
+          canDeploy={control?.allowPutControl === true}
+          busy={busyStack !== undefined}
+          result={stackResult}
+          onDeploy={(deployment) => void deployStack(deployment)}
+          onClose={() => setEditing(undefined)}
+        />
+      ) : null}
+
+      {deleting ? (
+        <StackDeleteDialog
+          stack={deleting}
+          busy={busyStack === deleting.Id}
+          onCancel={() => setDeleting(undefined)}
+          onConfirm={(options) => {
+            void runStack(
+              deleting,
+              () =>
+                apiSend(
+                  'DELETE',
+                  `/stacks/${deleting.Id}?removeVolumes=${options.removeVolumes ? 'true' : 'false'}`,
+                  instance,
+                ),
+              'deleted',
+            ).then(() => setDeleting(undefined));
+          }}
         />
       ) : null}
 
@@ -373,16 +529,41 @@ function TabBody({
   tab,
   payload,
   actions,
+  stackActions,
+  onNewStack,
 }: {
   tab: TabId;
   payload: TabPayload;
   actions: ContainerActionsProps;
+  stackActions: StackActionsProps;
+  onNewStack: () => void;
 }): ReactElement {
   switch (tab) {
     case 'environments':
       return <EnvironmentsTable rows={payload.environments ?? []} />;
     case 'stacks':
-      return <StacksTable rows={payload.stacks ?? []} />;
+      return (
+        <div>
+          <div className="d-flex justify-content-end mb-2">
+            <button
+              type="button"
+              className="btn btn-sm btn-outline-primary"
+              disabled={!stackActions.control?.allowPutControl}
+              title={
+                stackActions.control?.allowPutControl
+                  ? undefined
+                  : 'stack control is disabled; enable "Allow Signal K PUT control" in the plugin configuration'
+              }
+              onClick={onNewStack}
+            >
+              New stack
+            </button>
+          </div>
+          {/* Normalized rather than trusted: these rows carry the ids that
+              destructive actions are sent with. */}
+          <StacksTable rows={normalizeStacks(payload)} actions={stackActions} />
+        </div>
+      );
     case 'images':
       return <ImagesTable rows={payload.images ?? []} />;
     case 'volumes':
