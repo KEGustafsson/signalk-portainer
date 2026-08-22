@@ -68,6 +68,78 @@ export function logQuery(options: LogOptions = {}, follow = false): string {
   return query.toString();
 }
 
+/** Portainer's answer to a create, when it answered with one. */
+function asStack(value: unknown): Stack | undefined {
+  if (typeof value !== 'object' || value === null) return undefined;
+  const candidate = value as { Id?: unknown; Name?: unknown };
+  if (typeof candidate.Id !== 'number' || typeof candidate.Name !== 'string') return undefined;
+  return value as Stack;
+}
+
+/**
+ * Environment variables in the shape Portainer stores them, with anything
+ * misshapen dropped rather than sent on as a variable named "undefined".
+ */
+function pairs(env: readonly StackEnvVar[]): { name: string; value: string }[] {
+  return env
+    .filter((entry) => typeof entry?.name === 'string' && entry.name.length > 0)
+    .map((entry) => ({ name: entry.name, value: String(entry.value ?? '') }));
+}
+
+/** One `NAME=value` pair as Portainer carries it. */
+export interface StackEnvVar {
+  name: string;
+  value: string;
+}
+
+/** A compose file and the environment it is deployed with. */
+export interface StackUpdate {
+  content: string;
+  env?: StackEnvVar[];
+  /**
+   * Removes services that are no longer in the file. Off by default: a compose
+   * file missing a service by accident should not delete it.
+   */
+  prune?: boolean;
+  /** Re-pulls each image rather than deploying whatever is already local. */
+  pullImage?: boolean;
+}
+
+/** What an update changed beyond the file itself. */
+export interface StackUpdateResult {
+  /**
+   * True when the stack had a webhook or a polling interval, which Portainer
+   * discards on update and this request could not preserve.
+   */
+  autoUpdateRemoved: boolean;
+}
+
+/** A redeploy of a stack whose file lives in git; the file comes from there. */
+export interface StackRedeploy {
+  prune?: boolean;
+  pullImage?: boolean;
+  /** Credentials for a private repository, when the stack needs them again. */
+  authentication?: { username: string; password: string };
+  tlsSkipVerify?: boolean;
+}
+
+export interface StackFromString {
+  name: string;
+  content: string;
+  env?: StackEnvVar[];
+}
+
+export interface StackFromRepository {
+  name: string;
+  repositoryUrl: string;
+  /** A full ref — `refs/heads/main`, not `main`. */
+  reference?: string;
+  composeFile?: string;
+  env?: StackEnvVar[];
+  authentication?: { username: string; password: string };
+  tlsSkipVerify?: boolean;
+}
+
 /**
  * Read-only slice of the Docker Engine API, reached through Portainer's docker
  * proxy. The environment id is already bound to the client, so no call site
@@ -574,28 +646,232 @@ export class PortainerClient {
   }
 
   /**
-   * The compose or manifest file for a stack, as text.
+   * The stack with this id, once it is established that it belongs here.
    *
-   * The id is resolved against this environment's stacks first. Portainer would
-   * happily serve the file for any stack the configured credential can reach,
-   * including stacks belonging to a different environment, so the ownership
-   * check has to happen here rather than being left to Portainer.
+   * Portainer would happily act on any stack the configured credential can
+   * reach, including one belonging to a different environment, so every call
+   * that names a stack id passes through this first. Returns the stack itself,
+   * because what a caller may do with it depends on what it is — a swarm stack
+   * and a git-backed stack take different routes.
+   */
+  private async ownStack(id: number, method: string, path: string): Promise<Stack> {
+    const stacks = await this.listStacks();
+    const stack = stacks.find((candidate) => candidate.Id === id);
+    if (stack) return stack;
+    throw new PortainerError({
+      status: 404,
+      method,
+      path,
+      message: `Stack ${id} does not belong to this environment`,
+      hint: `stacks in this environment: ${
+        stacks.map((candidate) => `${candidate.Id}:${candidate.Name}`).join(', ') || 'none'
+      }`,
+    });
+  }
+
+  /**
+   * The compose or manifest file for a stack, as text.
    */
   async stackFile(id: number): Promise<string> {
-    const stacks = await this.listStacks();
-    if (!stacks.some((stack) => stack.Id === id)) {
-      throw new PortainerError({
-        status: 404,
-        method: 'GET',
-        path: `/api/stacks/${id}/file`,
-        message: `Stack ${id} does not belong to this environment`,
-        hint: `stacks in this environment: ${
-          stacks.map((stack) => `${stack.Id}:${stack.Name}`).join(', ') || 'none'
-        }`,
-      });
-    }
+    await this.ownStack(id, 'GET', `/api/stacks/${id}/file`);
     const payload = await this.json<{ StackFileContent?: string }>('GET', `/api/stacks/${id}/file`);
     return payload.StackFileContent ?? '';
+  }
+
+  /**
+   * Runs a stack write and drops the reads it can change.
+   *
+   * A stack operation moves containers, so it invalidates the same keys a
+   * container mutation does — the stack list, the container list, and the
+   * inventory that follows from them.
+   */
+  private async stackWrite(method: string, path: string, body?: unknown): Promise<unknown> {
+    const response = await this.send(method, path, body === undefined ? {} : { json: body }, true);
+    // Read defensively rather than through json(): Portainer answers a delete
+    // with 204 and no body at all, and a stack write is not worth failing over
+    // a body nobody needed.
+    const text = await response.text().catch(() => '');
+    this.cache.invalidate(CONTAINER_VOLATILE_KEYS);
+    if (!text) return undefined;
+    try {
+      return JSON.parse(text) as unknown;
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** `?endpointId=`, which every stack write needs. */
+  private async endpointQuery(): Promise<string> {
+    return `endpointId=${await this.environmentId()}`;
+  }
+
+  /** Brings a stopped stack back up. */
+  async startStack(id: number): Promise<void> {
+    await this.ownStack(id, 'POST', `/api/stacks/${id}/start`);
+    await this.stackWrite('POST', `/api/stacks/${id}/start?${await this.endpointQuery()}`);
+  }
+
+  /** Stops every container in the stack, leaving the stack defined. */
+  async stopStack(id: number): Promise<void> {
+    await this.ownStack(id, 'POST', `/api/stacks/${id}/stop`);
+    await this.stackWrite('POST', `/api/stacks/${id}/stop?${await this.endpointQuery()}`);
+  }
+
+  /**
+   * Deploys a new compose file and environment.
+   *
+   * `prune` and `pullImage` are sent explicitly rather than left to Portainer's
+   * defaults: pruning removes services the new file no longer mentions, and a
+   * file that lost a service by accident should not take the service with it.
+   *
+   * Refused for a git-backed stack. Portainer's update handler detaches the
+   * stack from its repository and clears its auto-update settings — the stack
+   * silently stops being the thing the repository describes, and no field in
+   * this request says so. A git stack is changed in git and brought over with
+   * redeploy.
+   */
+  async updateStack(id: number, update: StackUpdate): Promise<StackUpdateResult> {
+    const stack = await this.ownStack(id, 'PUT', `/api/stacks/${id}`);
+    if (stack.GitConfig?.URL) {
+      throw new PortainerError({
+        status: 400,
+        method: 'PUT',
+        path: `/api/stacks/${id}`,
+        message: `Stack ${stack.Name} is deployed from a repository`,
+        hint: 'updating it here would detach it from git and drop its auto-update settings; change the file in the repository and redeploy instead',
+      });
+    }
+    await this.stackWrite('PUT', `/api/stacks/${id}?${await this.endpointQuery()}`, {
+      StackFileContent: update.content,
+      Env: pairs(update.env ?? stack.Env ?? []),
+      Prune: update.prune === true,
+      PullImage: update.pullImage === true,
+    });
+    // Portainer's update handler clears AutoUpdate, and the request has no
+    // field that could have kept it. Reported rather than swallowed: a webhook
+    // that stops firing is otherwise discovered by it not firing.
+    return { autoUpdateRemoved: Boolean(stack.AutoUpdate?.Webhook ?? stack.AutoUpdate?.Interval) };
+  }
+
+  /**
+   * Redeploys a git-backed stack from its repository.
+   *
+   * Refused for a stack that has no repository, rather than passed on: Portainer
+   * answers that with a failure about a field the operator never filled in.
+   */
+  async redeployStack(id: number, options: StackRedeploy = {}): Promise<void> {
+    const stack = await this.ownStack(id, 'PUT', `/api/stacks/${id}/git/redeploy`);
+    if (!stack.GitConfig?.URL) {
+      throw new PortainerError({
+        status: 400,
+        method: 'PUT',
+        path: `/api/stacks/${id}/git/redeploy`,
+        message: `Stack ${stack.Name} was not deployed from a repository`,
+        hint: 'redeploy pulls the file from git; for a file-based stack, send the new file instead',
+      });
+    }
+    await this.stackWrite('PUT', `/api/stacks/${id}/git/redeploy?${await this.endpointQuery()}`, {
+      RepositoryReferenceName: stack.GitConfig.ReferenceName ?? '',
+      RepositoryAuthentication: options.authentication !== undefined,
+      ...(options.authentication
+        ? {
+            RepositoryUsername: options.authentication.username,
+            RepositoryPassword: options.authentication.password,
+          }
+        : {}),
+      Env: pairs(stack.Env ?? []),
+      Prune: options.prune === true,
+      PullImage: options.pullImage === true,
+      TLSSkipVerify: options.tlsSkipVerify === true,
+    });
+  }
+
+  /**
+   * A new stack from a compose file held in the request.
+   *
+   * Swarm and standalone are different routes with different required fields,
+   * and which one applies is a property of the environment rather than of the
+   * request, so it is resolved here rather than asked of the caller.
+   */
+  async createStackFromString(stack: StackFromString): Promise<Stack | undefined> {
+    const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/string');
+    return asStack(
+      await this.stackWrite(
+        'POST',
+        `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/string?${await this.endpointQuery()}`,
+        {
+          Name: stack.name,
+          ...(swarm ? { SwarmID: swarmId } : {}),
+          StackFileContent: stack.content,
+          Env: pairs(stack.env ?? []),
+        },
+      ),
+    );
+  }
+
+  /** A new stack whose compose file lives in a git repository. */
+  async createStackFromRepository(stack: StackFromRepository): Promise<Stack | undefined> {
+    const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/repository');
+    return asStack(
+      await this.stackWrite(
+        'POST',
+        `/api/stacks/create/${
+          swarm ? 'swarm' : 'standalone'
+        }/repository?${await this.endpointQuery()}`,
+        {
+          Name: stack.name,
+          ...(swarm ? { SwarmID: swarmId } : {}),
+          RepositoryURL: stack.repositoryUrl,
+          ...(stack.reference ? { RepositoryReferenceName: stack.reference } : {}),
+          ComposeFile: stack.composeFile ?? '',
+          RepositoryAuthentication: stack.authentication !== undefined,
+          ...(stack.authentication
+            ? {
+                RepositoryUsername: stack.authentication.username,
+                RepositoryPassword: stack.authentication.password,
+              }
+            : {}),
+          Env: pairs(stack.env ?? []),
+          TLSSkipVerify: stack.tlsSkipVerify === true,
+        },
+      ),
+    );
+  }
+
+  /**
+   * Deletes a stack. Volumes are kept unless asked for: a stack's volumes hold
+   * the data, and deleting a stack is not a statement about the data.
+   */
+  async deleteStack(id: number, options: { removeVolumes?: boolean } = {}): Promise<void> {
+    await this.ownStack(id, 'DELETE', `/api/stacks/${id}`);
+    await this.stackWrite(
+      'DELETE',
+      `/api/stacks/${id}?${await this.endpointQuery()}&removeVolumes=${
+        options.removeVolumes ? 'true' : 'false'
+      }`,
+    );
+  }
+
+  /**
+   * Which create route applies, and the swarm id it needs.
+   *
+   * A swarm create without SwarmID is refused by Portainer with a message about
+   * a field the operator never saw, so a swarm that cannot report its id is
+   * refused here with one they can act on.
+   */
+  private async swarmTarget(path: string): Promise<{ swarm: boolean; swarmId?: string }> {
+    const capabilities = await this.capabilities();
+    if (!capabilities.swarm) return { swarm: false };
+    if (!capabilities.swarmId) {
+      throw new PortainerError({
+        status: 502,
+        method: 'POST',
+        path,
+        message: 'The environment is a swarm but did not report a swarm id',
+        hint: 'a swarm stack cannot be created without it; check that the Docker daemon is a swarm manager rather than a worker',
+      });
+    }
+    return { swarm: true, swarmId: capabilities.swarmId };
   }
 
   async dockerInfo(): Promise<DockerInfo> {

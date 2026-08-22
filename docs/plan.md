@@ -83,41 +83,41 @@ is configuration, never a migration.
 {
   "instances": [
     {
-      "name": "local",              // identity: also the Signal K path segment
+      "name": "local", // identity: also the Signal K path segment
       "enabled": true,
       "connection": {
-        "protocol": "https",        // http | https
-        "host": "localhost",        // same box, boat LAN, or ashore
+        "protocol": "https", // http | https
+        "host": "localhost", // same box, boat LAN, or ashore
         "port": 9443,
-        "basePath": "",             // if Portainer sits behind a path prefix
-        "timeoutMs": 10000
+        "basePath": "", // if Portainer sits behind a path prefix
+        "timeoutMs": 10000,
       },
       "tls": {
         "rejectUnauthorized": true, // secure by default
-        "caCert": "",               // PEM for Portainer's self-signed cert
-        "servername": ""            // SNI override when connecting by IP
+        "caCert": "", // PEM for Portainer's self-signed cert
+        "servername": "", // SNI override when connecting by IP
       },
       "auth": {
-        "mode": "apiKey",           // apiKey | userPass
-        "apiKey": "",               // ptr_...  →  X-API-Key
+        "mode": "apiKey", // apiKey | userPass
+        "apiKey": "", // ptr_...  →  X-API-Key
         "username": "",
-        "password": ""              // →  POST /api/auth, JWT cached ~8h
+        "password": "", // →  POST /api/auth, JWT cached ~8h
       },
-      "environment": { "id": null, "name": "" }   // null = auto-select
-    }
+      "environment": { "id": null, "name": "" }, // null = auto-select
+    },
   ],
   "telemetry": {
-    "level": "health",              // off | health | full — see §6.1
+    "level": "health", // off | health | full — see §6.1
     "intervalSeconds": 30,
-    "emitStats": false,             // one API call per container per tick
-    "pathPrefix": "system.docker"
+    "emitStats": false, // one API call per container per tick
+    "pathPrefix": "system.docker",
   },
   "control": {
     "allowPutControl": true,
-    "allowDestructive": false,      // remove / prune / delete stack
-    "allowSelfManagement": false,   // act on the container running Signal K
-    "watchdog": []                  // [{instance, container}] that must run
-  }
+    "allowDestructive": false, // remove / prune / delete stack
+    "allowSelfManagement": false, // act on the container running Signal K
+    "watchdog": [], // [{instance, container}] that must run
+  },
 }
 ```
 
@@ -345,7 +345,7 @@ the AIS-logger container dies.
 app.registerPutHandler(
   'vessels.self',
   'system.docker.<instance>.containers.<key>.state',
-  handler          // accepts "running" | "stopped" | "restart"
+  handler, // accepts "running" | "stopped" | "restart"
 );
 ```
 
@@ -379,17 +379,18 @@ process is a footgun.
 
 ## 8. Milestones
 
-| # | Deliverable | Contents |
-| --- | --- | --- |
-| **M0** | Skeleton + client | Repo scaffold (TS, jest, eslint, webpack), `PortainerClient` with auth/TLS/env-resolution/capability probe, `InstanceRegistry`, `/instances` + `/health`, plugin status text. Unit tests against recorded fixtures. |
-| **M1** | Read-only UI | Embedded webapp: instance selector, environments, containers, stacks, images/volumes/networks tables. Polling, no mutation. |
-| **M2** | Container lifecycle | start/stop/restart/kill + self-protection + destructive guard. |
-| **M3a** | Signal K deltas | Delta poller with the §6.1 key resolution, meta deltas, and the off/health/full publishing levels. |
-| **M3b** | Signal K native | Watchdog notifications, PUT handlers, and container pause/unpause. |
-| **M4a** | Logs (server) | Frame demux, one-shot log route, SSE streaming route, stream ceilings. |
-| **M4b** | Logs (UI) | Log viewer in the panel, follow toggle, tail/since controls, download. |
-| **M5** | Stacks write | compose editor, env vars, update/redeploy (incl. git redeploy), create from string/repository; swarm variants when `capabilities.swarm`. |
-| **M6** | Console | WebSocket relay to `/api/websocket/exec` for an interactive shell. |
+| #       | Deliverable           | Contents                                                                                                                                                                                                            |
+| ------- | --------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| **M0**  | Skeleton + client     | Repo scaffold (TS, jest, eslint, webpack), `PortainerClient` with auth/TLS/env-resolution/capability probe, `InstanceRegistry`, `/instances` + `/health`, plugin status text. Unit tests against recorded fixtures. |
+| **M1**  | Read-only UI          | Embedded webapp: instance selector, environments, containers, stacks, images/volumes/networks tables. Polling, no mutation.                                                                                         |
+| **M2**  | Container lifecycle   | start/stop/restart/kill + self-protection + destructive guard.                                                                                                                                                      |
+| **M3a** | Signal K deltas       | Delta poller with the §6.1 key resolution, meta deltas, and the off/health/full publishing levels.                                                                                                                  |
+| **M3b** | Signal K native       | Watchdog notifications, PUT handlers, and container pause/unpause.                                                                                                                                                  |
+| **M4a** | Logs (server)         | Frame demux, one-shot log route, SSE streaming route, stream ceilings.                                                                                                                                              |
+| **M4b** | Logs (UI)             | Log viewer in the panel, follow toggle, tail/since controls, download.                                                                                                                                              |
+| **M5a** | Stacks write (server) | Client and facade: start/stop, update compose + env, git redeploy, create from string/repository, delete; stack-level self-protection; swarm variants when `capabilities.swarm`.                                    |
+| **M5b** | Stacks write (UI)     | Compose editor and environment editor in the panel, create dialog, redeploy and delete with confirmation.                                                                                                           |
+| **M6**  | Console               | WebSocket relay to `/api/websocket/exec` for an interactive shell.                                                                                                                                                  |
 
 M0–M3 is the useful product; M4–M6 is the "actually replaces the Portainer UI
 for daily use" tier. Swarm read views (`/swarm/services`, `/swarm/nodes`) ride
@@ -431,7 +432,7 @@ Upgraded from the original "v2, with a schema that grows into it". Making
 parameter; deferring it costs a config migration and a path rewrite once
 someone adds a shore Portainer. The UI ships one selector in M1 and is done.
 Since the original requirement was that the target be adjustable, supporting
-*several* adjustable targets is the honest reading of it.
+_several_ adjustable targets is the honest reading of it.
 
 ### D3 — Swarm: auto-detected, never configured
 
@@ -448,5 +449,5 @@ names break on the most ordinary operation there is — `docker compose up`
 recreating a container — whereas the `com.docker.compose.project`/`service`
 labels survive it. So the key resolves through compose identity first, stack
 identity second, container name third, short id last, with the short id and the
-name published as their own paths. Readable *and* stable, instead of choosing
+name published as their own paths. Readable _and_ stable, instead of choosing
 one.

@@ -190,7 +190,7 @@ describe('PortainerClient stacks', () => {
     const stacks = await client.listStacks();
 
     // Portainer returns every stack it knows; EndpointId 4 is a different one.
-    expect(stacks.map((s) => s.Name)).toEqual(['signalk']);
+    expect(stacks.map((s) => s.Name)).toEqual(['signalk', 'from-git']);
   });
 
   /** stackFile resolves ownership first, so both calls are always needed. */

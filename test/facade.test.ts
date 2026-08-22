@@ -216,7 +216,7 @@ describe('facade read routes', () => {
 
     const res = await request(app()).get('/api/stacks');
 
-    expect(res.body.stacks.map((s: { Name: string }) => s.Name)).toEqual(['signalk']);
+    expect(res.body.stacks.map((s: { Name: string }) => s.Name)).toEqual(['signalk', 'from-git']);
   });
 
   it('serves a stack file for a stack in this environment', async () => {
