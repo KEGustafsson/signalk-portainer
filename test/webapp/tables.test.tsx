@@ -38,6 +38,9 @@ describe('tables with sparse Docker data', () => {
     expect(screen.getByText('lonely')).toBeInTheDocument();
     // No ports and no created time both fall back to a dash.
     expect(screen.getAllByText('—').length).toBeGreaterThan(0);
+    // No actions prop, so no Actions column and nothing to click.
+    expect(screen.queryByRole('columnheader', { name: 'Actions' })).toBeNull();
+    expect(screen.queryByRole('button')).toBeNull();
     expect(screen.queryByText(/undefined/)).not.toBeInTheDocument();
   });
 

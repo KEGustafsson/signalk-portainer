@@ -8,6 +8,15 @@ import type {
   DockerVolume,
   Stack,
 } from '../types';
+import {
+  actionLabel,
+  actionState,
+  actionVariant,
+  actionsFor,
+  isSelfRow,
+  type ContainerAction,
+  type ControlState,
+} from './control';
 import { containerName, formatAge, formatBytes, shortId, stateColour } from './format';
 
 export interface EnvironmentRow {
@@ -88,16 +97,39 @@ export function EnvironmentsTable({ rows }: { rows: EnvironmentRow[] }): ReactEl
   );
 }
 
-export function ContainersTable({ rows }: { rows: DockerContainer[] }): ReactElement {
+export interface ContainerActionsProps {
+  /** What the server says may be offered; absent until /control answers. */
+  control?: ControlState;
+  /** Id of the container a request is currently in flight for. */
+  busyId?: string;
+  onAction: (container: DockerContainer, action: ContainerAction) => void;
+}
+
+export function ContainersTable({
+  rows,
+  actions,
+}: {
+  rows: DockerContainer[];
+  /** Omitted entirely for a read-only panel; no column is rendered then. */
+  actions?: ContainerActionsProps;
+}): ReactElement {
+  const headers = ['Name', 'State', 'Image', 'Ports', 'Created'];
+  if (actions) headers.push('Actions');
+
   return (
-    <Table headers={['Name', 'State', 'Image', 'Ports', 'Created']}>
+    <Table headers={headers}>
       {rows.length === 0 ? (
-        <EmptyRow columns={5} message="No containers" />
+        <EmptyRow columns={headers.length} message="No containers" />
       ) : (
         rows.map((row) => (
           <tr key={row.Id}>
             <td>
               {containerName(row.Names)}
+              {isSelfRow(actions?.control, row.Id) ? (
+                <span className="badge bg-info ms-2" title="The container running Signal K">
+                  Signal K
+                </span>
+              ) : null}
               <div className="text-muted small">{shortId(row.Id)}</div>
             </td>
             <td>
@@ -112,10 +144,50 @@ export function ContainersTable({ rows }: { rows: DockerContainer[] }): ReactEle
                 .join(', ') || '—'}
             </td>
             <td>{formatAge(row.Created)}</td>
+            {actions ? (
+              <td>
+                <ActionButtons row={row} actions={actions} />
+              </td>
+            ) : null}
           </tr>
         ))
       )}
     </Table>
+  );
+}
+
+function ActionButtons({
+  row,
+  actions,
+}: {
+  row: DockerContainer;
+  actions: ContainerActionsProps;
+}): ReactElement {
+  const busy = actions.busyId === row.Id;
+  return (
+    <div
+      className="btn-group btn-group-sm"
+      role="group"
+      aria-label={`Actions for ${containerName(row.Names)}`}
+    >
+      {actionsFor(row).map((action) => {
+        const state = actionState(actions.control, row, action);
+        return (
+          <button
+            key={action}
+            type="button"
+            className={`btn btn-${actionVariant(action)}`}
+            // A disabled button explains itself rather than leaving the
+            // operator to guess which setting is in the way.
+            title={state.reason}
+            disabled={!state.enabled || busy}
+            onClick={() => actions.onAction(row, action)}
+          >
+            {actionLabel(action)}
+          </button>
+        );
+      })}
+    </div>
   );
 }
 

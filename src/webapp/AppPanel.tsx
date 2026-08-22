@@ -10,7 +10,18 @@ import type {
   DockerVolume,
   Stack,
 } from '../types';
-import { ApiError, apiGet } from './api';
+import { ApiError, apiGet, apiSend } from './api';
+import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
+import {
+  actionLabel,
+  actionRequest,
+  needsConfirmation,
+  normalizeControl,
+  type ContainerAction,
+  type ControlState,
+  type RemoveOptions,
+} from './control';
+import { containerName } from './format';
 import {
   ContainersTable,
   EnvironmentsTable,
@@ -20,6 +31,7 @@ import {
   ServicesTable,
   StacksTable,
   VolumesTable,
+  type ContainerActionsProps,
   type EnvironmentRow,
 } from './tables';
 
@@ -79,6 +91,14 @@ export default function AppPanel(): ReactElement {
   const [payload, setPayload] = useState<TabPayload>({});
   const [error, setError] = useState<ApiError | undefined>(undefined);
   const [loading, setLoading] = useState(true);
+  const [control, setControl] = useState<ControlState | undefined>(undefined);
+  const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
+  const [busyId, setBusyId] = useState<string | undefined>(undefined);
+  // Kept apart from `error`: the poll clears that one on its next success, and
+  // a refused action is exactly what the operator still needs to read.
+  const [actionResult, setActionResult] = useState<
+    { ok: true; message: string } | { ok: false; error: ApiError } | undefined
+  >(undefined);
 
   // Keeps a slow response from overwriting the results of a later request when
   // the operator switches tab or instance while one is still in flight.
@@ -130,6 +150,23 @@ export default function AppPanel(): ReactElement {
     };
   }, [instance, instances.length]);
 
+  useEffect(() => {
+    if (instances.length === 0) return;
+    let cancelled = false;
+    apiGet<unknown>('/control', instance)
+      .then((body) => {
+        if (!cancelled) setControl(normalizeControl(body));
+      })
+      .catch(() => {
+        // Without an answer the panel offers nothing rather than guessing: the
+        // buttons stay disabled and say they are waiting on the plugin.
+        if (!cancelled) setControl(undefined);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [instance, instances.length]);
+
   const load = useCallback(async (): Promise<void> => {
     inFlight.current?.abort();
     const controller = new AbortController();
@@ -160,6 +197,47 @@ export default function AppPanel(): ReactElement {
       inFlight.current?.abort();
     };
   }, [load, instances.length]);
+
+  const runAction = useCallback(
+    async (
+      container: DockerContainer,
+      action: ContainerAction,
+      options: RemoveOptions,
+    ): Promise<void> => {
+      setBusyId(container.Id);
+      setActionResult(undefined);
+      const { method, path } = actionRequest(container.Id, action, options);
+      try {
+        await apiSend(method, path, instance);
+        setConfirming(undefined);
+        setActionResult({
+          ok: true,
+          message: `${actionLabel(action)} ${containerName(container.Names)}: done`,
+        });
+        // Straight to a fresh read: the table is the confirmation that it
+        // worked, and the 10s poll is too slow to feel like one.
+        await load();
+      } catch (cause) {
+        setConfirming(undefined);
+        setActionResult({ ok: false, error: asApiError(cause) });
+      } finally {
+        setBusyId(undefined);
+      }
+    },
+    [instance, load],
+  );
+
+  const requestAction = useCallback(
+    (container: DockerContainer, action: ContainerAction): void => {
+      setActionResult(undefined);
+      if (needsConfirmation(action)) {
+        setConfirming({ container, action });
+        return;
+      }
+      void runAction(container, action, { force: false, removeVolumes: false });
+    },
+    [runAction],
+  );
 
   // A tab that disappears (swarm turned off) must not leave a blank panel.
   useEffect(() => {
@@ -205,6 +283,12 @@ export default function AppPanel(): ReactElement {
         ))}
       </ul>
 
+      {control?.self.warning ? (
+        <div className="alert alert-warning py-2 small" role="alert">
+          {control.self.warning}
+        </div>
+      ) : null}
+
       {error ? (
         <div className="alert alert-danger" role="alert">
           <div>{error.message}</div>
@@ -212,14 +296,57 @@ export default function AppPanel(): ReactElement {
         </div>
       ) : null}
 
+      {actionResult ? (
+        <div
+          className={`alert ${actionResult.ok ? 'alert-success' : 'alert-danger'} d-flex justify-content-between align-items-start`}
+          role="alert"
+        >
+          <div>
+            <div>{actionResult.ok ? actionResult.message : actionResult.error.message}</div>
+            {!actionResult.ok && actionResult.error.hint ? (
+              <div className="small mt-1">{actionResult.error.hint}</div>
+            ) : null}
+          </div>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label="Dismiss"
+            onClick={() => setActionResult(undefined)}
+          />
+        </div>
+      ) : null}
+
       {loading && !error ? <div className="text-muted">Loading…</div> : null}
 
-      {!loading && !error ? <TabBody tab={tab} payload={payload} /> : null}
+      {!loading && !error ? (
+        <TabBody
+          tab={tab}
+          payload={payload}
+          actions={{ control, busyId, onAction: requestAction }}
+        />
+      ) : null}
+
+      {confirming ? (
+        <ConfirmDialog
+          request={confirming}
+          busy={busyId === confirming.container.Id}
+          onCancel={() => setConfirming(undefined)}
+          onConfirm={(options) => void runAction(confirming.container, confirming.action, options)}
+        />
+      ) : null}
     </div>
   );
 }
 
-function TabBody({ tab, payload }: { tab: TabId; payload: TabPayload }): ReactElement {
+function TabBody({
+  tab,
+  payload,
+  actions,
+}: {
+  tab: TabId;
+  payload: TabPayload;
+  actions: ContainerActionsProps;
+}): ReactElement {
   switch (tab) {
     case 'environments':
       return <EnvironmentsTable rows={payload.environments ?? []} />;
@@ -237,7 +364,7 @@ function TabBody({ tab, payload }: { tab: TabId; payload: TabPayload }): ReactEl
       return <NodesTable rows={payload.nodes ?? []} />;
     case 'containers':
     default:
-      return <ContainersTable rows={payload.containers ?? []} />;
+      return <ContainersTable rows={payload.containers ?? []} actions={actions} />;
   }
 }
 
