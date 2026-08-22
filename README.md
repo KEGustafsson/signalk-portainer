@@ -11,10 +11,10 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M0 — skeleton and client.** The Portainer client, instance
-> registry, configuration validation and the `/instances` + `/health` facade
-> routes are implemented and tested. The UI, delta publishing and container
-> lifecycle actions land in M1–M3.
+> **Status: M1a — read-only APIs.** The Portainer client, instance registry,
+> configuration validation and the full read-only facade are implemented and
+> tested. The webapp UI is M1b; delta publishing and container lifecycle
+> actions land in M2–M3.
 
 ## Documents
 
@@ -41,8 +41,22 @@ container.
   TLS, API token or username/password, environment).
 - The plugin resolves each instance's Docker environment, probes Swarm support,
   and reports connected versions in its Signal K plugin status.
-- Two facade routes, authenticated by Signal K:
-  `GET /plugins/signalk-portainer/api/instances` and `.../api/health`.
+- A read-only REST facade under `/plugins/signalk-portainer/api/`,
+  authenticated by Signal K. Every route takes `?instance=<name>`, defaulting
+  to the first enabled instance:
+
+  | Route | Returns |
+  | --- | --- |
+  | `GET /instances` | configured instances and which is default |
+  | `GET /health` | reachability, version and capabilities per instance |
+  | `GET /environments` | environments with health, and which is selected |
+  | `GET /capabilities` | swarm support, swarm id, Docker and Portainer versions |
+  | `GET /containers` | container list (`?all=true` to include stopped) |
+  | `GET /containers/:id` | container inspect |
+  | `GET /stacks` | stacks belonging to this environment |
+  | `GET /stacks/:id/file` | the stack's compose file |
+  | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage |
+  | `GET /swarm/services` `/swarm/nodes` | 404 unless the daemon is a swarm |
 
 Requires Node.js 20.18.1 or newer (the version `undici` needs).
 
@@ -50,7 +64,7 @@ Requires Node.js 20.18.1 or newer (the version `undici` needs).
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 93 unit tests, no network required, 80% coverage enforced
+npm test           # 115 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
