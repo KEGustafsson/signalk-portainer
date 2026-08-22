@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
+import { LogViewer } from './LogViewer';
 import {
   actionLabel,
   actionRequest,
@@ -93,6 +94,8 @@ export default function AppPanel(): ReactElement {
   const [loading, setLoading] = useState(true);
   const [control, setControl] = useState<ControlState | undefined>(undefined);
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
+  // The container whose logs are open, if any.
+  const [viewing, setViewing] = useState<DockerContainer | undefined>(undefined);
   const [busyId, setBusyId] = useState<string | undefined>(undefined);
   // Kept apart from `error`: the poll clears that one on its next success, and
   // a refused action is exactly what the operator still needs to read.
@@ -254,6 +257,13 @@ export default function AppPanel(): ReactElement {
     if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab('containers');
   }, [visibleTabs, tab]);
 
+  // A container id belongs to one Portainer. Switching instance leaves the
+  // viewer looking at an id the new one knows nothing about, so it closes
+  // rather than following the switch into a 404.
+  useEffect(() => {
+    setViewing(undefined);
+  }, [instance]);
+
   return (
     <div className="p-3">
       <div className="d-flex align-items-center justify-content-between mb-3">
@@ -332,7 +342,18 @@ export default function AppPanel(): ReactElement {
         <TabBody
           tab={tab}
           payload={payload}
-          actions={{ control, busyId, onAction: requestAction }}
+          actions={{ control, busyId, onAction: requestAction, onLogs: setViewing }}
+        />
+      ) : null}
+
+      {viewing ? (
+        <LogViewer
+          // Keyed by container: opening a different one starts a new viewer
+          // rather than reusing this one's buffer and its stream.
+          key={viewing.Id}
+          container={viewing}
+          instance={instance}
+          onClose={() => setViewing(undefined)}
         />
       ) : null}
 

@@ -551,4 +551,55 @@ describe('AppPanel container actions', () => {
 
     expect(await screen.findByText(/unable to identify which one/)).toBeInTheDocument();
   });
+  it('opens the log viewer from a container row', async () => {
+    global.fetch = routeFetch({
+      '/containers/c1f0e2a3b4c5/logs': { lines: [{ stream: 'stdout', text: 'listening' }] },
+    }) as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Logs' }));
+
+    expect(await screen.findByText('Logs — signalk_influxdb')).toBeInTheDocument();
+    expect(await screen.findByText('listening')).toBeInTheDocument();
+  });
+
+  it('offers logs for a stopped container too', async () => {
+    // The logs of something that exited are the reason to look at them.
+    global.fetch = routeFetch() as unknown as typeof fetch;
+
+    render(<AppPanel />);
+    await screen.findByText('ais-logger');
+
+    const row = screen.getByRole('group', { name: 'Actions for ais-logger' });
+    expect(within(row).getByRole('button', { name: 'Logs' })).toBeEnabled();
+  });
+
+  it('closes the log viewer when the instance changes', async () => {
+    // A container id belongs to one Portainer; the other knows nothing about
+    // it, and following the switch would only produce a 404.
+    global.fetch = routeFetch({
+      '/instances': {
+        instances: [
+          { name: 'boat', isDefault: true },
+          { name: 'shore', isDefault: false },
+        ],
+      },
+      '/containers/c1f0e2a3b4c5/logs': { lines: [{ stream: 'stdout', text: 'listening' }] },
+    }) as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Logs' }));
+    await screen.findByText('Logs — signalk_influxdb');
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+
+    await waitFor(() => expect(screen.queryByText('Logs — signalk_influxdb')).toBeNull());
+  });
 });

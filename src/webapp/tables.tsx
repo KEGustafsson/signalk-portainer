@@ -103,6 +103,8 @@ export interface ContainerActionsProps {
   /** Id of the container a request is currently in flight for. */
   busyId?: string;
   onAction: (container: DockerContainer, action: ContainerAction) => void;
+  /** Opens the log viewer. Reading logs changes nothing, so it is never gated. */
+  onLogs?: (container: DockerContainer) => void;
 }
 
 export function ContainersTable({
@@ -170,6 +172,17 @@ function ActionButtons({
       role="group"
       aria-label={`Actions for ${containerName(row.Names)}`}
     >
+      {actions.onLogs ? (
+        <button
+          type="button"
+          className="btn btn-outline-secondary"
+          // Not disabled while an action is in flight: watching what a restart
+          // does to the log is exactly what an operator wants at that moment.
+          onClick={() => actions.onLogs?.(row)}
+        >
+          Logs
+        </button>
+      ) : null}
       {actionsFor(row).map((action) => {
         const state = actionState(actions.control, row, action);
         return (
