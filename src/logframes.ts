@@ -121,12 +121,12 @@ export class LogDemuxer {
       const text = this.decoder.decode(remainder);
       return text ? [{ stream: 'stdout', text }] : [];
     }
-    // A partial multiplexed frame: drop the header if it is complete, since
-    // those bytes are framing rather than output.
-    const body = remainder.length > HEADER_BYTES ? remainder.subarray(HEADER_BYTES) : remainder;
-    const stream: LogStreamName =
-      remainder.length > HEADER_BYTES && remainder[0] === STDERR ? 'stderr' : 'stdout';
-    const text = new TextDecoder('utf8').decode(body);
+    // A partial multiplexed frame. Anything up to the header length is framing
+    // rather than output, and emitting it would put raw bytes on screen; only
+    // what follows a complete header is text the container actually wrote.
+    if (remainder.length <= HEADER_BYTES) return [];
+    const stream: LogStreamName = remainder[0] === STDERR ? 'stderr' : 'stdout';
+    const text = new TextDecoder('utf8').decode(remainder.subarray(HEADER_BYTES));
     return text ? [{ stream, text }] : [];
   }
 }

@@ -17,7 +17,15 @@ export interface FacadeDeps {
   log: (message: string) => void;
   /** Shared across requests so the ceiling is a ceiling; injectable for tests. */
   streams?: StreamLimiter;
+  /** Keepalive period for open log streams; injectable for tests. */
+  keepaliveMs?: number;
 }
+
+/**
+ * How often an idle SSE stream sends a comment frame. Well inside the 60s that
+ * proxies and NAT tables commonly use before reaping an idle connection.
+ */
+const KEEPALIVE_MS = 20_000;
 
 /** Reads ?tail= and ?since= into the client's log options. */
 export function logOptions(req: Request): { tail?: number; since?: number; timestamps: boolean } {
@@ -52,6 +60,7 @@ export function instanceParam(req: Request): string | undefined {
  */
 export function registerRoutes(router: Router, deps: FacadeDeps): void {
   const limiter = deps.streams ?? new StreamLimiter();
+  const keepaliveMs = deps.keepaliveMs ?? KEEPALIVE_MS;
 
   // ── instances and health ────────────────────────────────────────────────
 
@@ -185,7 +194,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
    * without parsing anything.
    */
   router.get('/api/containers/:id/logs/stream', (req: Request, res: Response) => {
-    void streamLogs(deps, limiter, req, res);
+    void streamLogs(deps, limiter, keepaliveMs, req, res);
   });
 
   // ── control surface ─────────────────────────────────────────────────────
@@ -320,6 +329,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
 async function streamLogs(
   deps: FacadeDeps,
   limiter: StreamLimiter,
+  keepaliveMs: number,
   req: Request,
   res: Response,
 ): Promise<void> {
@@ -332,18 +342,33 @@ async function streamLogs(
   const id = String(req.params.id);
   const instance = instanceParam(req) ?? registry.defaultName;
   let release: (() => void) | undefined;
+  let keepalive: NodeJS.Timeout | undefined;
 
   try {
     const client = registry.get(instanceParam(req));
     release = limiter.acquire(`${instance}/${id}`);
 
     // The upstream stream is ended by this signal and nothing else, so the
-    // browser navigating away has to reach it — see the close handler below.
+    // browser navigating away has to reach it.
     const controller = new AbortController();
+
+    // Registered before the await, not after. A browser that disconnects while
+    // Portainer is still answering has already had its close event emitted by
+    // the time the await resolves, and a listener added then never runs: the
+    // follow stream would never be aborted, the loop below would write forever
+    // into a dead socket, and the permit would be held until Signal K
+    // restarted. Eight of those and every log stream is refused.
+    req.on('close', () => {
+      controller.abort();
+      release?.();
+    });
+
     // Awaited before any header is written, so a container that does not exist
     // is a 404 rather than a 200 stream carrying one error event — which an
     // EventSource would answer by reconnecting into a loop.
     const frames = await client.docker.logStream(id, controller.signal, logOptions(req));
+    // The browser may have left while Portainer was answering.
+    if (req.destroyed || res.writableEnded) return;
 
     // Headers first: an SSE client waits for them before it considers itself
     // connected, and until they are sent an error can still become a status.
@@ -357,12 +382,16 @@ async function streamLogs(
     });
     res.write(`event: open\ndata: ${JSON.stringify({ id, instance })}\n\n`);
 
-    req.on('close', () => {
-      controller.abort();
-      release?.();
-    });
+    // A quiet container sends nothing for hours, and an idle connection is
+    // what proxies and NAT tables reap first. This comment frame costs two
+    // bytes and keeps the connection observably alive; EventSource ignores it.
+    keepalive = setInterval(() => {
+      if (!res.writableEnded) res.write(':\n\n');
+    }, keepaliveMs);
+    keepalive.unref?.();
 
     for await (const frame of frames) {
+      if (res.writableEnded) break;
       for (const line of toLines([frame])) {
         res.write(`data: ${JSON.stringify(line)}\n\n`);
       }
@@ -383,6 +412,7 @@ async function streamLogs(
       res.status(failure.status).json({ error: failure.error, hint: failure.hint });
     }
   } finally {
+    if (keepalive) clearInterval(keepalive);
     release?.();
   }
 }

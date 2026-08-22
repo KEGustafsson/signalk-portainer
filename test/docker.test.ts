@@ -277,3 +277,59 @@ describe('logQuery', () => {
     expect(parsed(logQuery({}, false))).not.toHaveProperty('follow');
   });
 });
+
+describe('PortainerClient log streams', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  const streamPath =
+    '/api/endpoints/1/docker/containers/abc/logs?stdout=true&stderr=true&tail=200&follow=true';
+
+  it('gives up on a handshake that never completes', async () => {
+    // A follow stream has no request timeout — it is meant to stay open — but
+    // opening it still has to end somewhere, or a Portainer that accepts the
+    // connection and then says nothing holds the request until the process
+    // restarts.
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    agent
+      .get(BASE_URL)
+      .intercept({ path: streamPath, method: 'GET' })
+      .reply(200, Buffer.alloc(0))
+      .delay(2_000);
+
+    const client = createClient(agent, { timeoutMs: 50 });
+    const forever = new AbortController();
+
+    await expect(client.docker.logStream('abc', forever.signal)).rejects.toBeInstanceOf(
+      PortainerError,
+    );
+  });
+
+  it('leaves the open stream to the caller once the handshake is through', async () => {
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    agent.get(BASE_URL).intercept({ path: streamPath, method: 'GET' }).reply(200, 'plain output\n');
+
+    // The handshake timer must not still be armed against the body: a stream
+    // that outlives the timeout is the normal case, not a failure.
+    const client = createClient(agent, { timeoutMs: 50 });
+    const frames = await client.docker.logStream('abc', new AbortController().signal);
+    await new Promise((resolve) => setTimeout(resolve, 120));
+
+    const collected = [];
+    for await (const frame of frames) collected.push(frame);
+    expect(collected).toEqual([{ stream: 'stdout', text: 'plain output\n' }]);
+  });
+});

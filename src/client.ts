@@ -322,11 +322,24 @@ export class PortainerClient {
           options,
           true,
         )}`;
-        // Awaited here rather than inside the generator: a generator does no
-        // work until its first pull, which would push every upstream failure
-        // past the point where the caller can still turn it into a status.
-        const response = await this.send('GET', path, { signal }, true);
-        return readLogFrames(response);
+        // The caller's signal governs the body, which is meant to stay open —
+        // but the handshake still needs a bound, or a Portainer that accepts
+        // the connection and then says nothing holds the request forever. The
+        // two are composed for the send and the timer cleared as soon as the
+        // response arrives, so only the caller can end it from then on.
+        const handshake = new AbortController();
+        const timer = setTimeout(() => handshake.abort(), this.timeoutMs);
+        try {
+          const response = await this.send(
+            'GET',
+            path,
+            { signal: AbortSignal.any([signal, handshake.signal]) },
+            true,
+          );
+          return readLogFrames(response);
+        } finally {
+          clearTimeout(timer);
+        }
       },
 
       removeContainer: (id, opts = {}) =>

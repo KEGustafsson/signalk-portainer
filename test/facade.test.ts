@@ -1,3 +1,5 @@
+import http from 'node:http';
+import type { AddressInfo } from 'node:net';
 import express from 'express';
 import request from 'supertest';
 import type { MockAgent } from 'undici';
@@ -6,6 +8,7 @@ import type { PluginConfig } from '../src/config';
 import { PortainerError } from '../src/errors';
 import type { SelfContainer } from '../src/self';
 import { registerRoutes, instanceParam } from '../src/facade';
+import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 import * as fixtures from './fixtures';
@@ -28,6 +31,7 @@ const buildApp = (
     self?: SelfContainer;
     log?: (message: string) => void;
     streams?: StreamLimiter;
+    keepalive?: number;
   } = {},
 ) => {
   const app = express();
@@ -50,6 +54,7 @@ const buildApp = (
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
     ...(opts.streams ? { streams: opts.streams } : {}),
+    ...(opts.keepalive ? { keepaliveMs: opts.keepalive } : {}),
   });
   app.use(router);
   return app;
@@ -542,6 +547,134 @@ describe('facade log streaming', () => {
     // row would be refused the second time.
     expect(second.status).toBe(200);
     expect(limiter.openCount).toBe(0);
+  });
+});
+
+describe('facade log stream lifecycle', () => {
+  /**
+   * A log stream held open by the test rather than by Portainer, so the two
+   * moments that are impossible to catch against a real server — the handshake
+   * still in flight, and a stream with nothing to say — can be held still.
+   */
+  const heldStream = () => {
+    let answer!: () => void;
+    let signal: AbortSignal | undefined;
+    const answered = new Promise<void>((resolve) => {
+      answer = resolve;
+    });
+
+    // Yields nothing: a container that is simply quiet, until the caller gives
+    // up on it.
+    const frames = async function* (): AsyncGenerator<LogFrame> {
+      await new Promise<void>((resolve) => {
+        if (signal?.aborted) resolve();
+        else signal?.addEventListener('abort', () => resolve(), { once: true });
+      });
+    };
+
+    return {
+      registry: {
+        defaultName: 'boat',
+        get: () => ({
+          docker: {
+            logStream: async (_id: string, abort: AbortSignal) => {
+              signal = abort;
+              await answered;
+              return frames();
+            },
+          },
+        }),
+      } as unknown as InstanceRegistry,
+      /** Lets Portainer answer the handshake. */
+      answer: () => answer(),
+      signal: () => signal,
+    };
+  };
+
+  const serve = async (app: express.Express) => {
+    const server = http.createServer(app);
+    await new Promise<void>((resolve) => {
+      server.listen(0, '127.0.0.1', resolve);
+    });
+    return {
+      port: (server.address() as AddressInfo).port,
+      close: () =>
+        new Promise<void>((resolve) => {
+          server.close(() => resolve());
+        }),
+    };
+  };
+
+  const waitFor = async (what: string, ready: () => boolean): Promise<void> => {
+    for (let waited = 0; waited < 2000; waited += 10) {
+      if (ready()) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`timed out waiting for ${what}`);
+  };
+
+  const open = (port: number) => {
+    const req = http.get({
+      host: '127.0.0.1',
+      port,
+      path: '/api/containers/abc123def456/logs/stream',
+    });
+    // Closing a tab is not an error worth failing the test over: destroying the
+    // request raises one on the client side by design.
+    req.on('error', () => undefined);
+    return req;
+  };
+
+  it('abandons the upstream stream when the browser leaves before Portainer answers', async () => {
+    // The window in which a disconnect is easiest to miss: the request is with
+    // Portainer, and nothing has been written back yet.
+    const limiter = new StreamLimiter({ total: 1, perTarget: 1 });
+    const held = heldStream();
+    const server = await serve(buildApp(held.registry, { streams: limiter }));
+
+    const req = open(server.port);
+    await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+    req.destroy();
+
+    await waitFor('the upstream stream to be abandoned', () => held.signal()?.aborted === true);
+    // Portainer answers a moment later, to nobody. Without the abort the
+    // follow stream would stay open and its slot with it, and eight of those
+    // refuse every log stream until Signal K restarts.
+    held.answer();
+    await waitFor('the stream slot to be freed', () => limiter.openCount === 0);
+
+    await server.close();
+  });
+
+  it('keeps a quiet stream alive with comment frames', async () => {
+    const held = heldStream();
+    const server = await serve(buildApp(held.registry, { keepalive: 10 }));
+
+    const req = open(server.port);
+    await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+    held.answer();
+
+    const body = await new Promise<http.IncomingMessage>((resolve) => {
+      req.on('response', resolve);
+    });
+    const received: string[] = [];
+    body.setEncoding('utf8');
+    body.on('data', (chunk: string) => received.push(chunk));
+
+    // A container can say nothing for hours; the connection still has to look
+    // alive to whatever proxy or NAT table sits in front of it.
+    await waitFor(
+      'keepalive frames',
+      () =>
+        received
+          .join('')
+          .split('\n\n')
+          .filter((block) => block === ':').length >= 2,
+    );
+
+    req.destroy();
+    await waitFor('the stream to be abandoned', () => held.signal()?.aborted === true);
+    await server.close();
   });
 });
 

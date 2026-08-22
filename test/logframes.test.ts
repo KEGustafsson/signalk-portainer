@@ -130,6 +130,23 @@ describe('LogDemuxer', () => {
       expect(demuxer.flush()).toEqual([{ stream: 'stderr', text: 'dying ' }]);
     });
 
+    it('holds back a fragment too short to carry any output', () => {
+      // Six bytes of an eight-byte header and nothing else. There is no text
+      // in them, and decoding them anyway would print control bytes as a log
+      // line.
+      const demuxer = new LogDemuxer();
+      demuxer.push(frame(2, 'dying words').subarray(0, 6));
+
+      expect(demuxer.flush()).toEqual([]);
+    });
+
+    it('says nothing for a complete header with no payload behind it', () => {
+      const demuxer = new LogDemuxer();
+      demuxer.push(frame(1, 'never written').subarray(0, 8));
+
+      expect(demuxer.flush()).toEqual([]);
+    });
+
     it('emits the tail of a TTY stream', () => {
       const demuxer = new LogDemuxer(false);
       demuxer.push(raw('no trailing newline'));
