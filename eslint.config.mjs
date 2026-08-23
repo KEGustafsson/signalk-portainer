@@ -33,32 +33,21 @@ export default tseslint.config(
     },
   },
   {
-    // Staged to 'error' once the existing findings are cleared. Turning the
-    // type-aware rules on surfaced a backlog in code that predates them;
-    // 'warn' keeps every one of them reported and keeps new code honest
-    // without failing a build over the backlog. These four have findings in
-    // src/ as well as test/, so they are downgraded everywhere.
+    // These ten were staged at 'warn' while the backlog they surfaced was
+    // worked off — 272 findings in code that predates them. The backlog is
+    // gone, so they are errors like the rest of the type-checked set, and the
+    // next one to appear fails the run rather than joining a list.
     rules: {
-      '@typescript-eslint/no-misused-promises': 'warn',
-      '@typescript-eslint/no-unnecessary-type-assertion': 'warn',
-      '@typescript-eslint/no-unsafe-return': 'warn',
-      '@typescript-eslint/require-await': 'warn',
-    },
-  },
-  {
-    // The remaining backlog is confined to the test suite, where mocks are
-    // untyped by nature and assertions are deliberately loose. Kept at 'error'
-    // for src/ — a floating promise in the relay code is the exact bug class
-    // these rules exist to catch — and staged to 'error' here too once the
-    // suite's findings are cleared.
-    files: ['test/**'],
-    rules: {
-      '@typescript-eslint/no-base-to-string': 'warn',
-      '@typescript-eslint/no-floating-promises': 'warn',
-      '@typescript-eslint/no-unsafe-assignment': 'warn',
-      '@typescript-eslint/no-unsafe-call': 'warn',
-      '@typescript-eslint/no-unsafe-member-access': 'warn',
-      '@typescript-eslint/prefer-promise-reject-errors': 'warn',
+      '@typescript-eslint/no-base-to-string': 'error',
+      '@typescript-eslint/no-floating-promises': 'error',
+      '@typescript-eslint/no-misused-promises': 'error',
+      '@typescript-eslint/no-unnecessary-type-assertion': 'error',
+      '@typescript-eslint/no-unsafe-assignment': 'error',
+      '@typescript-eslint/no-unsafe-call': 'error',
+      '@typescript-eslint/no-unsafe-member-access': 'error',
+      '@typescript-eslint/no-unsafe-return': 'error',
+      '@typescript-eslint/prefer-promise-reject-errors': 'error',
+      '@typescript-eslint/require-await': 'error',
     },
   },
   {
