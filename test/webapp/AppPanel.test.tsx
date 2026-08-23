@@ -659,6 +659,74 @@ describe('AppPanel container actions', () => {
     await waitFor(() => expect(screen.queryByText('Console — signalk_influxdb')).toBeNull());
   });
 
+  it('does not ask the newly selected Portainer for a shell on the way out', async () => {
+    // The dialog is a child, so its effect re-runs before the parent's effect
+    // closes it. Without clearing first, switching instance fires an exec at a
+    // Portainer that knows nothing about this container id — and would create
+    // an orphan exec on the one that did.
+    const fetchMock = routeFetch({
+      '/instances': {
+        instances: [
+          { name: 'boat', isDefault: true },
+          { name: 'shore', isDefault: false },
+        ],
+      },
+      '/control': { ...control, console: { available: true } },
+      '/containers/c1f0e2a3b4c5/exec': {
+        id: 'c1f0e2a3b4c5',
+        ticket: 'tkt-1',
+        session: 'ses-1',
+        command: ['/bin/sh'],
+      },
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Console' }));
+    await screen.findByText('Console — signalk_influxdb');
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+    await waitFor(() => expect(screen.queryByText('Console — signalk_influxdb')).toBeNull());
+
+    const strays = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/exec') && url.includes('instance=shore'));
+    expect(strays).toEqual([]);
+  });
+
+  it('does not ask the newly selected Portainer for logs on the way out', async () => {
+    // The same race, and the same reason: the log viewer's read is keyed on
+    // the instance too.
+    const fetchMock = routeFetch({
+      '/instances': {
+        instances: [
+          { name: 'boat', isDefault: true },
+          { name: 'shore', isDefault: false },
+        ],
+      },
+      '/containers/c1f0e2a3b4c5/logs': { lines: [{ stream: 'stdout', text: 'listening' }] },
+    });
+    global.fetch = fetchMock as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Logs' }));
+    await screen.findByText('Logs — signalk_influxdb');
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+    await waitFor(() => expect(screen.queryByText('Logs — signalk_influxdb')).toBeNull());
+
+    const strays = fetchMock.mock.calls
+      .map((call) => String(call[0]))
+      .filter((url) => url.includes('/logs') && url.includes('instance=shore'));
+    expect(strays).toEqual([]);
+  });
+
   it('closes the log viewer when the instance changes', async () => {
     // A container id belongs to one Portainer; the other knows nothing about
     // it, and following the switch would only produce a 404.

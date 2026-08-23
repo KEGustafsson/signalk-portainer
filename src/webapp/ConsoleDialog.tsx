@@ -147,7 +147,13 @@ export function ConsoleDialog({
             // is the only end that knows how big the terminal really is.
             void resize(granted.session, opened.size, instance);
           },
-          onText: (text) => opened.write(text),
+          onText: (text) => {
+            // Guarded like the other two: closing the socket does not stop a
+            // frame that was already in flight, and the terminal has been
+            // disposed by then — xterm throws rather than ignoring the write.
+            if (!live) return;
+            opened.write(text);
+          },
           onClose: (code, reason) => {
             if (!live) return;
             setPhase({ kind: 'ended', message: closeMessage(code, reason) });

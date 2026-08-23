@@ -13,9 +13,10 @@ port, TLS settings, credentials and environment.
 
 > **Status: M6b — the console in the panel.** The last milestone in
 > [`docs/plan.md`](docs/plan.md): a terminal on the Containers tab, on top of
-> the relay M6a built. Nothing here has been exercised against a real Signal K
-> server or a real Portainer; see [What has and has not been
-> verified](#what-has-and-has-not-been-verified).
+> the relay M6a built. CI installs the plugin into a real Signal K server and
+> checks that it loads and starts, but nothing here has been driven by a person
+> through the admin UI or pointed at a real Portainer; see [What has and has not
+> been verified](#what-has-and-has-not-been-verified).
 
 ## Documents
 
@@ -268,7 +269,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 699 unit tests, no network required, 80% coverage enforced
+npm test           # 702 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -339,7 +340,7 @@ every container being down.
 Worth being explicit about, because the milestone plan is now complete and it
 would be easy to read that as "finished".
 
-**Verified.** 699 unit tests, no network required, covering every module in
+**Verified.** 702 unit tests, no network required, covering every module in
 `src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
 tests assert what the plugin *sent* as well as what it did with the reply, so
 the request shapes match Portainer's documented API. The Signal K plugin
@@ -349,12 +350,15 @@ Linux arm64, macOS and Windows, which also installs the plugin into a real
 Signal K server and confirms it loads and starts.
 
 **Not verified.** None of it has been run against a real Portainer or driven by
-a person through a real admin UI. So: the API shapes are right as documented and
-as mocked, but a Portainer that answers differently in some version-specific way
-would not have been caught here. The console has never carried a keystroke to a
-real shell — the relay, the ticket handoff and the terminal are each tested
-against fakes on both sides, which is not the same as a pty. Nothing has run on
-a boat, on a Raspberry Pi, or over a link bad enough to matter.
+a person through a real admin UI. The CI check above is a narrow one — it proves
+the plugin loads, starts and stops inside a real Signal K server, not that any
+route, panel or console does what it should once something asks. So: the API
+shapes are right as documented and as mocked, but a Portainer that answers
+differently in some version-specific way would not have been caught here. The
+console has never carried a keystroke to a real shell — the relay, the ticket
+handoff and the terminal are each tested against fakes on both sides, which is
+not the same as a pty. Nothing has run on a boat, on a Raspberry Pi, or over a
+link bad enough to matter.
 
 Treat the first run against a real instance as the beginning of testing, not the
 end of it, and start with a Portainer whose containers you can afford to lose.

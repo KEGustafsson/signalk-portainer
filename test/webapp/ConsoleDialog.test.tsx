@@ -28,6 +28,10 @@ class FakeTerminal implements Terminal {
   private resized: ((size: TerminalSize) => void) | undefined;
 
   write(data: string): void {
+    // xterm's write buffer throws `Object has been disposed` once the terminal
+    // has been disposed, from inside whatever called it — here, a socket
+    // message handler.
+    if (this.disposed) throw new Error('Object has been disposed');
     this.written.push(data);
   }
   onData(listener: (data: string) => void): void {
@@ -296,6 +300,19 @@ describe('ConsoleDialog', () => {
 
     expect(sockets[0]?.closed).toBe(true);
     expect(terminal.disposed).toBe(true);
+  });
+
+  it('ignores output that arrives after the dialog has gone', async () => {
+    // Closing the dialog closes the socket and disposes the terminal, but a
+    // frame already in flight still dispatches while the socket is closing.
+    // Writing it would throw out of the socket's own handler.
+    const view = await connected();
+    const socket = sockets[0]!;
+
+    view.unmount();
+
+    expect(() => socket.handlers.onText('output after close\r\n')).not.toThrow();
+    expect(terminal.written).toEqual([]);
   });
 
   it('does not build a shell for a dialog that closed while the plugin answered', async () => {
