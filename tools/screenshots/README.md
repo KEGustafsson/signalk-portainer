@@ -5,12 +5,13 @@ plugin in a real Signal K admin UI. Nothing is drawn, composited or edited
 afterwards. The only thing standing in for something else is Portainer:
 `mock-portainer.js` answers the parts of the Portainer 2.x API the plugin calls,
 with a plausible boat behind it — a Signal K server, InfluxDB, Grafana, an MQTT
-broker, a stopped backup job and a container stuck restarting.
+broker, a stopped backup job and a container stuck restarting, on a Portainer
+that also manages a shore NAS and an edge agent that is not checking in.
 
 That is also the honest reading of the images: they show what the panel does
-with a Portainer that answers as documented, which is not the same as a real
-one. See [What has and has not been
-verified](../../README.md#what-has-and-has-not-been-verified).
+with a Portainer that answers as documented, which is not the same as one that
+answers the way some particular version of it really does. Nothing here has been
+pointed at a real Portainer.
 
 ## What you need
 
@@ -41,9 +42,7 @@ directory:
       {
         "name": "boat",
         "enabled": true,
-        "protocol": "http",
-        "host": "127.0.0.1",
-        "port": 9500,
+        "url": "http://127.0.0.1:9500",
         "authMode": "apiKey",
         "apiKey": "ptr_screenshotfixture",
         "environmentName": "boat"
@@ -51,9 +50,7 @@ directory:
       {
         "name": "shore",
         "enabled": true,
-        "protocol": "http",
-        "host": "127.0.0.1",
-        "port": 9501,
+        "url": "http://127.0.0.1:9501",
         "authMode": "apiKey",
         "apiKey": "ptr_screenshotfixture",
         "environmentName": "nas"
@@ -73,8 +70,11 @@ directory:
 }
 ```
 
-`allowDestructive` stays off on purpose: a disabled Remove button carrying the
-setting that would enable it is part of what the screenshots are showing.
+`environmentName` is what saves the Environments tab from having to be answered
+before anything else can be captured; the panel writes `environmentId` back
+there itself when a row is pressed. `allowDestructive` stays off on purpose: a
+disabled Remove button carrying the setting that would enable it is part of what
+the screenshots are showing.
 
 With the server up, capture:
 

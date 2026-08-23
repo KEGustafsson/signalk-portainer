@@ -72,7 +72,7 @@ const boxOf = (selector) =>
  * the lowest element worth keeping, `top` the highest, and `column` the
  * element whose width to crop to; everything outside is cut.
  */
-async function shot(name, { top, bottom, column, pad = 24 } = {}) {
+async function shot(name, { top, bottom, column, pad = 24, padBottom = pad } = {}) {
   const clip = { x: 0, y: 0, width: WIDTH, height: page.viewportSize().height };
 
   if (column) {
@@ -93,7 +93,7 @@ async function shot(name, { top, bottom, column, pad = 24 } = {}) {
   }
   if (bottom !== undefined) {
     const y = await edge(bottom, 'bottom');
-    if (y !== undefined) clip.height = Math.ceil(y) + pad - clip.y;
+    if (y !== undefined) clip.height = Math.ceil(y) + padBottom - clip.y;
   }
 
   await page.screenshot({ path: `${OUT}/${name}.png`, fullPage: true, clip });
@@ -116,6 +116,11 @@ async function panel(tab, height = 1000) {
 const actions = (container) => page.getByRole('group', { name: `Actions for ${container}` });
 
 // ── the panel, tab by tab ──────────────────────────────────────────────────
+
+// Where the panel opens, and where the environment is chosen: the row in use
+// carries the badge, the others carry the button that switches to them.
+await panel('Environments');
+await shot('panel-environments', { bottom: 'table' });
 
 await panel('Containers');
 await shot('panel-containers', { bottom: 'table' });
@@ -153,10 +158,13 @@ await page.keyboard.press('Escape');
 await panel('Containers', 860);
 await actions('signalk-server').getByRole('button', { name: 'Console' }).click();
 // The terminal arrives in its own chunk and the shell in its own socket, so
-// neither is there when the dialog opens.
-await page.waitForSelector('.xterm-helper-textarea', { timeout: 60_000 });
-await page.waitForTimeout(1500);
-await page.locator('.xterm-helper-textarea').click();
+// neither is there when the dialog opens. The screen is what to wait for and
+// what to click: xterm's input is a textarea parked off-screen, which is
+// attached long before there is anything to type into.
+await page.waitForSelector('.xterm-screen', { timeout: 60_000 });
+await page.getByText('Connected', { exact: true }).waitFor({ state: 'visible', timeout: 60_000 });
+await page.waitForTimeout(1000);
+await page.locator('.xterm-screen').click();
 for (const command of ['uname -a', 'ls -l /home/node/.signalk', 'df -h /']) {
   await page.keyboard.type(command, { delay: 20 });
   await page.keyboard.press('Enter');
@@ -190,9 +198,12 @@ await page.goto(CONFIG, { waitUntil: 'networkidle' });
 await page.waitForTimeout(2500);
 await shot('plugin-config', {
   top: CARD,
-  bottom: '#root_configuration_instances_0_port',
+  // Down to where Advanced starts: everything above it is what an operator has
+  // to fill in, and everything in it is what they mostly do not.
+  bottom: '#root_configuration_instances_0_advanced__title',
   column: CARD,
   pad: 12,
+  padBottom: 2,
 });
 
 // The settings that decide what is published and what the panel may do,

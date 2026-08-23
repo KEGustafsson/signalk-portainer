@@ -28,6 +28,9 @@ const days = (count) => now - count * 86400;
 const BOAT_ENVIRONMENTS = [
   { Id: 1, Name: 'boat', Type: 1, Status: 1, URL: 'unix:///var/run/docker.sock' },
   { Id: 2, Name: 'shore-nas', Type: 2, Status: 1, URL: 'tcp://nas.local:9001' },
+  // An edge agent that is not checking in, so the Health column has something
+  // to say: edge environments report health by heartbeat rather than status.
+  { Id: 3, Name: 'spare-pi', Type: 4, Heartbeat: false, EdgeCheckinInterval: 60 },
 ];
 
 const BOAT_CONTAINERS = [
