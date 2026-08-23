@@ -24,6 +24,13 @@ const PLUGIN_ID = 'signalk-portainer';
 const plugin = (app: SignalKApp): SignalKPlugin => {
   let registry: InstanceRegistry | undefined;
   let config: PluginConfig | undefined;
+  /**
+   * The options as the server handed them over, untouched. `savePluginOptions`
+   * takes the schema's own shape rather than the normalized config, and
+   * writing back a normalized object would rewrite every field the operator
+   * set — a saved environment id must not quietly rewrite their host or port.
+   */
+  let rawOptions: RawConfig | undefined;
   let poller: DeltaPoller | undefined;
   /** Containers seen on the last poll, keyed by "<instance>/<key>", for PUT. */
   let seen = new Map<string, KeyedContainer>();
@@ -151,6 +158,40 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     }
   };
 
+  /**
+   * Writes the panel's environment choice back into the plugin options, so it
+   * is still there after a restart and the operator never has to find the id
+   * themselves. Only that one field is touched.
+   */
+  const saveEnvironment = async (instance: string, environmentId: number): Promise<void> => {
+    if (typeof app.savePluginOptions !== 'function') {
+      throw new Error('this Signal K server cannot save plugin options');
+    }
+    const raw = rawOptions;
+    const entry = raw?.instances?.find((candidate) => candidate.name === instance);
+    if (!entry) {
+      throw new Error(`no configured instance named "${instance}" to save against`);
+    }
+
+    entry.environmentId = environmentId;
+    // A name left over from an earlier configuration would be ignored anyway —
+    // the id wins — but leaving it there makes the saved options read as if
+    // two different environments were chosen.
+    entry.environmentName = '';
+    if (config) {
+      const live = config.instances.find((candidate) => candidate.name === instance);
+      if (live) live.environment = { id: environmentId, name: '' };
+    }
+
+    await new Promise<void>((resolve, reject) => {
+      app.savePluginOptions!(raw as object, (cause) => {
+        if (cause) reject(cause);
+        else resolve();
+      });
+    });
+    log(`environment for instance "${instance}" saved as ${environmentId}`);
+  };
+
   return {
     id: PLUGIN_ID,
     name: 'Portainer',
@@ -159,6 +200,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
 
     start(options: object, _restart: (newConfiguration: object) => void): void {
       try {
+        rawOptions = options as RawConfig | undefined;
         config = normalizeConfig(options as RawConfig | undefined);
         registry = new InstanceRegistry(config.instances, log);
         if (self.inContainer && !self.identified) {
@@ -288,6 +330,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         config: () => config,
         self: () => self,
         log,
+        saveEnvironment,
         // Read through a getter rather than captured: the router is registered
         // once, and the tickets come and go with each start.
         get execTickets() {

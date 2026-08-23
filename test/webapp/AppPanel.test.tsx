@@ -67,6 +67,7 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
       '/control': control,
       '/containers': { containers },
       '/environments': {
+        selected: 1,
         environments: [
           { id: 1, name: 'local', type: 1, health: 'up', isSelected: true, url: 'unix://' },
         ],
@@ -83,6 +84,115 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
 describe('AppPanel', () => {
   afterEach(() => {
     jest.useRealTimers();
+  });
+
+  /**
+   * A Portainer managing several Docker hosts with no choice made. Before the
+   * picker this was a dead end: the panel showed the refusal and the only way
+   * out was editing the plugin configuration by hand.
+   */
+  describe('choosing an environment', () => {
+    const unchosen = (selected: number | null = null) =>
+      routeFetch({
+        '/environments': {
+          selected,
+          environments: [
+            { id: 1, name: 'primary', type: 1, health: 'up', isSelected: selected === 1 },
+            { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: selected === 27 },
+          ],
+        },
+      });
+
+    it('asks instead of guessing which Docker host to work against', async () => {
+      global.fetch = unchosen() as unknown as typeof fetch;
+
+      render(<AppPanel />);
+
+      expect(await screen.findByText('Choose an environment to continue')).toBeInTheDocument();
+      // The tables stay empty rather than showing another environment's
+      // containers, and no container read is attempted at all.
+      expect(screen.queryByText('signalk_influxdb')).not.toBeInTheDocument();
+    });
+
+    it('offers every environment Portainer reported', async () => {
+      global.fetch = unchosen() as unknown as typeof fetch;
+
+      render(<AppPanel />);
+
+      const picker = await screen.findByLabelText('Environment');
+      expect(within(picker).getByRole('option', { name: 'primary' })).toBeInTheDocument();
+      expect(within(picker).getByRole('option', { name: 'lenovo' })).toBeInTheDocument();
+      // Nothing is pre-selected: the select must not look like it already
+      // answered the question it is asking.
+      expect((picker as HTMLSelectElement).value).toBe('');
+    });
+
+    it('saves the choice and then loads that environment', async () => {
+      const user = userEvent.setup();
+      const fetchMock = unchosen();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      render(<AppPanel />);
+      await screen.findByText('Choose an environment to continue');
+
+      // Answering switches the panel over to the normal view.
+      fetchMock.mockImplementation(((input: string, init?: RequestInit) => {
+        void init;
+        const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+        if (path === '/environment') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({ selected: 27, name: 'lenovo', persisted: true }),
+          });
+        }
+        if (path === '/environments') {
+          return Promise.resolve({
+            ok: true,
+            status: 200,
+            json: async () => ({
+              selected: 27,
+              environments: [
+                { id: 1, name: 'primary', type: 1, health: 'up', isSelected: false },
+                { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: true },
+              ],
+            }),
+          });
+        }
+        const table: Record<string, unknown> = {
+          '/instances': { instances: [{ name: 'boat', isDefault: true }] },
+          '/capabilities': { capabilities: { swarm: false } },
+          '/control': control,
+          '/containers': { containers },
+        };
+        return Promise.resolve({ ok: true, status: 200, json: async () => table[path] ?? {} });
+      }) as unknown as typeof fetch);
+
+      await user.selectOptions(screen.getByLabelText('Environment'), '27');
+
+      expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
+      expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument();
+
+      // Saved server-side rather than kept in the tab: the delta poller works
+      // against the same client and would otherwise publish nothing.
+      const sent = fetchMock.mock.calls.map(
+        (call) => `${(call[1] as RequestInit | undefined)?.method ?? 'GET'} ${call[0] as string}`,
+      );
+      expect(sent.some((entry) => entry.startsWith('PUT') && entry.includes('/environment'))).toBe(
+        true,
+      );
+    });
+
+    it('stays out of the way when there is only one environment', async () => {
+      global.fetch = routeFetch() as unknown as typeof fetch;
+
+      render(<AppPanel />);
+      await screen.findByText('signalk_influxdb');
+
+      // Nothing to choose, so nothing is asked.
+      expect(screen.queryByLabelText('Environment')).not.toBeInTheDocument();
+      expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument();
+    });
   });
 
   it('renders containers for the default instance on load', async () => {
@@ -183,6 +293,15 @@ describe('AppPanel', () => {
           ok: true,
           status: 200,
           json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
+        });
+      }
+      // Answered rather than stalled: the tab read is the one under test, and
+      // it does not start until the environment is known.
+      if (input.includes('/environments')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ selected: 1, environments: [] }),
         });
       }
       // Never settles: stands in for a facade that has stalled.

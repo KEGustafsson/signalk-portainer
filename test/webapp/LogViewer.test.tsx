@@ -306,8 +306,12 @@ describe('LogViewer', () => {
     global.fetch = withLines(...flood) as unknown as typeof fetch;
 
     renderViewer();
+    // Flushed rather than polled: `findByText` re-runs a whole-document text
+    // query on every mutation batch, and committing 5000 rows produces enough
+    // of them to burn seconds waiting for a read that is already done.
+    await act(async () => {});
 
-    expect(await screen.findByText(`line-${MAX_LINES + 9}`)).toBeInTheDocument();
+    expect(screen.getByText(`line-${MAX_LINES + 9}`)).toBeInTheDocument();
     // The oldest are dropped, not rendered into a DOM that grows without bound.
     expect(screen.queryByText('line-0')).not.toBeInTheDocument();
     expect(screen.getByText(/5000 lines/)).toBeInTheDocument();

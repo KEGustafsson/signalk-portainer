@@ -16,7 +16,7 @@
   ],
   "scripts": {
     "build": "npm run build:plugin && npm run build:webapp",
-    "clean": "rm -rf dist coverage public",
+    "clean": "node -e \"for (const d of ['dist','coverage','public']) require('fs').rmSync(d, { recursive: true, force: true })\"",
     "lint": "eslint src test",
     "lint:fix": "eslint --fix src test",
     "format": "prettier --write \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\"",

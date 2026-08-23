@@ -105,6 +105,12 @@ export default function AppPanel(): ReactElement {
 function Panel(): ReactElement {
   const [instances, setInstances] = useState<InstanceSummary[]>([]);
   const [instance, setInstance] = useState<string | undefined>(undefined);
+  const [environments, setEnvironments] = useState<EnvironmentRow[]>([]);
+  // null is a real state, not "not loaded yet": Portainer has several
+  // environments and nobody has chosen one. undefined means the question has
+  // not been asked yet.
+  const [environment, setEnvironment] = useState<number | null | undefined>(undefined);
+  const [switching, setSwitching] = useState(false);
   const [capabilities, setCapabilities] = useState<Capabilities | undefined>(undefined);
   const [tab, setTab] = useState<TabId>('containers');
   const [payload, setPayload] = useState<TabPayload>({});
@@ -146,6 +152,12 @@ function Panel(): ReactElement {
     [tab],
   );
 
+  /**
+   * Several environments, none chosen. Distinct from "still loading": the
+   * panel has an answer, and the answer is that the operator has to pick.
+   */
+  const needsEnvironment = environment === null && environments.length > 1;
+
   const visibleTabs = useMemo(
     () => TABS.filter((candidate) => !candidate.swarmOnly || capabilities?.swarm),
     [capabilities],
@@ -167,8 +179,45 @@ function Panel(): ReactElement {
     };
   }, []);
 
+  /**
+   * Read on its own rather than with the tab payload: every other read needs a
+   * chosen environment, and this is the one that lets the operator choose.
+   */
+  const loadEnvironments = useCallback(async (): Promise<void> => {
+    const body = await apiGet<{ environments: EnvironmentRow[]; selected: number | null }>(
+      '/environments',
+      instance,
+    );
+    setEnvironments(body.environments ?? []);
+    // `?? null` rather than leaving it undefined: undefined means "not asked
+    // yet" and holds the panel back, and an answer that omits the field would
+    // otherwise hold it back for good.
+    setEnvironment(body.selected ?? null);
+  }, [instance]);
+
   useEffect(() => {
     if (instances.length === 0) return;
+    let cancelled = false;
+    setEnvironment(undefined);
+    loadEnvironments().catch((cause: unknown) => {
+      if (cancelled) return;
+      setError(asApiError(cause));
+      // Not left as undefined: that state stops the panel from loading
+      // anything, and a picker that could not be read is no reason to keep the
+      // rest of it dark. The tab read runs and reports whatever is really
+      // wrong.
+      setEnvironment(null);
+    });
+    return () => {
+      cancelled = true;
+    };
+  }, [loadEnvironments, instances.length]);
+
+  useEffect(() => {
+    if (instances.length === 0) return;
+    // docker/info is read through the environment, so it has nothing to answer
+    // while the choice is still open.
+    if (environment === undefined || needsEnvironment) return;
     let cancelled = false;
     apiGet<{ capabilities: Capabilities }>('/capabilities', instance)
       .then((body) => {
@@ -182,7 +231,7 @@ function Panel(): ReactElement {
     return () => {
       cancelled = true;
     };
-  }, [instance, instances.length]);
+  }, [instance, instances.length, environment, needsEnvironment]);
 
   useEffect(() => {
     if (instances.length === 0) return;
@@ -222,6 +271,15 @@ function Panel(): ReactElement {
 
   useEffect(() => {
     if (instances.length === 0) return;
+    // Every tab read is scoped to an environment, so polling while the choice
+    // is still open only produces the same refusal ten seconds apart. The
+    // picker is shown instead. A resolved-to-nothing environment with nothing
+    // to choose from is a different thing entirely, and is left to the tab
+    // read so the real error is the one that surfaces.
+    if (environment === undefined || needsEnvironment) {
+      setLoading(false);
+      return;
+    }
     setLoading(true);
     void load();
     const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
@@ -230,7 +288,7 @@ function Panel(): ReactElement {
       // Unmounting or switching away must not leave a request open.
       inFlight.current?.abort();
     };
-  }, [load, instances.length]);
+  }, [load, instances.length, environment, needsEnvironment]);
 
   const runAction = useCallback(
     async (
@@ -396,6 +454,42 @@ function Panel(): ReactElement {
     [closeInstanceViews],
   );
 
+  /**
+   * Switches the environment this instance works against. Saved server-side
+   * rather than held in this tab: the delta poller and the watchdog work
+   * against the same client, and a choice only the browser knew about would
+   * leave them publishing nothing.
+   */
+  const selectEnvironment = useCallback(
+    async (id: number): Promise<void> => {
+      closeInstanceViews();
+      setSwitching(true);
+      // Dropped rather than left on screen: they describe the environment
+      // being switched away from, and reading them against the new one would
+      // be actively misleading.
+      setPayload({});
+      setError(undefined);
+      setActionResult(undefined);
+      setStackResult(undefined);
+      try {
+        await apiSend<{ selected: number; warning?: string }>(
+          'PUT',
+          '/environment',
+          instance,
+          undefined,
+          { id },
+        );
+        setEnvironment(id);
+        await loadEnvironments();
+      } catch (cause) {
+        setError(asApiError(cause));
+      } finally {
+        setSwitching(false);
+      }
+    },
+    [closeInstanceViews, instance, loadEnvironments],
+  );
+
   // The backstop, for an instance that changes any other way — the first one
   // being chosen once /instances answers, say.
   useEffect(() => {
@@ -408,25 +502,56 @@ function Panel(): ReactElement {
     <div className="p-3">
       <div className="d-flex align-items-center justify-content-between mb-3">
         <h5 className="mb-0">Portainer</h5>
-        {instances.length > 1 ? (
-          <div className="d-flex align-items-center gap-2">
-            <label className="form-label mb-0 small text-muted" htmlFor="portainer-instance">
-              Instance
-            </label>
-            <select
-              id="portainer-instance"
-              className="form-select form-select-sm w-auto"
-              value={instance ?? ''}
-              onChange={(event) => selectInstance(event.target.value)}
-            >
-              {instances.map((entry) => (
-                <option key={entry.name} value={entry.name}>
-                  {entry.name}
-                </option>
-              ))}
-            </select>
-          </div>
-        ) : null}
+        <div className="d-flex align-items-center gap-3">
+          {instances.length > 1 ? (
+            <div className="d-flex align-items-center gap-2">
+              <label className="form-label mb-0 small text-muted" htmlFor="portainer-instance">
+                Instance
+              </label>
+              <select
+                id="portainer-instance"
+                className="form-select form-select-sm w-auto"
+                value={instance ?? ''}
+                onChange={(event) => selectInstance(event.target.value)}
+              >
+                {instances.map((entry) => (
+                  <option key={entry.name} value={entry.name}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+
+          {/* Only worth the space when there is a choice to make: a Portainer
+              with one environment resolves it without being asked. */}
+          {environments.length > 1 ? (
+            <div className="d-flex align-items-center gap-2">
+              <label className="form-label mb-0 small text-muted" htmlFor="portainer-environment">
+                Environment
+              </label>
+              <select
+                id="portainer-environment"
+                className="form-select form-select-sm w-auto"
+                value={environment ?? ''}
+                disabled={switching}
+                onChange={(event) => void selectEnvironment(Number(event.target.value))}
+              >
+                {/* Present only until something is chosen, so the select has
+                    something truthful to show rather than appearing to have
+                    picked the first environment on its own. */}
+                {environment === null || environment === undefined ? (
+                  <option value="">Choose…</option>
+                ) : null}
+                {environments.map((entry) => (
+                  <option key={entry.id} value={entry.id}>
+                    {entry.name}
+                  </option>
+                ))}
+              </select>
+            </div>
+          ) : null}
+        </div>
       </div>
 
       <ul className="nav nav-tabs mb-3">
@@ -496,9 +621,24 @@ function Panel(): ReactElement {
         </div>
       ) : null}
 
-      {loading && !error ? <div className="text-muted">Loading…</div> : null}
+      {/* The first-run state, not a failure: Portainer has several environments
+          and the panel will not pick a Docker host on the operator's behalf.
+          Restarting a container on the wrong one is the thing being avoided. */}
+      {needsEnvironment ? (
+        <div className="alert alert-info" role="alert">
+          <div>Choose an environment to continue</div>
+          <div className="small mt-1">
+            This Portainer manages {environments.length} environments. Pick the one this Signal K
+            server should work with — it is remembered, so this is asked once.
+          </div>
+        </div>
+      ) : null}
 
-      {!loading && !error ? (
+      {switching ? <div className="text-muted">Switching environment…</div> : null}
+
+      {loading && !error && !needsEnvironment ? <div className="text-muted">Loading…</div> : null}
+
+      {!loading && !error && !needsEnvironment && !switching ? (
         <TabBody
           tab={tab}
           payload={payload}
