@@ -450,9 +450,6 @@ Background reading:
 - [`docs/signalk-webapp.md`](docs/signalk-webapp.md) — the Signal K embedded
   webapp contract: Module Federation, the fixed `./AppPanel` name and React
   singleton sharing.
-- [`tools/screenshots/`](tools/screenshots/README.md) — the fixture Portainer
-  the screenshots in this file are taken against, and the script that takes
-  them.
 - [`CHANGELOG.md`](CHANGELOG.md) — what is in each release.
 
 ## License
