@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" width="256" height="256" role="img" aria-labelledby="signalk-portainer-logo-title">
+  <title id="signalk-portainer-logo-title">Portainer for Signal K</title>
+  <!--
+    Portainer's crane-and-P mark, drawn in Signal K's own colours: the field is
+    Signal K blue (#003399) and the mark Signal K yellow (#FFCC00), the two
+    colours of the burgee on signalk.org. Square and unpadded — the admin UI
+    rounds the corners itself and crops the tile to 72px (webapp list) or 28px
+    (App Store rows), so nothing here may rely on a margin of its own.
+  -->
+  <rect width="256" height="256" fill="#003399" />
+  <g fill="#ffcc00">
+    <!-- The crane: jib, mast and the two braces back to the mast head. -->
+    <rect x="20.82" y="46.55" width="158.42" height="9.19" />
+    <rect x="72.47" y="17.96" width="13.47" height="209.05" />
+    <polygon points="72.47,24.7 34.75,46.55 45.68,46.55 72.47,31.03" />
+    <polygon points="85.95,24.7 123.67,46.55 112.74,46.55 85.95,31.03" />
+    <!-- The hoist cable, above the P where the field is behind it. -->
+    <rect x="157.6" y="55.73" width="5.31" height="10.21" />
+    <!--
+      The P. Its bowl is a superellipse quarter either side of the waist, and
+      the container hanging off the cable is punched out of it as the counter —
+      hence evenodd, since the subpath winds the same way as the outline.
+    -->
+    <path
+      fill-rule="evenodd"
+      d="M95.95 65.94 H162.91 C174.67 65.94 220.27 65.94 220.27 121.06 C220.27 176.18 174.67 176.18 162.91 176.18 H142.29 V227.01 H95.95 Z M142.29 103.09 h35.73 v35.73 h-35.73 Z"
+    />
+  </g>
+  <!-- The rest of the cable, crossing the P: the field colour, so it reads through. -->
+  <rect x="157.6" y="65.94" width="5.31" height="37.15" fill="#003399" />
+</svg>

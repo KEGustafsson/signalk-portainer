@@ -79,6 +79,11 @@ containers you can afford to lose.
   the terminal for the Close button; Tab and Escape both remain available to
   the shell, so without it a shell reached by keyboard could not be left by
   one.
+- An app icon, so the plugin has a tile of its own in the webapp list and the
+  App Store rather than the monogram the server falls back to. It is
+  Portainer's crane-and-P mark drawn in Signal K's own two colours — the blue
+  and yellow of the burgee — since the plugin is neither Portainer nor a plain
+  Signal K plugin but the one working the other.
 
 #### Signal K integration
 

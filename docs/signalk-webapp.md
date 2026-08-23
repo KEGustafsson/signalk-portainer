@@ -108,3 +108,36 @@ implementation:
 
 This panel does not use them yet — it reads only from the plugin facade — but
 they are the route to login handling and live Signal K data later.
+
+## 8. App icon
+
+`signalk.appIcon` in package.json names the image the server shows for this
+package. PNG or SVG; upstream asks for at least 128×128 square. Without one the
+admin UI draws a monogram from the package name instead.
+
+```json
+"signalk": {
+  "displayName": "Portainer",
+  "appIcon": "logo.svg"
+}
+```
+
+The path is **relative to the directory the server mounts for the package**,
+which is `public/` when the package ships one and the package root otherwise
+([`local-assets.ts`](https://github.com/SignalK/signalk-server/blob/master/src/appstore/local-assets.ts)).
+This package ships `public/`, so `logo.svg` there is what the webapp list
+requests as `/signalk-portainer/logo.svg` — a declared `public/logo.svg` would
+be looked for at `public/public/logo.svg` and 404.
+
+That is the whole reason for `EmitAppIcon` in `webpack.config.js`: `public/` is
+webpack's output directory and `output.clean` empties it on every build, so the
+icon cannot be committed there. It lives in `assets/`, and the build emits a
+copy alongside `remoteEntry.js`.
+
+The App Store reads the same field, but resolves it **package-relative** against
+jsdelivr rather than against the mount. A declared `logo.svg` is not at the
+tarball root, so that lookup misses and the server's icon probe retries under
+`public/`, `assets/`, `img/`, `docs/`, `dist/` and `src/` with the basename
+([`icon-probe.ts`](https://github.com/SignalK/signalk-server/blob/master/src/appstore/icon-probe.ts))
+— the first of which hits. Both copies are in the tarball, so neither path
+depends on the probe alone.

@@ -1,6 +1,37 @@
+const fs = require('fs');
 const path = require('path');
+const { Compilation, sources } = require('webpack');
 const { ModuleFederationPlugin } = require('webpack').container;
 const packageJson = require('./package.json');
+
+// The app icon has to arrive in `public/`: that is the directory the Signal K
+// server mounts for this package, and `signalk.appIcon` in package.json is
+// resolved against it. `output.clean` empties `public/` on every build, so the
+// icon cannot simply be committed there — it is emitted from `assets/`, which
+// stays the one copy anything else (the README, npm) can point at.
+const APP_ICON_SOURCE = path.resolve(__dirname, 'assets/logo.svg');
+
+class EmitAppIcon {
+  constructor(name) {
+    this.name = name;
+  }
+
+  apply(compiler) {
+    compiler.hooks.thisCompilation.tap('EmitAppIcon', (compilation) => {
+      compilation.hooks.processAssets.tap(
+        {
+          name: 'EmitAppIcon',
+          stage: Compilation.PROCESS_ASSETS_STAGE_ADDITIONAL,
+        },
+        () => {
+          // Declared as a dependency so `--watch` re-emits when it is edited.
+          compilation.fileDependencies.add(APP_ICON_SOURCE);
+          compilation.emitAsset(this.name, new sources.RawSource(fs.readFileSync(APP_ICON_SOURCE)));
+        },
+      );
+    });
+  }
+}
 
 // The Signal K admin UI loads the container with a classic <script> tag, so the
 // container has to land on `window` under a name derived from the package name.
@@ -38,6 +69,7 @@ module.exports = {
     ],
   },
   plugins: [
+    new EmitAppIcon(packageJson.signalk.appIcon),
     new ModuleFederationPlugin({
       name: containerName,
       library: { type: 'var', name: containerName },
