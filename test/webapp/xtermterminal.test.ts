@@ -46,7 +46,7 @@ class FakeXterm {
 jest.mock('@xterm/xterm', () => ({
   Terminal: class {
     constructor(options: Record<string, unknown>) {
-      return new FakeXterm(options) as unknown as object;
+      return new FakeXterm(options);
     }
   },
 }));

@@ -1,16 +1,15 @@
 import { assignKeys, containerKey, joinPath, normalizeSegment, parseHealth } from '../src/paths';
 import type { DockerContainer } from '../src/types';
 
-const container = (overrides: Partial<DockerContainer> = {}): DockerContainer =>
-  ({
-    Id: 'c1f0e2a3b4c5d6e7f8a9b0c1d2e3f4a5',
-    Names: ['/influx'],
-    Image: 'influxdb:2.7',
-    Created: 0,
-    State: 'running',
-    Status: 'Up 3 days',
-    ...overrides,
-  }) as DockerContainer;
+const container = (overrides: Partial<DockerContainer> = {}): DockerContainer => ({
+  Id: 'c1f0e2a3b4c5d6e7f8a9b0c1d2e3f4a5',
+  Names: ['/influx'],
+  Image: 'influxdb:2.7',
+  Created: 0,
+  State: 'running',
+  Status: 'Up 3 days',
+  ...overrides,
+});
 
 describe('normalizeSegment', () => {
   it('lowercases and replaces anything a Signal K path cannot carry', () => {

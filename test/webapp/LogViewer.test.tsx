@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { LogViewer } from '../../src/webapp/LogViewer';
 import { MAX_LINES } from '../../src/webapp/logstream';
 import type { DockerContainer } from '../../src/types';
+import type { FetchMock } from './mocks';
 
 const container: DockerContainer = {
   Id: 'c1f0e2a3b4c5',
@@ -65,7 +66,7 @@ class FakeEventSource {
 }
 
 const withLines = (...lines: { stream: string; text: string }[]) =>
-  jest.fn(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ lines }) }));
+  jest.fn(() => Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ lines }) }));
 
 const renderViewer = (onClose = jest.fn()) =>
   render(<LogViewer container={container} instance="boat" onClose={onClose} />);
@@ -97,7 +98,7 @@ describe('LogViewer', () => {
   });
 
   it('asks the selected instance, not the default', async () => {
-    const fetchMock = global.fetch as unknown as jest.Mock;
+    const fetchMock = global.fetch as unknown as FetchMock;
     renderViewer();
     await screen.findByText('listening on 8086');
 
@@ -118,7 +119,7 @@ describe('LogViewer', () => {
 
   it('shows only stderr when asked, without going back to the server', async () => {
     const user = userEvent.setup();
-    const fetchMock = global.fetch as unknown as jest.Mock;
+    const fetchMock = global.fetch as unknown as FetchMock;
     renderViewer();
     await screen.findByText('listening on 8086');
     const before = fetchMock.mock.calls.length;
@@ -133,7 +134,7 @@ describe('LogViewer', () => {
 
   it('re-reads with the new bounds when the controls change', async () => {
     const user = userEvent.setup();
-    const fetchMock = global.fetch as unknown as jest.Mock;
+    const fetchMock = global.fetch as unknown as FetchMock;
     renderViewer();
     await screen.findByText('listening on 8086');
 
@@ -237,7 +238,8 @@ describe('LogViewer', () => {
       Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({ error: 'No such container', hint: 'it may have been removed' }),
+        json: () =>
+          Promise.resolve({ error: 'No such container', hint: 'it may have been removed' }),
       }),
     ) as unknown as typeof fetch;
 
@@ -309,7 +311,9 @@ describe('LogViewer', () => {
     // Flushed rather than polled: `findByText` re-runs a whole-document text
     // query on every mutation batch, and committing 5000 rows produces enough
     // of them to burn seconds waiting for a read that is already done.
-    await act(async () => {});
+    await act(() => {
+      return Promise.resolve();
+    });
 
     expect(screen.getByText(`line-${MAX_LINES + 9}`)).toBeInTheDocument();
     // The oldest are dropped, not rendered into a DOM that grows without bound.

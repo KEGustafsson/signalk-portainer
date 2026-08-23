@@ -193,7 +193,7 @@ describe('DeltaPoller', () => {
     const registry = {
       names: ['boat', 'shore'],
       get: (name: string) => ({
-        capabilities: async () => ({ swarm: false }),
+        capabilities: () => Promise.resolve({ swarm: false }),
         docker: {
           listContainers: async () => {
             if (name === 'shore') await shoreAnswered;

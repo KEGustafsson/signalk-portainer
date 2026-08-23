@@ -39,3 +39,29 @@ export function createClient(
     ...overrides,
   });
 }
+
+/**
+ * A parsed JSON body: any key, any JSON value, and specifically not `any`.
+ *
+ * supertest types `res.body` as `any`, and `Response.json()` resolves to `any`
+ * too, so every assertion reached through them is unchecked — the type-aware
+ * rules said so 135 times. This keeps the looseness a fixture needs while
+ * stopping `any` from spreading out of the response and into the test.
+ */
+export interface JsonBody {
+  [key: string]: JsonValue;
+}
+
+export type JsonValue = string | number | boolean | null | undefined | JsonValue[] | JsonBody;
+
+/**
+ * Reads a response body as JSON.
+ *
+ * The default is deliberately vague — most assertions only reach one key deep
+ * and gain nothing from a declared shape. Pass a type argument where the test
+ * indexes into the body, which vagueness cannot express: `asJson<{ instances:
+ * { reachable: boolean }[] }>(res.body)`.
+ */
+export function asJson<T = JsonBody>(value: unknown): T {
+  return value as T;
+}

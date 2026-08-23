@@ -42,7 +42,7 @@ describe('PortainerError.facadeStatus', () => {
 describe('PortainerError.fromResponse', () => {
   it('redacts and truncates the upstream body', async () => {
     const error = await PortainerError.fromResponse(
-      { status: 400, text: async () => `denied ptr_${'a'.repeat(600)}` },
+      { status: 400, text: () => Promise.resolve(`denied ptr_${'a'.repeat(600)}`) },
       'POST',
       '/api/stacks',
       'apiKey',
@@ -56,9 +56,9 @@ describe('PortainerError.fromResponse', () => {
     const error = await PortainerError.fromResponse(
       {
         status: 500,
-        text: async () => {
-          throw new Error('stream already consumed');
-        },
+        // The rejection an already-consumed body produces, which is what an
+        // async function throwing was standing in for.
+        text: () => Promise.reject(new Error('stream already consumed')),
       },
       'GET',
       '/x',
@@ -75,7 +75,8 @@ describe('PortainerError.fromResponse', () => {
     const error = await PortainerError.fromResponse(
       {
         status: 409,
-        text: async () => JSON.stringify({ message: 'a stack with the name nav already exists' }),
+        text: () =>
+          Promise.resolve(JSON.stringify({ message: 'a stack with the name nav already exists' })),
       },
       'POST',
       '/api/stacks/create/standalone/string',
@@ -91,11 +92,13 @@ describe('PortainerError.fromResponse', () => {
     const error = await PortainerError.fromResponse(
       {
         status: 500,
-        text: async () =>
-          JSON.stringify({
-            message: 'Unable to deploy stack',
-            details: 'yaml: line 5: did not find expected key',
-          }),
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({
+              message: 'Unable to deploy stack',
+              details: 'yaml: line 5: did not find expected key',
+            }),
+          ),
       },
       'PUT',
       '/api/stacks/3',
@@ -111,8 +114,10 @@ describe('PortainerError.fromResponse', () => {
     const error = await PortainerError.fromResponse(
       {
         status: 400,
-        text: async () =>
-          JSON.stringify({ message: 'invalid request', details: 'invalid request' }),
+        text: () =>
+          Promise.resolve(
+            JSON.stringify({ message: 'invalid request', details: 'invalid request' }),
+          ),
       },
       'PUT',
       '/api/stacks/3',
@@ -126,13 +131,13 @@ describe('PortainerError.fromResponse', () => {
     // A reverse proxy's HTML error page, and a JSON body truncated at 500
     // characters, are both unreadable as an explanation.
     const html = await PortainerError.fromResponse(
-      { status: 502, text: async () => '<html><body>502 Bad Gateway</body></html>' },
+      { status: 502, text: () => Promise.resolve('<html><body>502 Bad Gateway</body></html>') },
       'GET',
       '/api/stacks',
       'apiKey',
     );
     const truncated = await PortainerError.fromResponse(
-      { status: 500, text: async () => '{"message":"it broke while' },
+      { status: 500, text: () => Promise.resolve('{"message":"it broke while') },
       'GET',
       '/api/stacks',
       'apiKey',
@@ -144,7 +149,7 @@ describe('PortainerError.fromResponse', () => {
 
   it('leaves an empty body undefined rather than an empty string', async () => {
     const error = await PortainerError.fromResponse(
-      { status: 404, text: async () => '' },
+      { status: 404, text: () => Promise.resolve('') },
       'GET',
       '/x',
       'apiKey',

@@ -4,7 +4,7 @@ import type { MockAgent } from 'undici';
 import plugin from '../src/index';
 import type { SignalKApp } from '../src/signalk';
 import * as fixtures from './fixtures';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import { asJson, createMockAgent, restoreGlobalDispatcher } from './support';
 
 const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
   const statuses: string[] = [];
@@ -46,7 +46,7 @@ const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
             cb: (err: NodeJS.ErrnoException | null) => void,
           ) => {
             if (opts.saveFails) {
-              cb(new Error('read-only') as NodeJS.ErrnoException);
+              cb(new Error('read-only'));
               return;
             }
             saved.push(JSON.parse(JSON.stringify(configuration)) as object);
@@ -145,7 +145,7 @@ describe('plugin lifecycle', () => {
     expect(statuses.some((s) => s.includes('2.21.4'))).toBe(true);
     expect(statuses.some((s) => s.includes('local'))).toBe(true);
 
-    instance.stop();
+    await instance.stop();
     expect(statuses.at(-1)).toBe('Stopped');
   });
 
@@ -184,7 +184,7 @@ describe('plugin lifecycle', () => {
     expect(paths.map((entry) => entry.path)).toContain('system.docker.boat.status.reachable');
     expect(paths.some((entry) => entry.path.includes('.containers.'))).toBe(true);
 
-    instance.stop();
+    await instance.stop();
   });
 
   it('raises a Signal K alarm when a watched container is not running', async () => {
@@ -233,7 +233,7 @@ describe('plugin lifecycle', () => {
     const status = values.find((entry) => entry.path === 'notifications.system.docker.boat.status');
     expect(status?.value).toMatchObject({ state: 'normal' });
 
-    instance.stop();
+    await instance.stop();
   });
 
   it('raises no notifications at all when nothing is configured to be watched', async () => {
@@ -271,7 +271,7 @@ describe('plugin lifecycle', () => {
     );
     expect(values.some((entry) => entry.path.startsWith('notifications.'))).toBe(false);
 
-    instance.stop();
+    await instance.stop();
   });
 
   it('registers a PUT handler for each container it discovers', async () => {
@@ -305,7 +305,7 @@ describe('plugin lifecycle', () => {
     expect(puts.every((entry) => entry.path.endsWith('.state'))).toBe(true);
     expect(puts.every((entry) => entry.context === 'vessels.self')).toBe(true);
 
-    instance.stop();
+    await instance.stop();
   });
 
   it('registers PUT handlers with telemetry off, and none when control is off', async () => {
@@ -346,7 +346,7 @@ describe('plugin lifecycle', () => {
     expect(puts.length).toBeGreaterThan(0);
     expect(puts.every((entry) => entry.path.endsWith('.state'))).toBe(true);
 
-    instance.stop();
+    await instance.stop();
 
     // Control off is what removes them. Telemetry stays on here so the poller
     // definitely runs and definitely offers the keys: the handlers are absent
@@ -360,7 +360,7 @@ describe('plugin lifecycle', () => {
 
     expect(second.puts).toHaveLength(0);
 
-    other.stop();
+    await other.stop();
   });
 
   it('publishes nothing when telemetry is off', async () => {
@@ -401,7 +401,7 @@ describe('plugin lifecycle', () => {
     // value published.
     expect(puts.length).toBeGreaterThan(0);
     expect(deltas).toHaveLength(0);
-    instance.stop();
+    await instance.stop();
   });
 
   it('comes up even when Portainer is unreachable, and says why', async () => {
@@ -418,7 +418,7 @@ describe('plugin lifecycle', () => {
     await flush();
 
     expect(errors.join(' ')).toMatch(/No Portainer instance reachable/);
-    instance.stop();
+    await instance.stop();
   });
 
   it('redacts credentials before they reach any Signal K host callback', async () => {
@@ -442,7 +442,7 @@ describe('plugin lifecycle', () => {
 
     expect(errors.join(' ')).toMatch(/No Portainer instance reachable/);
     expect([...statuses, ...errors].join(' ')).not.toContain('ptr_boat');
-    instance.stop();
+    await instance.stop();
   });
 
   it('does not let an in-flight health check overwrite the stopped status', async () => {
@@ -461,7 +461,7 @@ describe('plugin lifecycle', () => {
     const instance = plugin(app);
 
     instance.start(validOptions, noopRestart);
-    instance.stop();
+    await instance.stop();
     await flush();
     await flush();
 
@@ -500,7 +500,7 @@ describe('plugin lifecycle', () => {
 
     expect(errors.join(' ')).toMatch(/1\/2 instances reachable/);
     expect(errors.join(' ')).toMatch(/shore/);
-    instance.stop();
+    await instance.stop();
   });
 
   it('reports a swarm-enabled environment in the connected status', async () => {
@@ -521,7 +521,7 @@ describe('plugin lifecycle', () => {
     await flush();
 
     expect(statuses.some((s) => s.includes('swarm'))).toBe(true);
-    instance.stop();
+    await instance.stop();
   });
 
   it('reports an unexpected start failure without throwing', () => {
@@ -529,9 +529,7 @@ describe('plugin lifecycle', () => {
     const instance = plugin(app);
 
     // A non-ConfigError thrown out of normalizeConfig's input handling.
-    expect(() =>
-      instance.start({ instances: 'not-an-array' } as object, noopRestart),
-    ).not.toThrow();
+    expect(() => instance.start({ instances: 'not-an-array' }, noopRestart)).not.toThrow();
     expect(errors.length).toBeGreaterThan(0);
   });
 
@@ -575,7 +573,7 @@ describe('plugin lifecycle', () => {
 
     instance.start(validOptions, noopRestart);
     for (let turn = 0; turn < 4; turn += 1) await flush();
-    instance.stop();
+    await instance.stop();
 
     instance.start(validOptions, noopRestart);
     for (let turn = 0; turn < 4; turn += 1) await flush();
@@ -584,7 +582,7 @@ describe('plugin lifecycle', () => {
     // status on the "Connected" its own start probe had just written.
     const reported = pluginErrors.filter((line) => /No Portainer instance reachable/.test(line));
     expect(reported).toHaveLength(2);
-    instance.stop();
+    await instance.stop();
   });
 
   it('says which instance it had to drop, and runs on the rest', async () => {
@@ -631,7 +629,7 @@ describe('plugin lifecycle', () => {
     expect(deltas.length).toBeGreaterThan(0);
     // And the operator is told, in every status line, which one is missing.
     expect([...statuses, ...errors].join(' ')).toMatch(/has no address/);
-    instance.stop();
+    await instance.stop();
   });
 
   it('undoes the whole of a start that failed half way through', async () => {
@@ -667,7 +665,7 @@ describe('plugin lifecycle', () => {
 
     instance.start(validOptions, noopRestart);
     expect(debug.join(' ')).not.toContain('ptr_boat');
-    instance.stop();
+    void instance.stop();
   });
 });
 
@@ -694,7 +692,7 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
 
     expect(sockets.map((socket) => socket.path)).toEqual(['/console']);
-    instance.stop();
+    void instance.stop();
     expect(sockets[0]?.closed).toBe(true);
   });
 
@@ -708,7 +706,7 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
 
     expect(debug.join('\n')).toContain('cannot serve a plugin WebSocket');
-    instance.stop();
+    void instance.stop();
   });
 
   it('is not registered at all while control is disabled', () => {
@@ -719,7 +717,7 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: false } }, noopRestart);
 
     expect(sockets).toHaveLength(0);
-    instance.stop();
+    void instance.stop();
   });
 });
 
@@ -775,12 +773,12 @@ describe('saving the environment the panel picked', () => {
     const res = await request(server).put('/api/environment').send({ id: 4 });
 
     expect(res.status).toBe(200);
-    expect(res.body.persisted).toBe(true);
+    expect(asJson(res.body).persisted).toBe(true);
     expect(harness.saved).toHaveLength(1);
     expect(harness.saved[0]).toMatchObject({
       instances: [{ name: 'boat', environmentId: 4 }],
     });
-    instance.stop();
+    await instance.stop();
   });
 
   it('leaves the rest of the configuration alone', async () => {
@@ -816,7 +814,7 @@ describe('saving the environment the panel picked', () => {
       ],
       telemetry: { level: 'full', intervalSeconds: 45 },
     });
-    instance.stop();
+    await instance.stop();
   });
 
   it('clears a stale environment name, which the id would have overruled anyway', async () => {
@@ -833,7 +831,7 @@ describe('saving the environment the panel picked', () => {
     expect(harness.saved[0]).toMatchObject({
       instances: [{ environmentId: 4, environmentName: '' }],
     });
-    instance.stop();
+    await instance.stop();
   });
 
   it('selects anyway on a server that cannot save plugin options', async () => {
@@ -844,9 +842,9 @@ describe('saving the environment the panel picked', () => {
     const res = await request(server).put('/api/environment').send({ id: 4 });
 
     expect(res.status).toBe(200);
-    expect(res.body.selected).toBe(4);
-    expect(res.body.persisted).toBe(false);
-    instance.stop();
+    expect(asJson(res.body).selected).toBe(4);
+    expect(asJson(res.body).persisted).toBe(false);
+    await instance.stop();
   });
 
   it('reports a save that failed without losing the selection', async () => {
@@ -856,9 +854,9 @@ describe('saving the environment the panel picked', () => {
 
     const res = await request(server).put('/api/environment').send({ id: 4 });
 
-    expect(res.body.selected).toBe(4);
-    expect(res.body.persisted).toBe(false);
-    expect(res.body.warning).toContain('will not survive a restart');
-    instance.stop();
+    expect(asJson(res.body).selected).toBe(4);
+    expect(asJson(res.body).persisted).toBe(false);
+    expect(asJson(res.body).warning).toContain('will not survive a restart');
+    await instance.stop();
   });
 });
