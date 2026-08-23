@@ -8,14 +8,12 @@
     "displayName": "Portainer",
     "appIcon": "logo.svg",
     "screenshots": [
-      {
-        "url": "https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-containers.png",
-        "caption": "The Containers tab: every container with its state, image, published ports and per-row actions"
-      },
-      {
-        "url": "https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/plugin-config.png",
-        "caption": "The configuration page: server name, address, sign-in method and access token, with the connection status above them"
-      }
+      "docs/images/panel-containers.png",
+      "docs/images/panel-stacks.png",
+      "docs/images/panel-logs.png",
+      "docs/images/panel-console.png",
+      "docs/images/panel-stack-editor.png",
+      "docs/images/plugin-config.png"
     ]
   },
   "keywords": [
@@ -28,12 +26,13 @@
   "scripts": {
     "build": "npm run build:plugin && npm run build:webapp",
     "clean": "node -e \"for (const d of ['dist','coverage','public']) require('fs').rmSync(d, { recursive: true, force: true })\"",
-    "lint": "eslint src test",
-    "lint:fix": "eslint --fix src test",
-    "format": "prettier --write \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\"",
-    "format:check": "prettier --check \"src/**/*.{ts,tsx}\" \"test/**/*.{ts,tsx}\"",
+    "lint": "eslint .",
+    "lint:fix": "eslint --fix .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
     "test": "jest --coverage",
     "test:watch": "jest --watch",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run clean && npm run lint && npm run format:check && npm run test && npm run build",
     "build:plugin": "tsc -p tsconfig.build.json",
     "build:webapp": "webpack --config webpack.config.js"
@@ -57,11 +56,16 @@
     "public",
     "README.md",
     "CHANGELOG.md",
-    "LICENSE"
+    "LICENSE",
+    "docs/images/panel-containers.png",
+    "docs/images/panel-stacks.png",
+    "docs/images/panel-logs.png",
+    "docs/images/panel-console.png",
+    "docs/images/panel-stack-editor.png",
+    "docs/images/plugin-config.png"
   ],
   "dependencies": {
-    "@xterm/addon-fit": "^0.11.0",
-    "@xterm/xterm": "^6.0.0",
+    "body-parser": "^1.20.6",
     "undici": "^7.16.0",
     "ws": "^8.18.0"
   },
@@ -70,12 +74,16 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.2",
     "@testing-library/user-event": "^14.6.6",
-    "@types/express": "^5.0.0",
+    "@types/body-parser": "^1.19.6",
+    "@types/express": "^4.17.21",
     "@types/jest": "^29.5.14",
+    "@types/node": "^22",
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@types/supertest": "^6.0.2",
     "@types/ws": "^8.5.13",
+    "@xterm/addon-fit": "^0.11.0",
+    "@xterm/xterm": "^6.0.0",
     "eslint": "^9.25.0",
     "eslint-config-prettier": "^10.1.2",
     "express": "^4.21.2",

@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto';
-import express, { type NextFunction, type Request, type Response, type Router } from 'express';
+import bodyParser from 'body-parser';
+import type { NextFunction, Request, Response, Router } from 'express';
 import type {
   PortainerClient,
   StackEnvVar,
@@ -230,15 +231,10 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.get(
     '/api/stacks/:id/file',
     withClient(deps, async (req, client) => {
-      const id = Number(req.params.id);
-      if (!Number.isInteger(id)) {
-        throw new PortainerError({
-          status: 400,
-          method: 'GET',
-          path: '/api/stacks/:id/file',
-          message: `Stack id "${req.params.id}" is not a number`,
-        });
-      }
+      // The same check every other stack route makes. This route used to carry
+      // its own copy, and the two had drifted: it accepted 0 and negative ids
+      // that `stackId()` refuses.
+      const id = stackId(req, 'GET', '/api/stacks/:id/file');
       return { id, content: await client.stackFile(id) };
     }),
   );
@@ -250,7 +246,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
    * unlimited: this is a compose file, not an upload endpoint, and an
    * unbounded body is a way to make Signal K run out of memory.
    */
-  const parseJson = express.json({ limit: '512kb' });
+  const parseJson = bodyParser.json({ limit: '512kb' });
   const body = (req: Request, res: Response, next: (cause?: unknown) => void): void => {
     parseJson(req, res, (cause?: unknown) => {
       if (!cause) {
@@ -286,8 +282,12 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     body,
     withClient(deps, async (req, client) => {
       const body = req.body as { id?: unknown } | undefined;
-      const id = Number(body?.id);
-      if (!Number.isInteger(id)) {
+      const id = body?.id;
+      // A number, not something `Number()` is willing to turn into one: that
+      // coercion read `true` as environment 1 and `null` as environment 0, so
+      // a picker sending the wrong shape selected a real Docker host instead
+      // of being told what was wrong.
+      if (typeof id !== 'number' || !Number.isInteger(id)) {
         throw new PortainerError({
           status: 400,
           method: 'PUT',
@@ -556,6 +556,11 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     '/api/containers/:id/exec',
     body,
     withClient(deps, async (req, client) => {
+      // Before the tickets check, not after: tickets only exist while control
+      // is enabled, so asking about them first blamed the Signal K server for
+      // a switch in the plugin configuration — and contradicted /api/control,
+      // which gets the same distinction right.
+      requireControlEnabled(deps);
       const tickets = deps.execTickets;
       if (!tickets) {
         throw new PolicyError(
@@ -565,7 +570,6 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       }
 
       const id = String(req.params.id);
-      requireControlEnabled(deps);
       // A shell inside the Signal K container can stop Signal K as surely as
       // the stop button can, and with less to say about it afterwards.
       const canonical = await requireNotSelf(deps, client, id, 'open a shell in');
@@ -656,25 +660,31 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
 
       requireControlEnabled(deps);
       const canonical = await requireNotSelf(deps, client, id, action);
+      // The id the guard cleared, not the reference the caller sent. Docker
+      // resolves a name at the moment it is used, so acting on the raw
+      // reference is a second resolution — and a container recreated under the
+      // same name in between would be a different container from the one
+      // self-protection just inspected.
+      const target = canonical ?? id;
 
       switch (action) {
         case 'start':
-          await client.docker.startContainer(id);
+          await client.docker.startContainer(target);
           break;
         case 'stop':
-          await client.docker.stopContainer(id);
+          await client.docker.stopContainer(target);
           break;
         case 'restart':
-          await client.docker.restartContainer(id);
+          await client.docker.restartContainer(target);
           break;
         case 'kill':
-          await client.docker.killContainer(id);
+          await client.docker.killContainer(target);
           break;
         case 'pause':
-          await client.docker.pauseContainer(id);
+          await client.docker.pauseContainer(target);
           break;
         case 'unpause':
-          await client.docker.unpauseContainer(id);
+          await client.docker.unpauseContainer(target);
           break;
       }
 
@@ -694,7 +704,9 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       requireDestructiveAllowed(deps);
       const canonical = await requireNotSelf(deps, client, id, 'remove');
 
-      await client.docker.removeContainer(id, { force, removeVolumes });
+      // The id the guard cleared, for the same reason the lifecycle routes use
+      // it: the reference is resolved once, and acted on once.
+      await client.docker.removeContainer(canonical ?? id, { force, removeVolumes });
       audit(
         deps,
         req,
@@ -784,8 +796,10 @@ async function streamLogs(
     // is a 404 rather than a 200 stream carrying one error event — which an
     // EventSource would answer by reconnecting into a loop.
     const frames = await client.docker.logStream(id, controller.signal, logOptions(req));
-    // The browser may have left while Portainer was answering.
-    if (req.destroyed || res.writableEnded) return;
+    // The browser may have left while Portainer was answering. `destroyed` is
+    // the flag that says so: `writableEnded` only becomes true once this
+    // function itself has called end(), so it was never true here.
+    if (req.destroyed || res.destroyed) return;
 
     // Headers first: an SSE client waits for them before it considers itself
     // connected, and until they are sent an error can still become a status.
@@ -803,39 +817,81 @@ async function streamLogs(
     // what proxies and NAT tables reap first. This comment frame costs two
     // bytes and keeps the connection observably alive; EventSource ignores it.
     keepalive = setInterval(() => {
-      if (!res.writableEnded) res.write(':\n\n');
+      // A departed client shows up as a destroyed socket, not as an ended
+      // writable: without this the keepalive kept firing into a dead socket
+      // for up to a full interval after the tab closed.
+      if (!res.destroyed) res.write(':\n\n');
     }, keepaliveMs);
     keepalive.unref?.();
 
     for await (const frame of frames) {
-      if (res.writableEnded) break;
+      if (res.destroyed) break;
       for (const line of toLines([frame])) {
         // Redacted like every other response body. The one-shot read goes
         // through `handle()`, which does this; the stream bypasses it, and a
         // container printing a token would otherwise have it masked on one
         // route and passed through verbatim on the other.
-        res.write(`data: ${JSON.stringify(redactValue(line))}\n\n`);
+        const written = res.write(`data: ${JSON.stringify(redactValue(line))}\n\n`);
+        // `write` returning false means the socket cannot take any more: a
+        // chatty container over a slow link. Ignoring it — which is what
+        // discarding this value did — accumulates the whole difference in the
+        // Node heap, unbounded, because the stream ceiling limits how many
+        // streams are open and not how many bytes each one holds. On a
+        // Raspberry Pi that is what OOM-kills Signal K.
+        if (!written) await drained(res, controller.signal);
+        if (res.destroyed) break;
       }
     }
     // Docker ended it: a container that stopped, or a non-follow log that ran
     // out. Say so rather than letting the browser reconnect into a loop.
-    res.write('event: end\ndata: {}\n\n');
-    res.end();
+    if (!res.destroyed) {
+      res.write('event: end\ndata: {}\n\n');
+      res.end();
+    }
   } catch (cause) {
     const failure = describeStreamFailure(cause);
     deps.log(`log stream ${instance}/${id}: ${failure.error}`);
+    // Nothing to tell a socket that has gone, and writing to it throws.
+    if (res.destroyed) return;
     if (res.headersSent) {
       // Mid-stream: the status is long gone, so the failure travels as an
-      // event the browser can show beside the lines it already has.
-      res.write(`event: error\ndata: ${JSON.stringify(failure)}\n\n`);
+      // event the browser can show beside the lines it already has. Redacted
+      // like the data lines above: these messages interpolate what Portainer
+      // and the guards said, and one route masking a token while the other
+      // does not is the same leak.
+      res.write(`event: error\ndata: ${JSON.stringify(redactValue(failure))}\n\n`);
       res.end();
     } else {
-      res.status(failure.status).json({ error: failure.error, hint: failure.hint });
+      res.status(failure.status).json(redactValue({ error: failure.error, hint: failure.hint }));
     }
   } finally {
     if (keepalive) clearInterval(keepalive);
     release?.();
   }
+}
+
+/**
+ * Waits until the response socket can take more, or until there is nobody left
+ * to write to.
+ *
+ * The abort signal and the socket's own close are raced against 'drain' on
+ * purpose: 'drain' never arrives on a socket whose reader has gone, so waiting
+ * on it alone would leave this await — and the upstream log stream behind it —
+ * pending for the life of the process.
+ */
+function drained(res: Response, signal: AbortSignal): Promise<void> {
+  if (res.destroyed || signal.aborted) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    const done = (): void => {
+      res.off('drain', done);
+      res.off('close', done);
+      signal.removeEventListener('abort', done);
+      resolve();
+    };
+    res.on('drain', done);
+    res.on('close', done);
+    signal.addEventListener('abort', done, { once: true });
+  });
 }
 
 function describeStreamFailure(cause: unknown): {
@@ -844,6 +900,11 @@ function describeStreamFailure(cause: unknown): {
   hint?: string;
 } {
   if (cause instanceof UnknownInstanceError) return { status: 404, error: cause.message };
+  // No policy guard refuses a log stream today, but this route's own 403 would
+  // otherwise fall through to the 500 below the moment one is added.
+  if (cause instanceof PolicyError) {
+    return { status: cause.status, error: cause.message, hint: cause.hint };
+  }
   if (cause instanceof StreamLimitError) {
     return { status: cause.status, error: cause.message, hint: cause.hint };
   }
@@ -891,13 +952,19 @@ function isStackAction(value: string): value is StackAction {
 
 /** The stack id in the path, or a 400 that says what was wrong with it. */
 function stackId(req: Request, method: string, path: string): number {
-  const id = Number(req.params.id);
-  if (Number.isInteger(id) && id > 0) return id;
+  const raw = String(req.params.id);
+  // Digits, matched as text, before `Number()` sees it. `Number()` reads other
+  // notations as numbers too: "0x3" becomes 3 and "1e1" becomes 10, so a
+  // request naming one stack would stop a different one.
+  if (/^\d+$/.test(raw)) {
+    const id = Number(raw);
+    if (Number.isInteger(id) && id > 0) return id;
+  }
   throw new PortainerError({
     status: 400,
     method,
     path,
-    message: `Stack id "${String(req.params.id)}" is not a number`,
+    message: `Stack id "${raw}" is not a number`,
   });
 }
 
@@ -1192,12 +1259,17 @@ async function requireNotSelf(
  * one outcome this guard exists to prevent. A missing container fails the
  * inspect with the same 404 the mutation itself would have returned.
  */
-async function resolveSelfReference(
-  client: PortainerClient,
-  reference: string,
-): Promise<string | undefined> {
+async function resolveSelfReference(client: PortainerClient, reference: string): Promise<string> {
   const inspected = await client.docker.inspectContainer(reference);
-  return typeof inspected.Id === 'string' && inspected.Id.length > 0 ? inspected.Id : undefined;
+  if (typeof inspected.Id === 'string' && inspected.Id.length > 0) return inspected.Id;
+  // A successful inspect with no Id in it is not "this is some other
+  // container" — it is not knowing, and this guard exists precisely to refuse
+  // when it cannot tell. A proxy or an agent answering `200 {}` would
+  // otherwise open self-protection entirely.
+  throw new PolicyError(
+    `Refusing to act on ${reference}: Docker did not say which container that is`,
+    'the inspect answered without an Id, so the plugin cannot tell it apart from the container running Signal K',
+  );
 }
 
 function selfRefusal(action: string): PolicyError {
@@ -1221,6 +1293,20 @@ async function requireSwarm(client: PortainerClient, path: string): Promise<void
     message: 'This environment is not a Swarm',
     hint: 'the Docker daemon is not an active swarm member, so there are no services or nodes',
   });
+}
+
+/**
+ * The failure without the hint already folded into it.
+ *
+ * PortainerError puts the hint in `message` so one log line carries both, and
+ * this response sends `hint` as its own field — so an untrimmed message made
+ * every error the panel shows say the same thing twice.
+ */
+function withoutHint(cause: PortainerError): string {
+  const suffix = cause.hint ? ` — ${cause.hint}` : '';
+  return suffix && cause.message.endsWith(suffix)
+    ? cause.message.slice(0, -suffix.length)
+    : cause.message;
 }
 
 type RegistryHandler = (
@@ -1256,16 +1342,28 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
         // Refusals are logged as well as accepted mutations: an operator whose
         // button did nothing should find the reason in the same place.
         deps.log(`${req.method} ${req.path}: refused — ${cause.message}`);
-        res.status(cause.status).json({ error: cause.message, hint: cause.hint });
+        // Redacted like every other branch: these messages interpolate
+        // upstream data — a stack name, a container reference — and a refusal
+        // was the one answer that reached the browser unmasked.
+        res.status(cause.status).json(redactValue({ error: cause.message, hint: cause.hint }));
         return;
       }
       if (cause instanceof PortainerError) {
-        deps.log(`${req.method} ${req.path}: ${cause.message}`);
+        // Portainer's own words about the failure go in the log line too: they
+        // are the difference between "failed with 400" and knowing which field
+        // it objected to.
+        deps.log(
+          `${req.method} ${req.path}: ${cause.message}${cause.body ? ` — ${cause.body}` : ''}`,
+        );
         res.status(cause.facadeStatus).json(
           redactValue({
-            error: cause.message,
+            error: withoutHint(cause),
             portainerStatus: cause.status,
             hint: cause.hint,
+            // What Portainer said, already redacted and capped at 500 chars by
+            // PortainerError. Without it the panel can only ever show this
+            // plugin's paraphrase of a failure Portainer explained.
+            ...(cause.body ? { detail: cause.body } : {}),
           }),
         );
         return;
