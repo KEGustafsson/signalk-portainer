@@ -1,0 +1,14 @@
+# `prettier --check .` walks the whole tree now that the format scripts are no
+# longer limited to src/ and test/, so anything not ours to format has to be
+# named here. Everything below is generated: dist/ and public/ are build
+# output, coverage/ is a test artefact, and package-lock.json is written by npm
+# — its formatting is npm's to choose, not ours.
+#
+# Nothing else belongs here. Prettier already skips extensions it has no
+# parser for (the .png screenshots, assets/logo.svg), so listing those would
+# only be config that never does anything.
+node_modules/
+dist/
+public/
+coverage/
+package-lock.json

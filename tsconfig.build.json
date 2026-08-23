@@ -2,7 +2,16 @@
   "extends": "./tsconfig.json",
   "compilerOptions": {
     "rootDir": "src",
-    "outDir": "dist"
+    "outDir": "dist",
+    // The plugin half runs in the Signal K server's Node process, where none
+    // of DOM exists. The root config keeps DOM because ts-jest and the webapp
+    // both need it; inheriting it here would let `document` or `localStorage`
+    // typecheck in a server file and then ReferenceError on the boat.
+    "lib": ["ES2022"],
+    // Without this every package in node_modules/@types is in scope for server
+    // code — including @types/jest, which would make `describe`/`expect`
+    // resolve in src/ and ship as a dangling reference.
+    "types": ["node"]
   },
   "include": ["src/**/*.ts"],
   "exclude": ["src/webapp/**"]

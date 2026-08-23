@@ -14,6 +14,19 @@
 
 name: SignalK Plugin CI
 
+# The callee declares `contents: read` for itself, but that is the callee's
+# choice and can change under us with the pin below. Declaring it here caps
+# what the token can ever be, for the local jobs as well.
+permissions:
+  contents: read
+
+# One run per ref. The matrix is two Node versions plus the SignalK integration
+# job; pushing three times to a PR in a minute otherwise queues three full
+# copies of it, and only the last one's result is ever looked at.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 on:
   # Only main on push: pull_request already covers branch pushes, and running
   # both made every PR execute the whole matrix twice.
@@ -50,7 +63,7 @@ jobs:
   # ── Automatic runs (push / pull request) ──────────────────
   plugin-ci:
     if: ${{ github.event_name != 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@9edfbf958eb7addb69140a605b4d21a0df249fdc # SignalK/signalk-server master @ 2026-08-23
     with:
       # `npm test` is `jest --coverage` and enforces the 80% threshold.
       # Passing it as coverage-command puts the summary in the job output.
@@ -73,7 +86,7 @@ jobs:
   # ── Manual runs (workflow_dispatch with custom inputs) ────
   plugin-ci-manual:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@master
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@9edfbf958eb7addb69140a605b4d21a0df249fdc # SignalK/signalk-server master @ 2026-08-23
     with:
       test-command: npm test
       coverage-command: npm test
@@ -83,3 +96,64 @@ jobs:
       enable-armv7: ${{ inputs.enable-armv7 }}
       enable-signalk-integration: ${{ inputs.enable-signalk-integration }}
       signalk-server-versions: ${{ inputs.signalk-server-versions }}
+
+  # ── Lint, as a gate ──────────────────────────────────────
+  #
+  # The reusable workflow runs `npm run lint --if-present` with
+  # `continue-on-error: true`, so no lint finding can fail a PR there — this
+  # repo's `no-explicit-any: error` was being enforced only by `prepublishOnly`,
+  # on whichever machine happened to publish. This job is the gate.
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      - run: npm run lint
+
+  # ── The published tarball, on its own dependencies ───────
+  #
+  # This is the check that would have caught 0.1.0, which installed and did not
+  # load: `express` was a devDependency the plugin imported at runtime. The
+  # reusable workflow's integration test installs the plugin beside
+  # signalk-server, which has express of its own, so npm hoisted it and the
+  # missing dependency resolved anyway. The Signal K registry installs into a
+  # clean prefix and reported `"loads": false`.
+  #
+  # So: pack, install the tarball into an empty directory with --omit=dev, and
+  # require it. Nothing else is on disk to lend it a module.
+  clean-room-install:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22'
+          cache: npm
+      - run: npm ci
+      # `npm pack` runs `prepack`, which builds — the tarball is the real one.
+      - name: Pack the tarball
+        # `prepack` builds and prints as it goes, so only the last line of the
+        # output is the file name.
+        run: echo "TARBALL=$PWD/$(npm pack --silent | tail -n 1)" >> "$GITHUB_ENV"
+      - name: Install it into an empty directory and require it
+        run: |
+          set -euo pipefail
+          # Outside the checkout: node resolves a bare specifier from every
+          # ancestor node_modules, and the repo's own devDependencies sit one
+          # level up from anywhere inside it. `$RUNNER_TEMP` has no
+          # node_modules above it, which is the whole point of the test.
+          room=$(mktemp -d "$RUNNER_TEMP/cleanroom.XXXXXX")
+          cd "$room"
+          npm init -y >/dev/null
+          npm install --omit=dev --no-audit --no-fund "$TARBALL"
+          node -e "
+            const plugin = require('signalk-portainer');
+            if (typeof plugin !== 'function') {
+              throw new Error('the plugin entry point is not a function: ' + typeof plugin);
+            }
+            console.log('signalk-portainer loaded from a clean install');
+          "

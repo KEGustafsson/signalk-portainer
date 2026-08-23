@@ -8,6 +8,10 @@
  * in this directory for what has to be running first.
  *
  * Usage: node tools/screenshots/capture.mjs [--server http://127.0.0.1:3000] [--out docs/images]
+ *
+ * This is not a read-only tool: it POSTs to the plugin's own configuration
+ * endpoint to stage each shot. A --server that is not this machine therefore
+ * has to be confirmed with --allow-remote-writes. See `assertLocalServer`.
  */
 
 import { mkdir } from 'node:fs/promises';
@@ -18,8 +22,53 @@ const option = (name, fallback) => {
   const index = args.indexOf(`--${name}`);
   return index === -1 ? fallback : args[index + 1];
 };
+const flag = (name) => args.includes(`--${name}`);
+
+/**
+ * Whether a hostname names this machine.
+ *
+ * `127.0.0.0/8` in full rather than just `127.0.0.1`, because a Signal K server
+ * bound to a second loopback address is still this machine.
+ */
+const isLoopback = (hostname) => {
+  const host = hostname.toLowerCase();
+  if (host === 'localhost' || host.endsWith('.localhost')) return true;
+  if (host === '[::1]' || host === '::1') return true;
+  return /^127\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(host);
+};
+
+/**
+ * Refuses to drive a Signal K server that is not this machine.
+ *
+ * The capture is not a spectator: `savePluginOptions` POSTs to the plugin's
+ * configuration endpoint, and `clearEnvironmentChoice` blanks the environment
+ * off the first configured Portainer to photograph the first-run state. Pointed
+ * at a boat — and this tool's own documented example used to point at
+ * `http://pi.local:3000` — that silently overwrites the options someone is
+ * running on, and restarts the plugin twenty times over. Loopback is the only
+ * address where that is obviously the operator's own throwaway server, so
+ * anything else has to be asked for explicitly.
+ */
+const assertLocalServer = (server) => {
+  let hostname;
+  try {
+    ({ hostname } = new URL(server));
+  } catch {
+    throw new Error(`--server is not a URL: ${server}`);
+  }
+  if (isLoopback(hostname) || flag('allow-remote-writes')) return;
+  throw new Error(
+    `refusing to capture against ${hostname}: this tool writes to the server it ` +
+      `photographs — it saves the plugin's configuration and clears the chosen ` +
+      `environment off the first Portainer, then restarts the plugin. Run it against ` +
+      `a throwaway Signal K server on loopback (the default, http://127.0.0.1:3000). ` +
+      `If ${hostname} really is a throwaway server and losing its plugin options is ` +
+      `acceptable, pass --allow-remote-writes.`,
+  );
+};
 
 const SERVER = option('server', 'http://127.0.0.1:3000');
+assertLocalServer(SERVER);
 const OUT = option('out', 'docs/images');
 const PANEL = `${SERVER}/admin/#/e/signalk_portainer`;
 const CONFIG = `${SERVER}/admin/#/apps/configuration/signalk-portainer`;

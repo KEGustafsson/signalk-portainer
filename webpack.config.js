@@ -45,6 +45,16 @@ module.exports = {
     path: path.resolve(__dirname, 'public'),
     publicPath: 'auto',
     clean: true,
+    // Chunk names default to the module id, so a lazy chunk emits as `854.js`.
+    // Those ids are derived from the module graph: a later release that adds or
+    // reorders a module can hand different code the same file name, and a
+    // browser still holding the old `854.js` will run it against the new
+    // container. The content hash makes a changed chunk a different URL.
+    //
+    // Only the chunks: `remoteEntry.js` is named explicitly by
+    // ModuleFederationPlugin below and has to keep its fixed name, because the
+    // admin UI loads it with a <script> tag built from the package name.
+    chunkFilename: '[name].[contenthash].js',
   },
   resolve: {
     extensions: ['.tsx', '.ts', '.js'],
