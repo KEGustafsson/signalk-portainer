@@ -14,9 +14,10 @@ port, TLS settings, credentials and environment.
 > **Status: M6b — the console in the panel.** The last milestone in
 > [`docs/plan.md`](docs/plan.md): a terminal on the Containers tab, on top of
 > the relay M6a built. CI installs the plugin into a real Signal K server and
-> checks that it loads and starts, but nothing here has been driven by a person
-> through the admin UI or pointed at a real Portainer; see [What has and has not
-> been verified](#what-has-and-has-not-been-verified).
+> checks that it loads and starts, and the screenshots below are the panel
+> running in a real admin UI — but against a fixture Portainer, and nothing here
+> has been pointed at a real one; see [What has and has not been
+> verified](#what-has-and-has-not-been-verified).
 
 ## Documents
 
@@ -40,6 +41,22 @@ state into Signal K paths under `system.docker.<instance>.*`, watchdog
 notifications raising a Signal K alarm when a container that should be running
 is not, and PUT handlers so any Signal K client can start or stop a container.
 
+## What it looks like
+
+![The Containers tab of the Portainer panel, embedded in the Signal K admin UI: six containers with their state, image, published ports and per-row actions](docs/images/panel-containers.png)
+
+The panel, inside the Signal K admin UI, on a boat running six containers. One
+is stopped and one is stuck restarting; Remove is disabled on every row because
+destructive operations are off, and the tooltip on a disabled button names the
+setting that would enable it.
+
+> Every screenshot on this page is a capture of the real plugin in a real Signal
+> K admin UI — but the Portainer behind it is a fixture that answers the API as
+> documented, not a real one. How they were taken, and how to retake them, is in
+> [`tools/screenshots/`](tools/screenshots/README.md); what that does and does
+> not establish is in [What has and has not been
+> verified](#what-has-and-has-not-been-verified).
+
 ## Installing it
 
 > Not yet published to npm, and not yet run against a real Portainer. Read
@@ -61,6 +78,8 @@ Then restart Signal K and enable **Portainer** under Server → Plugin Config.
 
 Everything is configured from the plugin's own page in the admin UI. The
 essentials:
+
+![The plugin's configuration page in the admin UI, its status line reading "Connected: boat 2.21.4 (boat); shore 2.21.4 (nas)" above the first instance's name, protocol, host and port fields](docs/images/plugin-config.png)
 
 1. **Add an instance.** Give it a `name` — it is path-safe and renaming it
    moves that instance's Signal K paths — then the `host` and `port` Portainer
@@ -96,6 +115,8 @@ essentials:
    interval. Add a watchdog entry for any container whose absence
    should raise a Signal K alarm.
 
+   ![The lower half of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three control switches under "Control", and a watchdog entry naming a container and an instance](docs/images/plugin-control.png)
+
 ## What works today (M6b)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
@@ -106,6 +127,9 @@ essentials:
   tables for environments, containers, stacks, images, volumes and networks —
   plus services and nodes when the environment is a Swarm. It polls every 10s
   and surfaces facade errors with their hint rather than an empty table.
+
+  ![The Images tab: repository tags, short image ids, sizes and ages](docs/images/panel-images.png)
+
 - **Container lifecycle** — start, stop, restart, kill and remove, each behind
   the guards below, from the API and from buttons on the Containers tab.
   Everything except starting asks first, in a dialog that names the container
@@ -113,6 +137,9 @@ essentials:
   labelled as such and its buttons are disabled. A button the configuration
   does not allow is disabled with the setting to change as its tooltip, rather
   than left to fail as a 403 on click.
+
+  ![The confirmation dialog over the Containers table, headed "Stop mosquitto?", naming the container and its short id and saying "Its services stop until it is started again"](docs/images/panel-confirm.png)
+
 - **Signal K deltas** — container state published under
   `system.docker.<instance>.*` on a configurable interval, with metadata so
   dashboards render labelled values rather than bare numbers. How much is
@@ -127,6 +154,8 @@ essentials:
   `health` is the default: it is what a dashboard and the watchdog need, without
   carrying an image name and a container id for every container through the
   delta stream and the logs on every poll.
+
+  ![Signal K's own data browser, filtered to "docker": watchdog notifications reading NORMAL, then each container's state and health under system.docker.boat.containers, all sourced from signalk-portainer](docs/images/signalk-paths.png)
 
 - **Watchdog alarms** — list the containers that must be running, and one that
   is not raises a standard Signal K notification, so the chartplotter beeps at
@@ -152,6 +181,8 @@ essentials:
   Every way of leaving — closing the viewer, turning Follow off, switching
   instance, or the container stopping — closes the stream, because one left
   open holds a server slot until the cap refuses the next viewer.
+
+  ![The log viewer over the panel, following a running container: line and history selectors, Timestamps, Follow, stderr-only and Wrap toggles, "Live · 21 lines" in the corner, and stderr lines coloured apart from the rest](docs/images/panel-logs.png)
 
 - **Container logs**, one-shot or live. A container started without a TTY has
   its stdout and stderr multiplexed into one framed stream; the plugin demuxes
@@ -229,6 +260,8 @@ essentials:
   sequences from the first prompt onwards, and anything full-screen — `top`,
   `vi`, `less` — would render as garbage.
 
+  ![The console dialog: a shell selector reading /bin/sh, "Connected" in the corner, and a terminal holding the output of uname, ls and df run in the container](docs/images/panel-console.png)
+
 - **A stacks editor in the panel.** Each row offers what applies to it: a
   running stack is stopped and a stopped one started, never both; Redeploy
   appears only for a stack that has a repository. Edit opens the compose file
@@ -241,6 +274,10 @@ essentials:
   choice. A failed deploy leaves the editor open with the file still in it,
   because an error message asking the operator to try again should not also
   throw away what they wrote.
+
+  ![The Stacks tab: three stacks with their status, type and source — one from a git repository, which is the one offering Redeploy](docs/images/panel-stacks.png)
+
+  ![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](docs/images/panel-stack-editor.png)
 
 - **Stack control** — start, stop, update, redeploy, create and delete, behind
   the same guards container lifecycle uses. An update sends the compose file
@@ -405,7 +442,7 @@ every container being down.
 Worth being explicit about, because the milestone plan is now complete and it
 would be easy to read that as "finished".
 
-**Verified.** 739 unit tests, no network required, covering every module in
+**Verified.** 759 unit tests, no network required, covering every module in
 `src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
 tests assert what the plugin _sent_ as well as what it did with the reply, so
 the request shapes match Portainer's documented API. The Signal K plugin
@@ -414,16 +451,29 @@ contract — entry point, schema, start/stop lifecycle, no deprecated server API
 Linux arm64, macOS and Windows, which also installs the plugin into a real
 Signal K server and confirms it loads and starts.
 
-**Not verified.** None of it has been run against a real Portainer or driven by
-a person through a real admin UI. The CI check above is a narrow one — it proves
-the plugin loads, starts and stops inside a real Signal K server, not that any
-route, panel or console does what it should once something asks. So: the API
-shapes are right as documented and as mocked, but a Portainer that answers
-differently in some version-specific way would not have been caught here. The
-console has never carried a keystroke to a real shell — the relay, the ticket
-handoff and the terminal are each tested against fakes on both sides, which is
-not the same as a pty. Nothing has run on a boat, on a Raspberry Pi, or over a
-link bad enough to matter.
+The screenshots in this README add one thing to that: the panel has been loaded
+in a browser, in a real Signal K admin UI, against a real running instance of
+this plugin. Module Federation resolves and the panel renders inside the host's
+React, the facade answers it under Signal K's own authentication, the log
+viewer's SSE stream carries lines live, the console's ticket handoff and
+WebSocket relay carry typed keystrokes and their output, the stack editor loads
+a compose file, and the delta poller's paths and watchdog notifications appear
+in Signal K's data browser. Portainer, in that run, is the fixture in
+[`tools/screenshots/`](tools/screenshots/README.md) — so what this establishes
+is that the plugin works end to end against a Portainer that answers as
+documented.
+
+**Not verified.** None of it has been run against a real Portainer, and the
+screenshot run does not change that: the fixture answers what the plugin asks
+the way the documentation says Portainer would, which is exactly the assumption
+under test. A Portainer that answers differently in some version-specific way
+would not have been caught here, and neither would anything about TLS, tokens
+that expire, or an environment that is not the fixture's. The console has never
+carried a keystroke to a real shell — the far end of that relay has always been
+a fake, whether a unit test's or the fixture's, which is not the same as a pty.
+Nothing has run on a boat, on a Raspberry Pi, or over a link bad enough to
+matter, and no part of the panel has been used in anger by a person with
+something to lose.
 
 Treat the first run against a real instance as the beginning of testing, not the
 end of it, and start with a Portainer whose containers you can afford to lose.

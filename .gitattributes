@@ -4,3 +4,6 @@
 # "lf", so without this every file reads as unformatted on Windows and
 # `npm run format:check` fails there while passing everywhere else.
 * text=auto eol=lf
+
+# Screenshots are binary; never let the LF rule near them.
+*.png binary
