@@ -17,6 +17,7 @@ import {
   type ContainerAction,
   type ControlState,
 } from './control';
+import { consoleState } from './consolesession';
 import { containerName, formatAge, formatBytes, shortId, stateColour } from './format';
 import {
   isActive,
@@ -112,6 +113,8 @@ export interface ContainerActionsProps {
   onAction: (container: DockerContainer, action: ContainerAction) => void;
   /** Opens the log viewer. Reading logs changes nothing, so it is never gated. */
   onLogs?: (container: DockerContainer) => void;
+  /** Opens a shell. Gated, and absent entirely on a server that cannot serve one. */
+  onConsole?: (container: DockerContainer) => void;
 }
 
 export function ContainersTable({
@@ -165,6 +168,33 @@ export function ContainersTable({
   );
 }
 
+/**
+ * The button that opens a shell.
+ *
+ * Its own component because, unlike Logs, it is gated: a disabled button says
+ * why rather than opening a dialog that will be refused.
+ */
+function ConsoleButton({
+  row,
+  actions,
+}: {
+  row: DockerContainer;
+  actions: ContainerActionsProps;
+}): ReactElement {
+  const state = consoleState(actions.control, row);
+  return (
+    <button
+      type="button"
+      className="btn btn-outline-secondary"
+      disabled={!state.enabled}
+      {...(state.reason ? { title: state.reason } : {})}
+      onClick={() => actions.onConsole?.(row)}
+    >
+      Console
+    </button>
+  );
+}
+
 function ActionButtons({
   row,
   actions,
@@ -190,6 +220,7 @@ function ActionButtons({
           Logs
         </button>
       ) : null}
+      {actions.onConsole ? <ConsoleButton row={row} actions={actions} /> : null}
       {actionsFor(row).map((action) => {
         const state = actionState(actions.control, row, action);
         return (

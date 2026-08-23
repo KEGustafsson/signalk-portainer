@@ -1,5 +1,6 @@
 import { openConsole, ticketOf, type ConsoleEndpoint } from '../src/console';
 import { RELAY_CLOSE, type RelaySocket } from '../src/execrelay';
+import { ConsoleSessions } from '../src/consolesessions';
 import { ExecTickets } from '../src/exectickets';
 import type { InstanceRegistry } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
@@ -105,6 +106,7 @@ describe('openConsole', () => {
   ) => {
     const endpoint = new FakeEndpoint();
     const tickets = new ExecTickets();
+    const sessions = new ConsoleSessions();
     const upstream = new FakeSocket();
     const lines: string[] = [];
     const registry = {
@@ -121,6 +123,7 @@ describe('openConsole', () => {
     const server = openConsole({
       register: () => endpoint,
       tickets,
+      sessions,
       registry: overrides.registry ?? (() => registry),
       log: (message) => lines.push(message),
       idleMs: 0,
@@ -137,10 +140,15 @@ describe('openConsole', () => {
       return browser;
     };
 
-    return { endpoint, tickets, upstream, lines, server, connect };
+    return { endpoint, tickets, sessions, upstream, lines, server, connect };
   };
 
-  const grant = { instance: 'boat', execId: 'exec-1', containerId: 'c1f0e2a3b4c5d6e7' };
+  const grant = {
+    instance: 'boat',
+    execId: 'exec-1',
+    containerId: 'c1f0e2a3b4c5d6e7',
+    session: 'session-1',
+  };
 
   it('joins the two sockets once a ticket is redeemed', async () => {
     const { tickets, upstream, connect } = setup();
@@ -316,6 +324,39 @@ describe('openConsole', () => {
     await new Promise((resolve) => setImmediate(resolve));
 
     expect(mockSockets[0]?.options).toEqual({ headers: { 'x-api-key': 'ptr_secret' } });
+  });
+
+  it('records the open shell so its terminal can be resized', async () => {
+    const { tickets, sessions, connect } = setup();
+
+    await connect(tickets.mint(grant));
+
+    expect(sessions.get('session-1')).toEqual({
+      instance: 'boat',
+      execId: 'exec-1',
+      containerId: 'c1f0e2a3b4c5d6e7',
+    });
+  });
+
+  it('forgets the shell once it ends', async () => {
+    // A resize against a shell that has gone would reach a stranger's exec
+    // instance if the id were ever reused, and is meaningless either way.
+    const { tickets, sessions, connect } = setup();
+    const browser = await connect(tickets.mint(grant));
+
+    browser.emit('close');
+
+    expect(sessions.get('session-1')).toBeUndefined();
+  });
+
+  it('records nothing for a shell that was never relayed', async () => {
+    const { tickets, sessions, connect } = setup({
+      connect: () => Promise.reject(new Error('connect ECONNREFUSED')),
+    });
+
+    await connect(tickets.mint(grant));
+
+    expect(sessions.size).toBe(0);
   });
 
   it('logs an endpoint error rather than throwing out of it', () => {

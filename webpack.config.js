@@ -21,6 +21,13 @@ module.exports = {
   module: {
     rules: [
       {
+        // Inlined as a string rather than emitted as a file: the panel is
+        // served from a boat's own Signal K server, and a stylesheet that
+        // arrives separately is one more request that can fail on a bad link.
+        test: /\.css$/i,
+        type: 'asset/source',
+      },
+      {
         test: /\.tsx?$/,
         exclude: /node_modules/,
         use: {

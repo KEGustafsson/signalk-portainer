@@ -27,6 +27,7 @@ const control = (overrides: Partial<ControlState> = {}): ControlState => ({
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  console: { available: true },
   self: {
     inContainer: true,
     identified: true,
@@ -57,6 +58,7 @@ describe('normalizeControl', () => {
       allowPutControl: false,
       allowDestructive: false,
       allowSelfManagement: false,
+      console: { available: false },
       self: {
         inContainer: false,
         identified: false,
@@ -65,6 +67,35 @@ describe('normalizeControl', () => {
         protectionActive: false,
         warning: undefined,
       },
+    });
+  });
+
+  it('reads what the server said about the console', () => {
+    const state = normalizeControl({
+      console: { available: false, reason: 'this Signal K server cannot serve a plugin WebSocket' },
+    });
+
+    expect(state?.console).toEqual({
+      available: false,
+      reason: 'this Signal K server cannot serve a plugin WebSocket',
+    });
+  });
+
+  it('reads a console the server can serve', () => {
+    expect(normalizeControl({ console: { available: true } })?.console).toEqual({
+      available: true,
+    });
+  });
+
+  it('takes a missing or misshapen console field as no console', () => {
+    // The safe direction, and the one an older plugin build produces.
+    expect(normalizeControl({})?.console).toEqual({ available: false });
+    expect(normalizeControl({ console: 'yes' })?.console).toEqual({ available: false });
+    expect(normalizeControl({ console: { available: 'yes' } })?.console).toEqual({
+      available: false,
+    });
+    expect(normalizeControl({ console: { available: false, reason: 7 } })?.console).toEqual({
+      available: false,
     });
   });
 

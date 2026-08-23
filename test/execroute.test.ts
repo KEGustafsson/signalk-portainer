@@ -3,6 +3,7 @@ import request from 'supertest';
 import type { MockAgent } from 'undici';
 import { normalizeConfig } from '../src/config';
 import type { PluginConfig } from '../src/config';
+import { ConsoleSessions } from '../src/consolesessions';
 import { ExecTickets } from '../src/exectickets';
 import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
@@ -36,6 +37,7 @@ const buildApp = (
     self?: SelfContainer;
     log?: (m: string) => void;
     execTickets?: ExecTickets;
+    consoleSessions?: ConsoleSessions;
   } = {},
 ) => {
   const app = express();
@@ -58,6 +60,7 @@ const buildApp = (
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
     ...(opts.execTickets ? { execTickets: opts.execTickets } : {}),
+    ...(opts.consoleSessions ? { consoleSessions: opts.consoleSessions } : {}),
   });
   app.use(router);
   return app;
@@ -111,6 +114,10 @@ describe('facade console', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.ticket).toMatch(/^[0-9a-f]{64}$/);
+    // A second handle, for resizing. Distinct from the ticket, because the
+    // ticket is spent by the upgrade and travels in a URL query.
+    expect(res.body.session).toMatch(/^[0-9a-f]{32}$/);
+    expect(res.body.session).not.toBe(res.body.ticket);
     // A TTY, and every stream attached: this is a terminal, not a batch run.
     expect(sent).toMatchObject({ Tty: true, AttachStdin: true, Cmd: ['/bin/sh'] });
   });
@@ -210,7 +217,12 @@ describe('facade console', () => {
     withExec(() => (created = true));
     const tickets = new ExecTickets();
     for (let index = 0; index < 32; index += 1)
-      tickets.mint({ instance: 'boat', execId: `exec-${index}`, containerId: CONTAINER });
+      tickets.mint({
+        instance: 'boat',
+        execId: `exec-${index}`,
+        containerId: CONTAINER,
+        session: `session-${index}`,
+      });
 
     const res = await request(app({ execTickets: tickets }))
       .post(`/api/containers/${CONTAINER}/exec`)
@@ -235,6 +247,108 @@ describe('facade console', () => {
       .send({});
 
     expect(tickets.outstanding).toBe(0);
+  });
+
+  describe('resizing the terminal', () => {
+    const resizePath = '/api/endpoints/1/docker/exec/exec-1/resize';
+    const openSession = () => {
+      const sessions = new ConsoleSessions();
+      sessions.add('session-1', {
+        instance: 'boat',
+        execId: 'exec-1',
+        containerId: CONTAINER,
+      });
+      return sessions;
+    };
+
+    it('tells Docker how big the terminal is', async () => {
+      withEnvironment();
+      let asked = '';
+      boat()
+        .intercept({
+          path: (value: string) => {
+            if (!value.startsWith(resizePath)) return false;
+            asked = value;
+            return true;
+          },
+          method: 'POST',
+        })
+        .reply(200, '');
+
+      const res = await request(app({ consoleSessions: openSession() }))
+        .post('/api/console/resize')
+        .send({ session: 'session-1', cols: 120, rows: 40 });
+
+      expect(res.status).toBe(200);
+      // Docker takes these as h and w, in that order, and getting them the
+      // wrong way round produces a terminal that looks almost right.
+      expect(asked).toContain('h=40');
+      expect(asked).toContain('w=120');
+    });
+
+    it('answers 404 for a console that is not open', async () => {
+      // The ordinary case rather than an exotic one: a dialog closing races
+      // its own last resize.
+      const res = await request(app({ consoleSessions: new ConsoleSessions() }))
+        .post('/api/console/resize')
+        .send({ session: 'session-gone', cols: 80, rows: 24 });
+
+      expect(res.status).toBe(404);
+      expect(res.body.hint).toContain('open a new one');
+    });
+
+    it('refuses a session id nobody was given', async () => {
+      const res = await request(app({ consoleSessions: openSession() }))
+        .post('/api/console/resize')
+        .send({ session: 'session-guessed', cols: 80, rows: 24 });
+
+      expect(res.status).toBe(404);
+    });
+
+    it('refuses a size that is not a whole number of at least one', async () => {
+      const sessions = openSession();
+      const send = (body: Record<string, unknown>) =>
+        request(app({ consoleSessions: sessions }))
+          .post('/api/console/resize')
+          .send(body);
+
+      expect((await send({ session: 'session-1', cols: 0, rows: 24 })).status).toBe(400);
+      expect((await send({ session: 'session-1', cols: 80, rows: -1 })).status).toBe(400);
+      expect((await send({ session: 'session-1', cols: 80.5, rows: 24 })).status).toBe(400);
+      expect((await send({ session: 'session-1', cols: '80', rows: 24 })).status).toBe(400);
+      expect((await send({ session: 'session-1', rows: 24 })).status).toBe(400);
+      // Nothing reached Portainer: every one of those was refused here.
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('refuses a size larger than any real window', async () => {
+      const res = await request(app({ consoleSessions: openSession() }))
+        .post('/api/console/resize')
+        .send({ session: 'session-1', cols: 100000, rows: 24 });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('at most');
+    });
+
+    it('is refused while control is disabled', async () => {
+      const res = await request(
+        app({ consoleSessions: openSession(), control: control({ allowPutControl: false }) }),
+      )
+        .post('/api/console/resize')
+        .send({ session: 'session-1', cols: 80, rows: 24 });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('answers 404 when the server cannot serve a console at all', async () => {
+      // No sessions registry means no WebSocket, so there is nothing open to
+      // resize and nothing to say beyond that.
+      const res = await request(app())
+        .post('/api/console/resize')
+        .send({ session: 'session-1', cols: 80, rows: 24 });
+
+      expect(res.status).toBe(404);
+    });
   });
 
   it('answers a Docker failure as a status rather than a ticket', async () => {

@@ -392,6 +392,11 @@ process is a footgun.
 | **M5b** | Stacks write (UI)     | Compose editor and environment editor in the panel, create dialog, redeploy and delete with confirmation.                                                                                                           |
 | **M6**  | Console               | WebSocket relay to `/api/websocket/exec` for an interactive shell.                                                                                                                                                  |
 
+Every milestone in this table is implemented, M6 in two parts: M6a the relay
+and the ticket handoff, M6b the terminal in the panel. None of it has been run
+against a real Portainer — see "What has and has not been verified" in the
+README.
+
 M0–M3 is the useful product; M4–M6 is the "actually replaces the Portainer UI
 for daily use" tier. Swarm read views (`/swarm/services`, `/swarm/nodes`) ride
 along in M1 behind the capability probe rather than forming a milestone of their

@@ -5,6 +5,7 @@ describe('ExecTickets', () => {
     instance: 'boat',
     execId,
     containerId: 'c1f0e2a3b4c5d6e7',
+    session: `session-${execId}`,
   });
 
   /** A clock and a counter, so expiry and uniqueness are assertions. */
@@ -67,12 +68,18 @@ describe('ExecTickets', () => {
     // The socket reads none of this from the request: the ticket is the only
     // thing that says what it may reach.
     const { store } = tickets();
-    const ticket = store.mint({ instance: 'shore', execId: 'exec-9', containerId: 'abc123def456' });
+    const ticket = store.mint({
+      instance: 'shore',
+      execId: 'exec-9',
+      containerId: 'abc123def456',
+      session: 'session-9',
+    });
 
     expect(store.consume(ticket)).toEqual({
       instance: 'shore',
       execId: 'exec-9',
       containerId: 'abc123def456',
+      session: 'session-9',
     });
   });
 

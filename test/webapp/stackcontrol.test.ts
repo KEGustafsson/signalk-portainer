@@ -27,6 +27,7 @@ const control = (overrides: Partial<ControlState> = {}): ControlState => ({
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  console: { available: true },
   self: {
     inContainer: true,
     identified: true,

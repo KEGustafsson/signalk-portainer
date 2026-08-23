@@ -5,6 +5,10 @@ module.exports = {
   collectCoverageFrom: ['src/**/*.ts', 'src/**/*.tsx'],
   coverageReporters: ['text-summary', 'lcov'],
   setupFilesAfterEnv: ['<rootDir>/test/setup.ts'],
+  moduleNameMapper: {
+    // webpack inlines stylesheets as strings; jest has no loader for them.
+    '\\.css$': '<rootDir>/test/webapp/cssStub.ts',
+  },
   coverageThreshold: {
     global: {
       statements: 80,

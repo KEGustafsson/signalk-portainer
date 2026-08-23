@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
+import { ConsoleDialog } from './ConsoleDialog';
 import { LogViewer } from './LogViewer';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
@@ -100,6 +101,7 @@ export default function AppPanel(): ReactElement {
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
   // The container whose logs are open, if any.
   const [viewing, setViewing] = useState<DockerContainer | undefined>(undefined);
+  const [shelling, setShelling] = useState<DockerContainer | undefined>(undefined);
   // The stack open in the editor — an existing one, or a new one being created.
   const [editing, setEditing] = useState<StackTarget | undefined>(undefined);
   const [deleting, setDeleting] = useState<Stack | undefined>(undefined);
@@ -349,15 +351,44 @@ export default function AppPanel(): ReactElement {
     if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab('containers');
   }, [visibleTabs, tab]);
 
-  // A container id belongs to one Portainer. Switching instance leaves the
-  // viewer looking at an id the new one knows nothing about, so it closes
-  // rather than following the switch into a 404.
-  useEffect(() => {
+  /**
+   * Closes everything that is looking at one Portainer's ids.
+   *
+   * A container id, and a stack id, belong to the instance they came from: the
+   * next one knows nothing about them.
+   */
+  const closeInstanceViews = useCallback(() => {
     setViewing(undefined);
-    // A stack id belongs to one Portainer, exactly as a container id does.
+    setShelling(undefined);
     setEditing(undefined);
     setDeleting(undefined);
     setStackResult(undefined);
+  }, []);
+
+  /**
+   * Switches Portainer, closing those views first.
+   *
+   * The order is the point. These dialogs are children of this component, and
+   * React runs a child's effects before its parent's, so setting the instance
+   * and leaving the closing to the effect below lets a dialog re-run its own
+   * effect against the new instance on the way out — asking the newly selected
+   * Portainer for a shell in, or the logs of, a container that belongs to the
+   * old one. Closing them first means there is no dialog left to ask.
+   */
+  const selectInstance = useCallback(
+    (name: string) => {
+      closeInstanceViews();
+      setInstance(name);
+    },
+    [closeInstanceViews],
+  );
+
+  // The backstop, for an instance that changes any other way — the first one
+  // being chosen once /instances answers, say.
+  useEffect(() => {
+    closeInstanceViews();
+    // Deliberately only on a change of instance: this closes dialogs, and
+    // re-running it for any other reason would close one the operator opened.
   }, [instance]);
 
   return (
@@ -373,7 +404,7 @@ export default function AppPanel(): ReactElement {
               id="portainer-instance"
               className="form-select form-select-sm w-auto"
               value={instance ?? ''}
-              onChange={(event) => setInstance(event.target.value)}
+              onChange={(event) => selectInstance(event.target.value)}
             >
               {instances.map((entry) => (
                 <option key={entry.name} value={entry.name}>
@@ -458,7 +489,16 @@ export default function AppPanel(): ReactElement {
         <TabBody
           tab={tab}
           payload={payload}
-          actions={{ control, busyId, onAction: requestAction, onLogs: setViewing }}
+          actions={{
+            control,
+            busyId,
+            onAction: requestAction,
+            onLogs: setViewing,
+            // Absent entirely, rather than disabled, on a server that cannot
+            // serve a console at all: there is nothing an operator could do
+            // about it, so a permanently dead button is only clutter.
+            ...(control?.console.available ? { onConsole: setShelling } : {}),
+          }}
           stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
           onNewStack={() => {
             setStackResult(undefined);
@@ -475,6 +515,17 @@ export default function AppPanel(): ReactElement {
           container={viewing}
           instance={instance}
           onClose={() => setViewing(undefined)}
+        />
+      ) : null}
+
+      {shelling ? (
+        <ConsoleDialog
+          // Keyed by container: opening a shell in a different one starts a
+          // new dialog rather than reusing this one's socket.
+          key={shelling.Id}
+          container={shelling}
+          instance={instance}
+          onClose={() => setShelling(undefined)}
         />
       ) : null}
 

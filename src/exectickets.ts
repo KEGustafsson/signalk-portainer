@@ -26,6 +26,12 @@ export interface ExecGrant {
   execId: string;
   /** The container it runs in, for the audit line and the refusal message. */
   containerId: string;
+  /**
+   * The handle the browser uses to resize this terminal once it is open. Minted
+   * with the ticket and carried through so the socket can record what it means;
+   * see `ConsoleSessions` for why the ticket itself will not do.
+   */
+  session: string;
 }
 
 /**
