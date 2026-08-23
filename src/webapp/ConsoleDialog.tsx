@@ -66,8 +66,15 @@ export function ConsoleDialog({
   // not who supplied the constructors.
   const makeTerminalRef = useRef(makeTerminal);
   const openSocketRef = useRef(openSocket);
-  makeTerminalRef.current = makeTerminal;
-  openSocketRef.current = openSocket;
+  // Updated in an effect rather than during render: React may discard a render
+  // it never commits, and a ref written from one of those would carry a value
+  // the component never actually rendered with. Declared before the shell
+  // effect, so that one always reads what the latest commit passed.
+  useEffect(() => {
+    makeTerminalRef.current = makeTerminal;
+    openSocketRef.current = openSocket;
+  });
+
   const name = containerName(container.Names);
   const id = container.Id;
 
