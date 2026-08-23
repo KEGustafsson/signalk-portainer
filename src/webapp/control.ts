@@ -18,10 +18,17 @@ export interface ControlSelf {
   warning?: string;
 }
 
+/** Whether this server can serve a console at all, and why not when it cannot. */
+export interface ControlConsole {
+  available: boolean;
+  reason?: string;
+}
+
 export interface ControlState {
   allowPutControl: boolean;
   allowDestructive: boolean;
   allowSelfManagement: boolean;
+  console: ControlConsole;
   self: ControlSelf;
 }
 
@@ -39,10 +46,20 @@ export function normalizeControl(body: unknown): ControlState | undefined {
     string,
     unknown
   >;
+  // An older plugin build, or a server that answered without this field, is
+  // read as "no console" — the safe direction, and the same one an older
+  // Signal K server produces on purpose.
+  const console = (
+    typeof raw.console === 'object' && raw.console !== null ? raw.console : {}
+  ) as Record<string, unknown>;
   return {
     allowPutControl: raw.allowPutControl === true,
     allowDestructive: raw.allowDestructive === true,
     allowSelfManagement: raw.allowSelfManagement === true,
+    console: {
+      available: console.available === true,
+      ...(typeof console.reason === 'string' ? { reason: console.reason } : {}),
+    },
     self: {
       inContainer: self.inContainer === true,
       identified: self.identified === true,

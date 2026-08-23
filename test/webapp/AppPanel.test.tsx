@@ -5,6 +5,21 @@ import { render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import AppPanel from '../../src/webapp/AppPanel';
 
+// The console dialog fetches a terminal emulator in its own chunk. Standing in
+// for it here keeps these tests about the panel: the terminal itself, and every
+// way a shell can fail, are covered in ConsoleDialog.test.tsx.
+jest.mock('../../src/webapp/xtermterminal', () => ({
+  createXtermTerminal: () => ({
+    write: () => {},
+    onData: () => {},
+    onResize: () => {},
+    fit: () => {},
+    focus: () => {},
+    dispose: () => {},
+    size: { cols: 80, rows: 24 },
+  }),
+}));
+
 const containers = [
   {
     Id: 'c1f0e2a3b4c5',
@@ -577,6 +592,71 @@ describe('AppPanel container actions', () => {
 
     const row = screen.getByRole('group', { name: 'Actions for ais-logger' });
     expect(within(row).getByRole('button', { name: 'Logs' })).toBeEnabled();
+  });
+
+  it('offers a console only once the plugin says it can serve one', async () => {
+    // The default /control here reports no console, which is what an older
+    // Signal K server produces: the button is absent rather than disabled,
+    // because there is nothing an operator could do about it.
+    global.fetch = routeFetch() as unknown as typeof fetch;
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    expect(within(row).queryByRole('button', { name: 'Console' })).toBeNull();
+  });
+
+  it('opens a shell from a container row', async () => {
+    global.fetch = routeFetch({
+      '/control': { ...control, console: { available: true } },
+      '/containers/c1f0e2a3b4c5/exec': {
+        id: 'c1f0e2a3b4c5',
+        ticket: 'tkt-1',
+        session: 'ses-1',
+        command: ['/bin/sh'],
+      },
+    }) as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Console' }));
+
+    expect(await screen.findByText('Console — signalk_influxdb')).toBeInTheDocument();
+  });
+
+  it('closes the console when the instance changes', async () => {
+    // A shell belongs to one container on one Portainer; leaving it open
+    // across a switch would relay to a container nobody is looking at.
+    global.fetch = routeFetch({
+      '/instances': {
+        instances: [
+          { name: 'boat', isDefault: true },
+          { name: 'shore', isDefault: false },
+        ],
+      },
+      '/control': { ...control, console: { available: true } },
+      '/containers/c1f0e2a3b4c5/exec': {
+        id: 'c1f0e2a3b4c5',
+        ticket: 'tkt-1',
+        session: 'ses-1',
+        command: ['/bin/sh'],
+      },
+    }) as unknown as typeof fetch;
+    const user = userEvent.setup();
+
+    render(<AppPanel />);
+    await screen.findByText('signalk_influxdb');
+    const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
+    await user.click(within(row).getByRole('button', { name: 'Console' }));
+    await screen.findByText('Console — signalk_influxdb');
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+
+    await waitFor(() => expect(screen.queryByText('Console — signalk_influxdb')).toBeNull());
   });
 
   it('closes the log viewer when the instance changes', async () => {

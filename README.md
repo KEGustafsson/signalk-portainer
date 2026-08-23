@@ -11,9 +11,11 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M6a — the server-side console.** Everything through M5, plus an
-> authenticated WebSocket relay that opens a shell in a container. The terminal
-> in the panel is M6b.
+> **Status: M6b — the console in the panel.** The last milestone in
+> [`docs/plan.md`](docs/plan.md): a terminal on the Containers tab, on top of
+> the relay M6a built. Nothing here has been exercised against a real Signal K
+> server or a real Portainer; see [What has and has not been
+> verified](#what-has-and-has-not-been-verified).
 
 ## Documents
 
@@ -37,7 +39,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M6a)
+## What works today (M6b)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -134,6 +136,37 @@ K client can start or stop a container.
   one the console is absent and `GET /control` says why, rather than offering a
   button that cannot work.
 
+- **A terminal on the Containers tab.** Console opens a shell in a dialog:
+  `/bin/sh`, `/bin/bash` or `/bin/ash`, picked before it starts. The button is
+  disabled with the reason as its tooltip for a container that is not running,
+  for the Signal K container, and while control is off — and it is absent
+  altogether on a server that cannot serve a console, since that is not
+  something an operator can change.
+
+  The browser is the only end that knows how big the terminal is, so it says
+  so: the POST that mints the ticket also returns a session handle, and
+  `POST /console/resize` tells Docker the size, on connect and whenever the
+  window changes shape. The handle travels only in request bodies, never in a
+  URL — unlike the ticket, which a proxy log would keep.
+
+  Opening a shell is three awaits — the POST, the terminal's own chunk, and the
+  socket — and the dialog can close during any of them. Each step checks
+  whether it is still wanted and closes what it built when it is not: a shell
+  left behind holds a process in the container and one of the three console
+  slots. Switching instance closes the shell rather than relaying to a
+  container nobody is looking at. Every close code says something useful — a
+  spent ticket, too many consoles, an unreachable Portainer, the idle timeout —
+  rather than a number.
+
+  The terminal is [xterm.js](https://xtermjs.org/), which is 83 KB gzipped
+  against the panel's own 18 KB, so it is **not** in the bundle the admin UI
+  loads to show a table of containers. It arrives in its own chunk the first
+  time somebody opens a shell, and a panel that never does never downloads it.
+  The alternative considered was rendering the shell's output into a `<pre>`;
+  it was rejected because a pty emits cursor movement, colour and erase
+  sequences from the first prompt onwards, and anything full-screen — `top`,
+  `vi`, `less` — would render as garbage.
+
 - **A stacks editor in the panel.** Each row offers what applies to it: a
   running stack is stopped and a stopped one started, never both; Redeploy
   appears only for a stack that has a repository. Edit opens the compose file
@@ -187,6 +220,7 @@ K client can start or stop a container.
   | `GET /control`                             | what the UI may offer, and whether self-protection is active                     |
   | `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                      |
   | `POST /containers/:id/exec`                | a console ticket, redeemed on `ws://…/plugins/signalk-portainer/console?ticket=` |
+  | `POST /console/resize`                     | `{ session, cols, rows }` — the size of an open console's terminal               |
   | `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                                             |
 
 ### Guards on the mutating routes
@@ -234,7 +268,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 607 unit tests, no network required, 80% coverage enforced
+npm test           # 699 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -299,6 +333,31 @@ longer exists. Stopping the plugin clears them the same way. An unreachable
 instance publishes `status.reachable: false` and says nothing about containers —
 a failed poll knows nothing about the environment, and "0 running" would read as
 every container being down.
+
+## What has and has not been verified
+
+Worth being explicit about, because the milestone plan is now complete and it
+would be easy to read that as "finished".
+
+**Verified.** 699 unit tests, no network required, covering every module in
+`src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
+tests assert what the plugin *sent* as well as what it did with the reply, so
+the request shapes match Portainer's documented API. The Signal K plugin
+contract — entry point, schema, start/stop lifecycle, no deprecated server APIs
+— is checked by Signal K's own CI workflow on Node 22 and 24 across Linux x64,
+Linux arm64, macOS and Windows, which also installs the plugin into a real
+Signal K server and confirms it loads and starts.
+
+**Not verified.** None of it has been run against a real Portainer or driven by
+a person through a real admin UI. So: the API shapes are right as documented and
+as mocked, but a Portainer that answers differently in some version-specific way
+would not have been caught here. The console has never carried a keystroke to a
+real shell — the relay, the ticket handoff and the terminal are each tested
+against fakes on both sides, which is not the same as a pty. Nothing has run on
+a boat, on a Raspberry Pi, or over a link bad enough to matter.
+
+Treat the first run against a real instance as the beginning of testing, not the
+end of it, and start with a Portainer whose containers you can afford to lose.
 
 ## License
 

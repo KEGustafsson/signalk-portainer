@@ -9,6 +9,7 @@ import {
 import type { MetaValue, PathValue } from './deltas';
 import { ExecTickets } from './exectickets';
 import { openConsole, type ConsoleServer } from './console';
+import { ConsoleSessions } from './consolesessions';
 import { registerRoutes } from './facade';
 import { DeltaPoller, type KeyedContainer } from './poller';
 import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
@@ -32,6 +33,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    * the console is then not offered rather than half-offered.
    */
   let tickets: ExecTickets | undefined;
+  let sessions: ConsoleSessions | undefined;
   let consoleServer: ConsoleServer | undefined;
   // Detected once at load: the container id cannot change under a running
   // process, and probing /proc on every request would be wasted work.
@@ -140,9 +142,11 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         // absent from /control instead of being a button that cannot work.
         if (config.control.allowPutControl && typeof app.registerWebSocket === 'function') {
           tickets = new ExecTickets();
+          sessions = new ConsoleSessions();
           consoleServer = openConsole({
             register: (path) => app.registerWebSocket!(path),
             tickets,
+            sessions,
             registry: () => registry,
             log,
           });
@@ -226,6 +230,8 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       consoleServer = undefined;
       tickets?.clear();
       tickets = undefined;
+      sessions?.clear();
+      sessions = undefined;
       registry?.close();
       registry = undefined;
       config = undefined;
@@ -242,6 +248,9 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         // once, and the tickets come and go with each start.
         get execTickets() {
           return tickets;
+        },
+        get consoleSessions() {
+          return sessions;
         },
       });
     },

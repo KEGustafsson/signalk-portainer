@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import express, { type Request, type Response, type Router } from 'express';
 import type {
   PortainerClient,
@@ -15,6 +16,7 @@ import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
 import { stackHoldsSelf } from './stackguard';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
+import type { ConsoleSessions } from './consolesessions';
 import { ExecTicketError, type ExecTickets } from './exectickets';
 
 export interface FacadeDeps {
@@ -33,6 +35,11 @@ export interface FacadeDeps {
    * console is not offered at all.
    */
   execTickets?: ExecTickets;
+  /**
+   * The consoles that are open, so a resize can find the shell it belongs to.
+   * Absent alongside `execTickets`, for the same reason.
+   */
+  consoleSessions?: ConsoleSessions;
 }
 
 /**
@@ -415,6 +422,10 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       // room for the ticket afterwards would leave an exec instance in Docker
       // that nothing can ever start, and a caller retrying accumulates them.
       const reservation = tickets.reserve();
+      // A second handle, for resizing the terminal once it is open. Separate
+      // from the ticket because the ticket is spent by the upgrade and travels
+      // in a URL query; this one is only ever sent in a body.
+      const session = randomBytes(16).toString('hex');
       let ticket: string;
       try {
         const execId = await client.createExec(id, command);
@@ -422,6 +433,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
           instance: instanceParam(req),
           execId,
           containerId: canonical ?? id,
+          session,
         });
       } catch (cause) {
         reservation.release();
@@ -429,7 +441,45 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       }
 
       audit(deps, req, `console ${command.join(' ')}`, id, canonical);
-      return { id, ticket, command };
+      return { id, ticket, session, command };
+    }),
+  );
+
+  /**
+   * Tells Docker how big the terminal is.
+   *
+   * Addressed by session rather than by container: two consoles may be open on
+   * the same container, and only the socket knows which exec instance each one
+   * became. The exec id itself never leaves the plugin.
+   */
+  router.post(
+    '/api/console/resize',
+    body,
+    handle(deps, async (req, registry) => {
+      requireControlEnabled(deps);
+      const sessions = deps.consoleSessions;
+      const payload = (req.body ?? {}) as Record<string, unknown>;
+      const session = sessions?.get(
+        typeof payload.session === 'string' ? payload.session : undefined,
+      );
+      if (!session) {
+        // Also the answer for a console that has since ended, which is the
+        // ordinary case: a dialog closing races its own last resize.
+        throw new PortainerError({
+          status: 404,
+          method: 'POST',
+          path: '/api/console/resize',
+          message: 'That console is not open',
+          hint: 'it may have ended already; close the terminal and open a new one',
+        });
+      }
+
+      const size = readTerminalSize(payload);
+      await registry.get(session.instance).resizeExec(session.execId, {
+        rows: size.rows,
+        columns: size.cols,
+      });
+      return { ...size };
     }),
   );
 
@@ -834,6 +884,31 @@ function readExecCommand(req: Request): string[] {
 /** Present in every image worth opening a shell in; bash is not. */
 const DEFAULT_EXEC_COMMAND = ['/bin/sh'] as const;
 const MAX_EXEC_ARGS = 32;
+
+/**
+ * Bounds on a terminal size, wide enough for any real window.
+ *
+ * Docker takes these as the dimensions of a pty, and a browser reporting
+ * nonsense — zero rows while the dialog is still laying out, or a number with
+ * six digits — should be refused here rather than passed on.
+ */
+const MAX_TERMINAL = { cols: 1000, rows: 500 };
+
+/** The terminal dimensions out of an untrusted body. */
+function readTerminalSize(payload: Record<string, unknown>): { cols: number; rows: number } {
+  const path = '/api/console/resize';
+  const read = (name: 'cols' | 'rows'): number => {
+    const value = payload[name];
+    if (typeof value !== 'number' || !Number.isInteger(value) || value < 1) {
+      throw badRequest('POST', path, `${name} must be a whole number of at least 1`);
+    }
+    if (value > MAX_TERMINAL[name]) {
+      throw badRequest('POST', path, `${name} may be at most ${MAX_TERMINAL[name]}`);
+    }
+    return value;
+  };
+  return { cols: read('cols'), rows: read('rows') };
+}
 
 /**
  * The stack version of the footgun guard.

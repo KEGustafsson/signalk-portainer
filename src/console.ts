@@ -11,6 +11,7 @@
 import { WebSocket } from 'ws';
 import type { PortainerClient } from './client';
 import { relay, RELAY_CLOSE, type RelaySocket } from './execrelay';
+import type { ConsoleSessions } from './consolesessions';
 import type { ExecTickets } from './exectickets';
 import type { InstanceRegistry } from './registry';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
@@ -42,6 +43,8 @@ export interface ConsoleTarget {
 export interface ConsoleOptions {
   register: (path: string) => ConsoleEndpoint;
   tickets: ExecTickets;
+  /** Where an open console is recorded, so the resize route can find it. */
+  sessions: ConsoleSessions;
   registry: () => InstanceRegistry | undefined;
   log: (message: string) => void;
   /** How many shells may be open at once; injectable for tests. */
@@ -135,8 +138,15 @@ async function accept(
       onEnd: (reason) => {
         release?.();
         open.delete(end);
+        // Before the log line, so nothing can resize a shell that has gone.
+        options.sessions.remove(grant.session);
         options.log(`console on ${grant.containerId.slice(0, 12)} ended: ${reason}`);
       },
+    });
+    options.sessions.add(grant.session, {
+      instance: grant.instance,
+      execId: grant.execId,
+      containerId: grant.containerId,
     });
     open.add(end);
     options.log(`console opened on ${grant.containerId.slice(0, 12)}`);

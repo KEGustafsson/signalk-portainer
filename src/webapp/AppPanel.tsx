@@ -12,6 +12,7 @@ import type {
 } from '../types';
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
+import { ConsoleDialog } from './ConsoleDialog';
 import { LogViewer } from './LogViewer';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
@@ -100,6 +101,7 @@ export default function AppPanel(): ReactElement {
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
   // The container whose logs are open, if any.
   const [viewing, setViewing] = useState<DockerContainer | undefined>(undefined);
+  const [shelling, setShelling] = useState<DockerContainer | undefined>(undefined);
   // The stack open in the editor — an existing one, or a new one being created.
   const [editing, setEditing] = useState<StackTarget | undefined>(undefined);
   const [deleting, setDeleting] = useState<Stack | undefined>(undefined);
@@ -354,6 +356,10 @@ export default function AppPanel(): ReactElement {
   // rather than following the switch into a 404.
   useEffect(() => {
     setViewing(undefined);
+    // And a shell belongs to one container on one Portainer; leaving it open
+    // across a switch would relay to a container the operator is no longer
+    // looking at.
+    setShelling(undefined);
     // A stack id belongs to one Portainer, exactly as a container id does.
     setEditing(undefined);
     setDeleting(undefined);
@@ -458,7 +464,16 @@ export default function AppPanel(): ReactElement {
         <TabBody
           tab={tab}
           payload={payload}
-          actions={{ control, busyId, onAction: requestAction, onLogs: setViewing }}
+          actions={{
+            control,
+            busyId,
+            onAction: requestAction,
+            onLogs: setViewing,
+            // Absent entirely, rather than disabled, on a server that cannot
+            // serve a console at all: there is nothing an operator could do
+            // about it, so a permanently dead button is only clutter.
+            ...(control?.console.available ? { onConsole: setShelling } : {}),
+          }}
           stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
           onNewStack={() => {
             setStackResult(undefined);
@@ -475,6 +490,17 @@ export default function AppPanel(): ReactElement {
           container={viewing}
           instance={instance}
           onClose={() => setViewing(undefined)}
+        />
+      ) : null}
+
+      {shelling ? (
+        <ConsoleDialog
+          // Keyed by container: opening a shell in a different one starts a
+          // new dialog rather than reusing this one's socket.
+          key={shelling.Id}
+          container={shelling}
+          instance={instance}
+          onClose={() => setShelling(undefined)}
         />
       ) : null}
 

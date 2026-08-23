@@ -205,3 +205,64 @@ describe('tables with nothing to show', () => {
     }
   });
 });
+
+describe('the console button', () => {
+  const row = {
+    Id: 'c1f0e2a3b4c5d6e7',
+    Names: ['/influx'],
+    Image: 'influxdb:2.7',
+    Created: 0,
+    State: 'running',
+    Status: 'Up 1 hour',
+  };
+  const control = {
+    allowPutControl: true,
+    allowDestructive: false,
+    allowSelfManagement: false,
+    console: { available: true },
+    self: {
+      inContainer: true,
+      identified: true,
+      shortId: 'aaaabbbbcccc',
+      source: 'cgroup',
+      protectionActive: true,
+    },
+  };
+
+  const show = (
+    overrides: Record<string, unknown> = {},
+    rowOverrides: Record<string, unknown> = {},
+  ) =>
+    render(
+      <ContainersTable
+        rows={[{ ...row, ...rowOverrides }]}
+        actions={{
+          control: { ...control, ...overrides },
+          onAction: () => {},
+          onConsole: () => {},
+        }}
+      />,
+    );
+
+  it('offers a shell in a running container', () => {
+    show();
+
+    expect(screen.getByRole('button', { name: 'Console' })).toBeEnabled();
+  });
+
+  it('explains itself rather than opening a dialog that would be refused', () => {
+    show({}, { State: 'exited' });
+
+    const button = screen.getByRole('button', { name: 'Console' });
+    expect(button).toBeDisabled();
+    expect(button).toHaveAttribute('title', 'The container is not running');
+  });
+
+  it('is absent entirely when the panel was given no way to open one', () => {
+    // Rather than permanently disabled: on a Signal K server that cannot serve
+    // a WebSocket there is nothing an operator could do about it.
+    render(<ContainersTable rows={[row]} actions={{ control, onAction: () => {} }} />);
+
+    expect(screen.queryByRole('button', { name: 'Console' })).not.toBeInTheDocument();
+  });
+});
