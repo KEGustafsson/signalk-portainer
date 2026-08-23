@@ -826,7 +826,7 @@ describe('AppPanel container actions', () => {
       expect(await screen.findByText(/signalk: started/)).toBeInTheDocument();
     });
 
-    it('asks before deleting, and never deletes volumes by implication', async () => {
+    it('asks before deleting, and offers no volume option Portainer cannot honour', async () => {
       const fetchMock = stackFetch();
       global.fetch = fetchMock as unknown as typeof fetch;
       const user = userEvent.setup();
@@ -837,13 +837,16 @@ describe('AppPanel container actions', () => {
 
       const dialog = await screen.findByRole('dialog');
       expect(within(dialog).getByText('Delete signalk?')).toBeInTheDocument();
+      // Portainer CE cannot remove a stack's volumes, so the dialog says so
+      // rather than offering a checkbox that would do nothing.
+      expect(within(dialog).queryByRole('checkbox')).toBeNull();
+      expect(within(dialog).getByText(/volumes are left in place/i)).toBeInTheDocument();
       await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
 
       await waitFor(() => {
         const calls = fetchMock.mock.calls.map((call) => String(call[0]));
-        expect(
-          calls.some((path) => path.includes('/stacks/3?removeVolumes=false&instance=boat')),
-        ).toBe(true);
+        expect(calls.some((path) => path.includes('/stacks/3?instance=boat'))).toBe(true);
+        expect(calls.some((path) => path.includes('removeVolumes'))).toBe(false);
       });
     });
 

@@ -3,6 +3,7 @@ import { DeltaBuilder, type InstanceSnapshot, type MetaValue, type PathValue } f
 import { PortainerError } from './errors';
 import { assignKeys } from './paths';
 import type { InstanceRegistry } from './registry';
+import type { DockerContainer } from './types';
 import type { Notification, Watchdog } from './watchdog';
 
 /**
@@ -114,6 +115,14 @@ export class DeltaPoller {
 
       if (values.length > 0 || meta.length > 0) this.deps.publish(values, meta);
       if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
+    } catch (cause) {
+      // A poll must never be worse than a poll that reports "unreachable".
+      // `snapshot()` already contains network failures; this catches everything
+      // after it — key assignment, delta building, the watchdog, and the
+      // publish into Signal K itself. Without it a rejection here is unhandled,
+      // and Node ends the whole Signal K process: a container list the plugin
+      // did not expect would take the boat's navigation data down with it.
+      this.deps.log(`poll failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
       this.polling = false;
     }
@@ -139,7 +148,7 @@ export class DeltaPoller {
         client.docker.listContainers(true),
         client.capabilities().catch(() => undefined),
       ]);
-      const snapshot: InstanceSnapshot = { reachable: true, containers };
+      const snapshot: InstanceSnapshot = { reachable: true, containers: usable(containers) };
       if (capabilities?.dockerVersion) snapshot.version = capabilities.dockerVersion;
       return snapshot;
     } catch (cause) {
@@ -148,6 +157,23 @@ export class DeltaPoller {
       return { reachable: false, containers: [], error: message };
     }
   }
+}
+
+/**
+ * The containers in a response that can actually be published.
+ *
+ * `json<T>()` casts an untrusted body to the declared type without checking it,
+ * so nothing upstream guarantees this is a list, or that an entry has the `Id`
+ * every key and every sort below reads. A proxy, a captive portal or an agent
+ * answering 200 with something else would otherwise throw deep inside the
+ * poll. Dropping what cannot be keyed leaves the rest publishable.
+ */
+function usable(containers: DockerContainer[]): DockerContainer[] {
+  if (!Array.isArray(containers)) return [];
+  return containers.filter(
+    (container): container is DockerContainer =>
+      typeof container?.Id === 'string' && container.Id.length > 0,
+  );
 }
 
 /**

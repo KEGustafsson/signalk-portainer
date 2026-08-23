@@ -61,6 +61,70 @@ describe('DeltaPoller', () => {
   const paths = (index = 0): Record<string, unknown> =>
     Object.fromEntries((published[index]?.values ?? []).map((entry) => [entry.path, entry.value]));
 
+  describe('a body that is not what the type says', () => {
+    /** A reachable instance whose container list is something else entirely. */
+    const interceptContainers = (body: object) => {
+      const pool = agent.get('https://boat.test:9443');
+      pool
+        .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+        .reply(200, [fixtures.localEnvironment]);
+      pool
+        .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+        .reply(200, body);
+      pool
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      pool
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, fixtures.systemStatus);
+    };
+
+    it('does not reject when a container has no id', async () => {
+      // `json<T>()` casts the body without checking it, so nothing upstream
+      // guarantees this shape. An unhandled rejection here ends the whole
+      // Signal K process, not just the poll.
+      interceptContainers([{ Names: ['/nameless'], State: 'running', Status: 'Up' }]);
+
+      await expect(build(new InstanceRegistry(boatOnly)).poll()).resolves.toBeUndefined();
+    });
+
+    it('does not reject when the body is not a list at all', async () => {
+      interceptContainers({ message: 'unauthorized' });
+
+      await expect(build(new InstanceRegistry(boatOnly)).poll()).resolves.toBeUndefined();
+    });
+
+    it('still publishes the containers that can be keyed', async () => {
+      interceptContainers([
+        { Names: ['/nameless'], State: 'running', Status: 'Up' },
+        { Id: 'abc123def456', Names: ['/good'], State: 'running', Status: 'Up 1 hour' },
+      ]);
+
+      await build(new InstanceRegistry(boatOnly)).poll();
+
+      expect(paths()['system.docker.boat.containers.good.state']).toBe('running');
+    });
+
+    it('survives a publish that throws, rather than taking the server down', async () => {
+      // `publish` ends in `app.handleMessage`. A throw from Signal K itself
+      // must not become an unhandled rejection either.
+      interceptOk('https://boat.test:9443');
+      const poller = new DeltaPoller({
+        registry: () => new InstanceRegistry(boatOnly),
+        publish: () => {
+          throw new Error('handleMessage exploded');
+        },
+        log: (message) => logs.push(message),
+        intervalMs: 60_000,
+        pathPrefix: 'system.docker',
+        level: 'full',
+      });
+
+      await expect(poller.poll()).resolves.toBeUndefined();
+      expect(logs.join('\n')).toContain('handleMessage exploded');
+    });
+  });
+
   it('publishes a delta for each configured instance in one message', async () => {
     interceptOk('https://boat.test:9443');
     interceptOk('https://shore.test:9443');

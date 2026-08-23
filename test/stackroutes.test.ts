@@ -370,26 +370,22 @@ describe('facade stack writes', () => {
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
-    it('keeps the volumes unless they are asked for', async () => {
+    it('never sends a volume option Portainer would ignore', async () => {
+      // Portainer CE has no removeVolumes on stack delete. Passing one through
+      // would succeed and do nothing, and the response would tell the operator
+      // their data was destroyed when it was not.
       withStacks();
       withContainers();
+      let asked = '';
       boat()
-        .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=false', method: 'DELETE' })
-        .reply(204, '');
-
-      const res = await request(app({ control: control({ allowDestructive: true }) })).delete(
-        '/api/stacks/3',
-      );
-
-      expect(res.status).toBe(200);
-      expect(res.body.removeVolumes).toBe(false);
-    });
-
-    it('removes the volumes when they are', async () => {
-      withStacks();
-      withContainers();
-      boat()
-        .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=true', method: 'DELETE' })
+        .intercept({
+          path: (value: string) => {
+            if (!value.startsWith('/api/stacks/3?')) return false;
+            asked = value;
+            return true;
+          },
+          method: 'DELETE',
+        })
         .reply(204, '');
 
       const res = await request(app({ control: control({ allowDestructive: true }) })).delete(
@@ -397,11 +393,11 @@ describe('facade stack writes', () => {
       );
 
       expect(res.status).toBe(200);
-      expect(res.body.removeVolumes).toBe(true);
+      expect(asked).not.toContain('removeVolumes');
+      // And the answer does not claim a removal that did not happen.
+      expect(res.body.removeVolumes).toBeUndefined();
     });
-  });
 
-  describe('the body contract', () => {
     it('answers malformed JSON in the same shape as everything else', async () => {
       // Express would answer this itself, with an HTML page.
       const res = await request(app())

@@ -747,6 +747,48 @@ describe('facade container lifecycle', () => {
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
+  it.each([
+    ['start', 'start'],
+    ['stop', 'stop'],
+  ])("treats Docker's 304 on %s as the success it is", async (action, dockerPath) => {
+    // Docker answers 304 for a lifecycle call asking for the state a container
+    // is already in. Reading that as a failure makes a second Stop look broken,
+    // and makes any client that idempotently asserts a state fail on every run
+    // after the first.
+    withEnvironment();
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/abc123def456/${dockerPath}`,
+        method: 'POST',
+      })
+      .reply(304, '');
+
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      `/api/containers/abc123def456/${action}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ action, ok: true });
+  });
+
+  it('still reports a real Docker refusal as a failure', async () => {
+    // The 304 tolerance must not swallow anything else: a 409 from Docker is
+    // still an error the operator needs to see.
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/stop',
+        method: 'POST',
+      })
+      .reply(409, { message: 'container is paused' });
+
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      '/api/containers/abc123def456/stop',
+    );
+
+    expect(res.status).toBe(409);
+  });
+
   it('rejects an unknown action before contacting Portainer', async () => {
     const res = await request(buildApp(new InstanceRegistry(config))).post(
       '/api/containers/abc123def456/destroy',

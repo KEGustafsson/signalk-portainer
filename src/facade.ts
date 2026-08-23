@@ -279,23 +279,21 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     '/api/stacks/:id',
     withClient(deps, async (req, client) => {
       const id = stackId(req, 'DELETE', '/api/stacks/:id');
-      const removeVolumes = req.query.removeVolumes === 'true';
 
       requireControlEnabled(deps);
       requireDestructiveAllowed(deps);
       await requireStackNotSelf(deps, client, id, 'delete');
 
-      await client.deleteStack(id, { removeVolumes });
+      // No volume option: Portainer CE's stack delete takes no `removeVolumes`
+      // parameter — its teardown runs `compose down` with no down-options — and
+      // Go ignores an unknown query parameter, so sending one would succeed
+      // while doing nothing. Reporting a volume removal that never happened is
+      // worse than not offering it: an operator would recreate the stack later
+      // and get the old database back believing it had been wiped.
+      await client.deleteStack(id);
 
-      audit(
-        deps,
-        req,
-        `delete${removeVolumes ? ' --volumes' : ''}`,
-        String(id),
-        undefined,
-        'stack',
-      );
-      return { id, action: 'delete', removeVolumes, ok: true };
+      audit(deps, req, 'delete', String(id), undefined, 'stack');
+      return { id, action: 'delete', ok: true };
     }),
   );
 

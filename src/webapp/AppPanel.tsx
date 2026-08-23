@@ -547,15 +547,10 @@ export default function AppPanel(): ReactElement {
           stack={deleting}
           busy={busyStack === deleting.Id}
           onCancel={() => setDeleting(undefined)}
-          onConfirm={(options) => {
+          onConfirm={() => {
             void runStack(
               deleting,
-              () =>
-                apiSend(
-                  'DELETE',
-                  `/stacks/${deleting.Id}?removeVolumes=${options.removeVolumes ? 'true' : 'false'}`,
-                  instance,
-                ),
+              () => apiSend('DELETE', `/stacks/${deleting.Id}`, instance),
               'deleted',
             ).then(() => setDeleting(undefined));
           }}
