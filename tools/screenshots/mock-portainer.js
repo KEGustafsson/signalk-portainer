@@ -585,7 +585,10 @@ const server = http.createServer((req, res) => {
       const line = `signalk-portainer: poll ${count}: 5 running, 1 stopped`;
       res.write(dockerFrame('stdout', timestamps ? `${new Date().toISOString()} ${line}` : line));
     }, 2000);
-    return req.on('close', () => clearInterval(timer));
+    // Bound to the response rather than the request: the response is what the
+    // interval writes to, and writing to one whose client has gone is the
+    // failure this is here to avoid.
+    return res.on('close', () => clearInterval(timer));
   }
 
   const exec = docker.match(/^\/containers\/([^/]+)\/exec$/);

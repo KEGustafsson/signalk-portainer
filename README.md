@@ -67,8 +67,8 @@ services:
       # HTTPS, published to this machine only: the plugin reaches Portainer
       # from the Signal K server, and no browser ever talks to it directly.
       - '127.0.0.1:9443:9443'
-      # - '9000:9000'   # plain HTTP, if you would rather not deal with a certificate
-      # - '8000:8000'   # only if you use Edge agents
+      # - '127.0.0.1:9000:9000'   # plain HTTP instead, if the certificate is more trouble than it is worth
+      # - '8000:8000'             # the Edge agent tunnel, which does have to be reachable
     volumes:
       - /var/run/docker.sock:/var/run/docker.sock
       - ./data:/data
@@ -83,9 +83,12 @@ what they are given: `system.docker.<instance>.containers.portainer.state`.
 Four of those lines are choices rather than boilerplate:
 
 - **`lts`, not `latest`.** Portainer publishes a long-term channel and a
-  short-term one, and `latest` follows the short-term releases. This plugin
-  speaks the CE 2.x API; pinning `lts` — or an exact tag like `2.39.6` — means
-  a version that moves it does so when you decide.
+  short-term one, and `latest` follows the short-term releases. `lts` moves too
+  — it is whatever the current long-term release is, `2.39.6` at the time of
+  writing — but it moves within a channel that changes less under a plugin
+  speaking the CE 2.x API. For a machine that should come back identical after
+  a rebuild, name the exact version, or its digest:
+  `portainer/portainer-ce@sha256:…`.
 - **`./data`, not `$PWD/data`.** Compose resolves a relative path against the
   directory holding the compose file, but `$PWD` against wherever the command
   was run from. `docker compose -f /opt/portainer/docker-compose.yml up -d`
