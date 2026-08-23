@@ -1,5 +1,7 @@
 # signalk-portainer
 
+<img src="assets/logo.svg" alt="" width="104" height="104" align="right">
+
 [![SignalK Plugin CI](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml/badge.svg)](https://github.com/KEGustafsson/signalk-portainer/actions/workflows/signalk-ci.yml)
 
 A Signal K server plugin that manages [Portainer CE](https://www.portainer.io/)
