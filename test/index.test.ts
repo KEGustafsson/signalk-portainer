@@ -659,13 +659,13 @@ describe('plugin lifecycle', () => {
     expect(() => instance.stop()).not.toThrow();
   });
 
-  it('never writes a credential to the debug log', () => {
+  it('never writes a credential to the debug log', async () => {
     const { app, debug } = createApp();
     const instance = plugin(app);
 
     instance.start(validOptions, noopRestart);
     expect(debug.join(' ')).not.toContain('ptr_boat');
-    void instance.stop();
+    await instance.stop();
   });
 });
 
@@ -685,18 +685,18 @@ describe('the console endpoint', () => {
     restoreGlobalDispatcher();
   });
 
-  it('is registered when the server can serve a WebSocket, and closed on stop', () => {
+  it('is registered when the server can serve a WebSocket, and closed on stop', async () => {
     const { app, sockets } = createApp();
     const instance = plugin(app);
 
     instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
 
     expect(sockets.map((socket) => socket.path)).toEqual(['/console']);
-    void instance.stop();
+    await instance.stop();
     expect(sockets[0]?.closed).toBe(true);
   });
 
-  it('is absent, with a reason, on a server that cannot', () => {
+  it('is absent, with a reason, on a server that cannot', async () => {
     // Feature-detected rather than assumed: an older server has no such method,
     // and a console that cannot work should not be offered.
     const { app, debug } = createApp();
@@ -706,10 +706,10 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: true } }, noopRestart);
 
     expect(debug.join('\n')).toContain('cannot serve a plugin WebSocket');
-    void instance.stop();
+    await instance.stop();
   });
 
-  it('is not registered at all while control is disabled', () => {
+  it('is not registered at all while control is disabled', async () => {
     // Nothing to open a shell for: every mutating route is refused anyway.
     const { app, sockets } = createApp();
     const instance = plugin(app);
@@ -717,7 +717,7 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: false } }, noopRestart);
 
     expect(sockets).toHaveLength(0);
-    void instance.stop();
+    await instance.stop();
   });
 });
 
