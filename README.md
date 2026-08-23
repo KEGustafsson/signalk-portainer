@@ -8,8 +8,9 @@ publishes container health into the Signal K data model.
 
 Portainer may run on the same machine as the Signal K server or on any other
 reachable host, and several Portainer instances may be configured at once
-(boat and shore, for example). Each is configured with its own scheme, host,
-port, TLS settings, credentials and environment.
+(boat and shore, for example). Each is configured with its own address,
+credentials and TLS settings; which Docker environment it works against is
+chosen from the panel rather than typed into the configuration.
 
 > **Status: M6b — the console in the panel.** The last milestone in
 > [`docs/plan.md`](docs/plan.md): a terminal on the Containers tab, on top of
@@ -62,26 +63,33 @@ Then restart Signal K and enable **Portainer** under Server → Plugin Config.
 Everything is configured from the plugin's own page in the admin UI. The
 essentials:
 
-1. **Add an instance.** Give it a `name` — it is path-safe and renaming it
-   moves that instance's Signal K paths — then the `host` and `port` Portainer
-   answers on (`https` and `9443` by default). Add several for several
-   Portainers; the panel gets an instance selector.
+1. **Add a server.** Give it a `name` — it is path-safe and renaming it moves
+   that instance's Signal K paths — then the address Portainer answers on, as
+   one field: `https://localhost:9443`, `http://192.168.1.10:9000`, or
+   `https://portainer.example.com` for one behind a proxy on the usual port.
+   Add several entries for several Portainers; the panel gets a selector.
 
 2. **Give it a credential.** Either an **API access token** from Portainer →
    My account → Access tokens (starts with `ptr_`), or a username and
    password. Whichever you choose stays on the server: the browser never
    receives one.
 
-3. **Deal with the certificate.** Portainer's default certificate is
-   self-signed, so one of:
+3. **Deal with the certificate**, under **Advanced**. Portainer's default
+   certificate is self-signed, so one of:
    - paste its CA into **CA certificate (PEM)** — the option to prefer;
    - set **TLS servername override** when connecting by IP to a certificate
      issued for a hostname;
    - or turn **Verify TLS certificate** off, per instance, if you cannot
      supply a CA.
 
-4. **Pick an environment**, by id or by name. Leave it empty when Portainer has
-   exactly one and the plugin will select it.
+   The request timeout lives there too. Nothing else in that block needs
+   touching on a normal setup.
+
+4. **Pick an environment in the panel**, not here. The panel opens on its
+   **Environments** tab; press the row for the Docker host this Signal K server
+   should work with, and the plugin writes the choice back into its own
+   configuration. A Portainer with exactly one environment selects it without
+   being asked.
 
 5. **Decide what it may do.** Three independent switches, each enforced
    server-side however the panel behaves:
@@ -98,14 +106,17 @@ essentials:
 
 ## What works today (M6b)
 
-- Configure one or more Portainer instances (protocol, host, port, base path,
-  TLS, API token or username/password, environment).
+- Configure one or more Portainer instances (address, TLS, API token or
+  username/password).
 - The plugin resolves each instance's Docker environment, probes Swarm support,
   and reports connected versions in its Signal K plugin status.
 - An **embedded panel in the Signal K admin UI** with an instance selector and
   tables for environments, containers, stacks, images, volumes and networks —
-  plus services and nodes when the environment is a Swarm. It polls every 10s
-  and surfaces facade errors with their hint rather than an empty table.
+  plus services and nodes when the environment is a Swarm. It opens on the
+  **Environments** tab, where pressing a row is how the environment is chosen;
+  the choice is saved server-side, so the delta poller and the watchdog follow
+  it. It polls every 10s and surfaces facade errors with their hint rather than
+  an empty table.
 - **Container lifecycle** — start, stop, restart, kill and remove, each behind
   the guards below, from the API and from buttons on the Containers tab.
   Everything except starting asks first, in a dialog that names the container

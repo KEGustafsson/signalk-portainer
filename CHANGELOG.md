@@ -18,18 +18,24 @@ before installing this anywhere you would mind losing a container.
 
 #### Portainer connection
 
-- Any number of Portainer instances, each with its own protocol, host, port,
-  base path, request timeout, TLS settings and credentials — so a boat and a
-  shore server can be managed from one panel.
+- Any number of Portainer instances, each with its own address and credentials
+  — so a boat and a shore server can be managed from one panel. The address is
+  one field, written the way it is everywhere else: `https://boat.local:9443`,
+  and a port only where it is not the scheme's own. The settings almost nobody
+  changes — request timeout and the TLS options below — sit under **Advanced**,
+  so what has to be filled in to connect is all that is asked for.
 - Authentication by API access token (`ptr_…`) or by username and password,
   with the JWT refreshed as needed. Credentials stay server-side; the browser
   never sees one.
 - TLS with a supplied CA certificate, an SNI servername override for
   connecting by IP, and verification disabled only as an explicit per-instance
   choice.
-- Environment resolution by id or by name, auto-selecting when Portainer has
-  exactly one, plus a Swarm capability probe so swarm views appear only where
-  the daemon is in a swarm.
+- The Docker environment is chosen by pressing its row on the panel's
+  Environments tab, and the plugin writes that choice back into its own
+  configuration — so the delta poller and the watchdog work against the same
+  one, and it survives a restart. A Portainer with exactly one environment
+  resolves it without being asked. A Swarm capability probe comes with it, so
+  swarm views appear only where the daemon is in a swarm.
 - Environment health taken from Portainer's own verdict: `Status` for direct
   environments and `Heartbeat` for edge ones, rather than a locally recomputed
   check-in window that would call a healthy async edge agent — or one behind a
@@ -57,6 +63,11 @@ before installing this anywhere you would mind losing a container.
 - An embedded panel in the Signal K admin UI, with an instance selector and
   tables for environments, containers, stacks, images, volumes and networks —
   and services and nodes on a swarm. Polls every 10 seconds.
+- The panel opens on Environments: which Docker host it is working against is
+  the first thing to establish, and on a Portainer with several it is the first
+  thing that has to be answered. Pressing a row chooses it — the row already
+  says what the environment is, where it lives and whether it is answering,
+  which is what the choice actually turns on.
 - Lifecycle buttons per container, each behind a confirmation step that names
   the container and says what the action does to it.
 - A log viewer with follow, tail and since controls, an stderr filter, and a

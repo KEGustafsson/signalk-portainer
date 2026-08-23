@@ -1,7 +1,7 @@
 /**
  * @jest-environment jsdom
  */
-import { render, screen, waitFor, within } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import AppPanel from '../../src/webapp/AppPanel';
 
@@ -81,6 +81,25 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
   });
 }
 
+/**
+ * Renders the panel and opens the Containers tab.
+ *
+ * The panel lands on Environments — which Docker host it is working against is
+ * the first thing an operator needs to see, and on a Portainer with several it
+ * is the first thing they have to answer — so a test about containers asks for
+ * them rather than assuming the tab it starts on.
+ */
+async function showContainers(): Promise<void> {
+  render(<AppPanel />);
+  fireEvent.click(await screen.findByRole('button', { name: 'Containers' }));
+  // Waited for, not just clicked: the reads the panel starts as it mounts
+  // settle inside this act() rather than after the test has moved on, which
+  // React reports as an unwrapped update.
+  await waitFor(() =>
+    expect(screen.getByRole('button', { name: 'Containers' })).toHaveClass('active'),
+  );
+}
+
 describe('AppPanel', () => {
   afterEach(() => {
     jest.useRealTimers();
@@ -114,20 +133,19 @@ describe('AppPanel', () => {
       expect(screen.queryByText('signalk_influxdb')).not.toBeInTheDocument();
     });
 
-    it('offers every environment Portainer reported', async () => {
+    it('lands on the environments, and offers every one Portainer reported', async () => {
       global.fetch = unchosen() as unknown as typeof fetch;
 
       render(<AppPanel />);
 
-      const picker = await screen.findByLabelText('Environment');
-      expect(within(picker).getByRole('option', { name: 'primary' })).toBeInTheDocument();
-      expect(within(picker).getByRole('option', { name: 'lenovo' })).toBeInTheDocument();
-      // Nothing is pre-selected: the select must not look like it already
-      // answered the question it is asking.
-      expect((picker as HTMLSelectElement).value).toBe('');
+      // No tab is clicked: this is where the panel opens.
+      expect(await screen.findByRole('button', { name: 'Select primary' })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: 'Select lenovo' })).toBeInTheDocument();
+      // The choice is the table itself, not a control above it.
+      expect(screen.queryByLabelText('Environment')).not.toBeInTheDocument();
     });
 
-    it('saves the choice and then loads that environment', async () => {
+    it('saves the choice and then works against that environment', async () => {
       const user = userEvent.setup();
       const fetchMock = unchosen();
       global.fetch = fetchMock as unknown as typeof fetch;
@@ -168,10 +186,14 @@ describe('AppPanel', () => {
         return Promise.resolve({ ok: true, status: 200, json: async () => table[path] ?? {} });
       }) as unknown as typeof fetch);
 
-      await user.selectOptions(screen.getByLabelText('Environment'), '27');
+      await user.click(screen.getByRole('button', { name: 'Select lenovo' }));
 
+      await waitFor(() =>
+        expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument(),
+      );
+      // The tabs that had nothing to read now read against the chosen one.
+      await user.click(screen.getByRole('button', { name: 'Containers' }));
       expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
-      expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument();
 
       // Saved server-side rather than kept in the tab: the delta poller works
       // against the same client and would otherwise publish nothing.
@@ -183,22 +205,61 @@ describe('AppPanel', () => {
       );
     });
 
+    it('takes a press anywhere on the row, not only on its button', async () => {
+      const user = userEvent.setup();
+      const fetchMock = unchosen();
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      render(<AppPanel />);
+
+      await user.click(await screen.findByText('lenovo'));
+
+      await waitFor(() => {
+        const sent = fetchMock.mock.calls.map(
+          (call) => `${(call[1] as RequestInit | undefined)?.method ?? 'GET'} ${call[0] as string}`,
+        );
+        expect(
+          sent.some((entry) => entry.startsWith('PUT') && entry.includes('/environment')),
+        ).toBe(true);
+      });
+      // Once, not twice: the button sits inside the row that would otherwise
+      // answer the same press.
+      const puts = fetchMock.mock.calls.filter(
+        (call) => (call[1] as RequestInit | undefined)?.method === 'PUT',
+      );
+      expect(puts).toHaveLength(1);
+    });
+
+    it('does not offer the environment already in use', async () => {
+      global.fetch = unchosen(27) as unknown as typeof fetch;
+
+      render(<AppPanel />);
+
+      expect(await screen.findByRole('button', { name: 'Select primary' })).toBeInTheDocument();
+      expect(screen.queryByRole('button', { name: 'Select lenovo' })).not.toBeInTheDocument();
+      expect(screen.getByText('selected')).toBeInTheDocument();
+      // And the header names it, since it is the only place that still does
+      // once the operator moves off this tab.
+      expect(screen.getByText('lenovo', { selector: 'span.fw-semibold' })).toBeInTheDocument();
+    });
+
     it('stays out of the way when there is only one environment', async () => {
       global.fetch = routeFetch() as unknown as typeof fetch;
 
-      render(<AppPanel />);
+      await showContainers();
       await screen.findByText('signalk_influxdb');
 
-      // Nothing to choose, so nothing is asked.
-      expect(screen.queryByLabelText('Environment')).not.toBeInTheDocument();
+      // Nothing to choose, so nothing is asked and nothing takes up header
+      // space naming the only environment there is.
       expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument();
+      expect(screen.queryByText('Environment')).not.toBeInTheDocument();
     });
   });
 
   it('renders containers for the default instance on load', async () => {
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
     expect(screen.getByText('ais-logger')).toBeInTheDocument();
@@ -211,7 +272,7 @@ describe('AppPanel', () => {
     const fetchMock = routeFetch();
     global.fetch = fetchMock as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const paths = fetchMock.mock.calls.map((call) => call[0] as string);
@@ -222,7 +283,7 @@ describe('AppPanel', () => {
     global.fetch = routeFetch() as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     await user.click(screen.getByRole('button', { name: 'Stacks' }));
@@ -233,7 +294,7 @@ describe('AppPanel', () => {
   it('hides the swarm tabs when the daemon is not a swarm', async () => {
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     expect(screen.queryByRole('button', { name: 'Services' })).not.toBeInTheDocument();
@@ -243,7 +304,7 @@ describe('AppPanel', () => {
   it('shows the swarm tabs when the daemon is a swarm member', async () => {
     global.fetch = routeFetch({}, true) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByRole('button', { name: 'Services' })).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Nodes' })).toBeInTheDocument();
@@ -252,7 +313,7 @@ describe('AppPanel', () => {
   it('hides the instance selector when only one instance is configured', async () => {
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     expect(screen.queryByLabelText('Instance')).not.toBeInTheDocument();
@@ -270,7 +331,7 @@ describe('AppPanel', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
@@ -361,7 +422,7 @@ describe('AppPanel', () => {
       });
     }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByRole('alert')).toHaveTextContent('could not be reached');
     expect(screen.getByRole('alert')).toHaveTextContent('check host, port and protocol');
@@ -370,7 +431,7 @@ describe('AppPanel', () => {
   it('renders an empty state rather than a bare table', async () => {
     global.fetch = routeFetch({ '/containers': { containers: [] } }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByText('No containers')).toBeInTheDocument();
   });
@@ -380,7 +441,7 @@ describe('AppPanel', () => {
     // panel must degrade to "no actions offered", not to a blank page.
     global.fetch = routeFetch({ '/control': {} }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
@@ -405,7 +466,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
 
     await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Start' }));
@@ -423,7 +484,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     await user.click(actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' }));
@@ -439,7 +500,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     await user.click(actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' }));
 
@@ -455,7 +516,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     await user.click(actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' }));
 
@@ -480,7 +541,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
     await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Remove' }));
 
@@ -501,7 +562,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
     await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Remove' }));
 
@@ -521,7 +582,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
 
     await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Remove' }));
@@ -551,7 +612,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     await user.click(actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' }));
     await user.click(
@@ -570,7 +631,7 @@ describe('AppPanel container actions', () => {
       '/control': { ...control, allowPutControl: false },
     }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const stop = actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' });
@@ -581,7 +642,7 @@ describe('AppPanel container actions', () => {
   it('disables removal until destructive operations are enabled', async () => {
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const row = actionsFor('signalk_influxdb');
@@ -595,7 +656,7 @@ describe('AppPanel container actions', () => {
       '/control': { ...control, self: { ...control.self, shortId: running } },
     }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     expect(screen.getByText('Signal K')).toBeInTheDocument();
@@ -652,7 +713,7 @@ describe('AppPanel container actions', () => {
     }) as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
 
     await user.click(actionsFor('ais-logger').getByRole('button', { name: 'Start' }));
@@ -682,7 +743,7 @@ describe('AppPanel container actions', () => {
       },
     }) as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
 
     expect(await screen.findByText(/unable to identify which one/)).toBeInTheDocument();
   });
@@ -692,7 +753,7 @@ describe('AppPanel container actions', () => {
     }) as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
@@ -706,7 +767,7 @@ describe('AppPanel container actions', () => {
     // The logs of something that exited are the reason to look at them.
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('ais-logger');
 
     const row = screen.getByRole('group', { name: 'Actions for ais-logger' });
@@ -719,7 +780,7 @@ describe('AppPanel container actions', () => {
     // because there is nothing an operator could do about it.
     global.fetch = routeFetch() as unknown as typeof fetch;
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
@@ -738,7 +799,7 @@ describe('AppPanel container actions', () => {
     }) as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
 
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
@@ -767,7 +828,7 @@ describe('AppPanel container actions', () => {
     }) as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
     await user.click(within(row).getByRole('button', { name: 'Console' }));
@@ -801,7 +862,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
     await user.click(within(row).getByRole('button', { name: 'Console' }));
@@ -831,7 +892,7 @@ describe('AppPanel container actions', () => {
     global.fetch = fetchMock as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
     await user.click(within(row).getByRole('button', { name: 'Logs' }));
@@ -860,7 +921,7 @@ describe('AppPanel container actions', () => {
     }) as unknown as typeof fetch;
     const user = userEvent.setup();
 
-    render(<AppPanel />);
+    await showContainers();
     await screen.findByText('signalk_influxdb');
     const row = screen.getByRole('group', { name: 'Actions for signalk_influxdb' });
     await user.click(within(row).getByRole('button', { name: 'Logs' }));
@@ -894,7 +955,7 @@ describe('AppPanel container actions', () => {
 
     /** Opens the Stacks tab and waits for its rows. */
     const openStacks = async (user: ReturnType<typeof userEvent.setup>) => {
-      render(<AppPanel />);
+      await showContainers();
       await screen.findByText('signalk_influxdb');
       await user.click(screen.getByRole('button', { name: 'Stacks' }));
       await screen.findByRole('group', { name: 'Actions for signalk' });

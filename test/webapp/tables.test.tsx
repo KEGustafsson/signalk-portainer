@@ -2,6 +2,7 @@
  * @jest-environment jsdom
  */
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import {
   ContainersTable,
   EnvironmentsTable,
@@ -187,6 +188,64 @@ describe('tables with sparse Docker data', () => {
     expect(screen.getByText('up')).toHaveClass('bg-success');
     expect(screen.getByText('down')).toHaveClass('bg-danger');
     expect(screen.getByText('unknown')).toHaveClass('bg-secondary');
+  });
+
+  describe('choosing an environment from the table', () => {
+    const rows = [
+      { id: 1, name: 'primary', type: 1, health: 'up', isSelected: true },
+      { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: false },
+    ];
+
+    it('offers no way to choose when nothing can be chosen', () => {
+      render(<EnvironmentsTable rows={rows} />);
+
+      expect(screen.queryByRole('button')).not.toBeInTheDocument();
+    });
+
+    it('names each button after its own environment', () => {
+      render(<EnvironmentsTable rows={rows} actions={{ onSelect: () => {} }} />);
+
+      // Half a dozen buttons all reading "Select" tell a screen reader nothing
+      // about which host they would switch to.
+      expect(screen.getByRole('button', { name: 'Select lenovo' })).toBeInTheDocument();
+    });
+
+    it('reports the id of the row that was pressed', async () => {
+      const user = userEvent.setup();
+      const onSelect = jest.fn();
+      render(<EnvironmentsTable rows={rows} actions={{ onSelect }} />);
+
+      await user.click(screen.getByRole('button', { name: 'Select lenovo' }));
+      expect(onSelect).toHaveBeenCalledWith(27);
+
+      onSelect.mockClear();
+      await user.click(screen.getByText('lenovo'));
+      // Once: the button sits inside the row that would otherwise answer the
+      // same press a second time.
+      expect(onSelect).toHaveBeenCalledTimes(1);
+      expect(onSelect).toHaveBeenCalledWith(27);
+    });
+
+    it('takes no press while a switch is still going through', async () => {
+      const user = userEvent.setup();
+      const onSelect = jest.fn();
+      render(<EnvironmentsTable rows={rows} actions={{ onSelect, busy: true }} />);
+
+      await user.click(screen.getByRole('button', { name: 'Select lenovo' }));
+      await user.click(screen.getByText('lenovo'));
+
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it('does not offer the environment already in use', async () => {
+      const user = userEvent.setup();
+      const onSelect = jest.fn();
+      render(<EnvironmentsTable rows={rows} actions={{ onSelect }} />);
+
+      expect(screen.queryByRole('button', { name: 'Select primary' })).not.toBeInTheDocument();
+      await user.click(screen.getByText('primary'));
+      expect(onSelect).not.toHaveBeenCalled();
+    });
   });
 });
 

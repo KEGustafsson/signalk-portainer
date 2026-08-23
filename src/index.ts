@@ -3,6 +3,7 @@ import {
   ConfigError,
   normalizeConfig,
   PLUGIN_SCHEMA,
+  PLUGIN_UI_SCHEMA,
   type PluginConfig,
   type RawConfig,
 } from './config';
@@ -197,6 +198,9 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     name: 'Portainer',
     description: 'Manage Portainer CE containers and stacks, and publish container health',
     schema: PLUGIN_SCHEMA,
+    // Hides the environment fields the panel writes for itself, and puts the
+    // rest in the order an operator fills them in.
+    uiSchema: PLUGIN_UI_SCHEMA,
 
     start(options: object, _restart: (newConfiguration: object) => void): void {
       try {
