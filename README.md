@@ -27,6 +27,7 @@ port, TLS settings, credentials and environment.
 - [`docs/signalk-webapp.md`](docs/signalk-webapp.md) — the Signal K embedded
   webapp contract: Module Federation, the fixed `./AppPanel` name, React
   singleton sharing, and why cookie auth makes the facade design correct.
+- [`CHANGELOG.md`](CHANGELOG.md) — what is in each release.
 
 ## In one paragraph
 
@@ -34,11 +35,67 @@ The plugin talks to Portainer server-side (never from the browser: no CORS, no
 token in the client, no self-signed-cert interstitial, no mixed content) and
 exposes its own small REST facade under `/plugins/signalk-portainer/api/*`,
 protected by Signal K's own authentication. On top of that facade sit an
-embedded webapp for day-to-day container work. Planned for M2–M3: a delta
-poller turning container state into Signal K paths under
-`system.docker.<instance>.*`, watchdog notifications raising a Signal K alarm
-when a container that should be running is not, and PUT handlers so any Signal
-K client can start or stop a container.
+embedded webapp for day-to-day container work, a delta poller turning container
+state into Signal K paths under `system.docker.<instance>.*`, watchdog
+notifications raising a Signal K alarm when a container that should be running
+is not, and PUT handlers so any Signal K client can start or stop a container.
+
+## Installing it
+
+> Not yet published to npm, and not yet run against a real Portainer. Read
+> [What has and has not been verified](#what-has-and-has-not-been-verified)
+> first, and start with a Portainer whose containers you can afford to lose.
+
+Needs Signal K server on Node.js 22 or newer. Once published, it installs from
+**Appstore → Available** in the Signal K admin UI, like any other plugin. To
+try it before then, from a checkout:
+
+```bash
+npm install && npm run build && npm pack
+cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.0.tgz
+```
+
+Then restart Signal K and enable **Portainer** under Server → Plugin Config.
+
+## Setting it up
+
+Everything is configured from the plugin's own page in the admin UI. The
+essentials:
+
+1. **Add an instance.** Give it a `name` — it is path-safe and renaming it
+   moves that instance's Signal K paths — then the `host` and `port` Portainer
+   answers on (`https` and `9443` by default). Add several for several
+   Portainers; the panel gets an instance selector.
+
+2. **Give it a credential.** Either an **API access token** from Portainer →
+   My account → Access tokens (starts with `ptr_`), or a username and
+   password. Whichever you choose stays on the server: the browser never
+   receives one.
+
+3. **Deal with the certificate.** Portainer's default certificate is
+   self-signed, so one of:
+   - paste its CA into **CA certificate (PEM)** — the option to prefer;
+   - set **TLS servername override** when connecting by IP to a certificate
+     issued for a hostname;
+   - or turn **Verify TLS certificate** off, per instance, if you cannot
+     supply a CA.
+
+4. **Pick an environment**, by id or by name. Leave it empty when Portainer has
+   exactly one and the plugin will select it.
+
+5. **Decide what it may do.** Three independent switches, each enforced
+   server-side however the panel behaves:
+
+   | Setting                                      | Default | What it allows                                                     |
+   | -------------------------------------------- | ------- | ------------------------------------------------------------------ |
+   | Allow Signal K PUT control                   | on      | any mutation at all — lifecycle, stacks, the console               |
+   | Allow destructive operations                 | **off** | removing containers and volumes, deleting stacks, pruning          |
+   | Allow managing the Signal K container itself | **off** | acting on the container Signal K runs in, which can stop this page |
+
+6. **Choose what to publish.** Deltas are off, health or full, on a poll
+   interval; CPU and memory are separate because they cost one API call per
+   container per poll. Add a watchdog entry for any container whose absence
+   should raise a Signal K alarm.
 
 ## What works today (M6b)
 
@@ -342,7 +399,7 @@ would be easy to read that as "finished".
 
 **Verified.** 702 unit tests, no network required, covering every module in
 `src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
-tests assert what the plugin *sent* as well as what it did with the reply, so
+tests assert what the plugin _sent_ as well as what it did with the reply, so
 the request shapes match Portainer's documented API. The Signal K plugin
 contract — entry point, schema, start/stop lifecycle, no deprecated server APIs
 — is checked by Signal K's own CI workflow on Node 22 and 24 across Linux x64,
