@@ -24,6 +24,13 @@ protected by Signal K's own authentication, and on top of that:
   should be running is not;
 - **PUT handlers** so any Signal K client can start, stop or restart a container.
 
+![The Containers tab of the Portainer panel, embedded in the Signal K admin UI: six containers with their state, image, published ports and per-row actions, with instance and environment named in the header](docs/images/panel-containers.png)
+
+> The screenshots are taken with **two** Portainers configured, which is why the
+> header carries an **Instance** selector: that control appears only where there
+> is more than one, so an installation with a single Portainer — the usual case —
+> shows the panel without it.
+
 ## Requirements
 
 - Signal K server running on Node.js 22 or newer.
@@ -44,6 +51,50 @@ npm install && npm run build && npm pack
 cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.0.tgz
 ```
 
+## Running Portainer
+
+If there is no Portainer on the boat yet, this is enough of one. Put it in a
+directory of its own as `docker-compose.yml` and run `docker compose up -d`:
+
+```yaml
+services:
+  portainer:
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock
+    ports:
+      # HTTPS, published to this machine only: the plugin reaches Portainer
+      # from the Signal K server, and no browser ever talks to it directly.
+      - '127.0.0.1:9443:9443'
+      # - '127.0.0.1:9000:9000'   # plain HTTP instead, if the certificate is more trouble than it is worth
+      # - '8000:8000'             # the Edge agent tunnel, which does have to be reachable
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+```
+
+The address for [step 1](#1-add-an-instance) is then `https://localhost:9443`,
+and the certificate it answers with is Portainer's own self-signed one, which
+is what [step 3](#3-deal-with-the-certificate) is about. Naming the container
+`portainer` also keeps it recognisable in the Signal K paths, which lower-case
+what they are given: `system.docker.<instance>.containers.portainer.state`.
+
+What that file does: runs Portainer's current long-term release — `lts` follows
+the long-term channel rather than a fixed version, so name an exact tag or
+digest where a rebuild has to come back identical — restarts it unless you stop
+it yourself, and publishes its HTTPS port to this machine only, which is all the
+plugin needs to reach it. Portainer's database lives in `./data`, beside the
+compose file. `/var/run/docker.sock` is how it manages Docker, and passing it in
+gives the container root-equivalent control of the host; that is true of any
+Portainer installation, and it is why this plugin's destructive and
+self-management switches stay off until you turn them on. The two commented
+lines add plain HTTP and the Edge agent tunnel.
+
+If Signal K itself runs in a container, `localhost` inside it is not the host:
+put both on the same compose network and use `https://portainer:9443`, or give
+the plugin the host's own address on the network they share.
+
 ## Configuration
 
 Everything is configured from the plugin's own page in the Signal K admin UI.
@@ -54,8 +105,12 @@ Give it a `name` — it is path-safe, and renaming it moves that instance's Sign
 K paths — then the address Portainer answers on, as one field:
 `https://localhost:9443`, `http://192.168.1.10:9000`, or
 `https://portainer.example.com` for one behind a proxy on the usual port. Add
-several entries for several Portainers; the panel then shows an instance
-selector.
+several entries for several Portainers; the panel then shows an **Instance**
+selector in its header, which is absent while there is only one to work with.
+The screenshots on this page are taken with a boat and a shore server
+configured, so they have it.
+
+![The plugin's configuration page: the status line reading "Connected: boat 2.21.4 (boat); shore 2.21.4 (nas)", then name, address, sign-in method and access token for the first server, with the Advanced block below them](docs/images/plugin-config.png)
 
 ### 2. Give it a credential
 
@@ -84,6 +139,8 @@ Docker host this Signal K server should work with, and the plugin writes the
 choice back into its own configuration, where it survives a restart. A Portainer
 with exactly one environment selects it without being asked.
 
+![The panel on a Portainer whose environment has not been chosen: a notice reading "Choose an environment to continue — This Portainer manages 3 environments. Press the one this Signal K server should work with", above the three rows, each with a Select button](docs/images/panel-environment-choose.png)
+
 ### 5. Decide what the plugin may do
 
 Three independent switches, each enforced server-side however the panel behaves:
@@ -99,13 +156,17 @@ Three independent switches, each enforced server-side however the panel behaves:
 Deltas are `off`, `health` or `full`, on a configurable poll interval. Add a
 watchdog entry for any container whose absence should raise a Signal K alarm.
 
+![The rest of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three switches under "Control", and a watchdog entry naming a container and the server it belongs to](docs/images/plugin-control.png)
+
 ## Using the panel
 
-The plugin adds a **Portainer** panel to the Signal K admin UI with an instance
-selector and tables for environments, containers, stacks, images, volumes and
-networks — plus services and nodes when the environment is a Swarm. It polls
-every 10 seconds, and shows facade errors with their hint rather than an empty
-table.
+The plugin adds a **Portainer** panel to the Signal K admin UI with tables for
+environments, containers, stacks, images, volumes and networks — plus services
+and nodes when the environment is a Swarm, and an instance selector in the
+header when more than one Portainer is configured. It polls every 10 seconds,
+and shows facade errors with their hint rather than an empty table.
+
+![The Images tab: repository tags, short image ids, sizes and ages](docs/images/panel-images.png)
 
 ### Environments
 
@@ -116,6 +177,8 @@ the one in use. The choice is saved server-side, so the delta poller and the
 watchdog follow it too. Until a Portainer with several environments has been
 answered, the other tabs say so rather than showing another host's containers.
 
+![The Environments tab: a local Docker host marked "selected", an agent environment and an edge agent that is down, each with a Select button on the rows not in use](docs/images/panel-environments.png)
+
 ### Containers
 
 Start, stop, restart, kill and remove, each behind the guards described below.
@@ -124,6 +187,8 @@ container and says what the action does to it. The container Signal K itself
 runs in is labelled as such and its buttons are disabled. A button the
 configuration does not allow is disabled, with the setting to change as its
 tooltip, rather than left to fail on click.
+
+![The confirmation dialog over the Containers table, headed "Stop mosquitto?", naming the container and its short id and saying "Its services stop until it is started again"](docs/images/panel-confirm.png)
 
 ### Logs
 
@@ -143,6 +208,8 @@ is labelled `stdout`.
 
 At most 3 streams may be open per container and 8 in total, so forgotten browser
 tabs cannot exhaust file descriptors on a small machine.
+
+![The log viewer, following a running container: line and history selectors, Timestamps, Follow, stderr-only and Wrap toggles, "Live · 21 lines" in the corner, and stderr lines coloured apart from the rest](docs/images/panel-logs.png)
 
 ### Console
 
@@ -164,6 +231,8 @@ The terminal is [xterm.js](https://xtermjs.org/), loaded in its own chunk the
 first time somebody opens a shell, so a panel that never does never downloads
 it.
 
+![The console dialog: a shell selector reading /bin/sh, "Connected" in the corner, and a terminal holding the output of uname, ls and df run inside the container](docs/images/panel-console.png)
+
 ### Stacks
 
 Each row offers what applies to it: a running stack is stopped and a stopped one
@@ -179,6 +248,10 @@ A stack deployed from a repository is shown read-only: deploying a file over it
 would detach it from git, so change the file in git and redeploy instead.
 Updating a file-based stack drops any auto-update Portainer had on it, and the
 answer says so. `prune` is always sent explicitly and defaults to off.
+
+![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](docs/images/panel-stacks.png)
+
+![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](docs/images/panel-stack-editor.png)
 
 ## Signal K integration
 
@@ -198,6 +271,8 @@ system.docker.<instance>.containers.<key>.id         string   (full level)
 
 The prefix `system.docker` is configurable. Paths carry Signal K metadata, so
 dashboards render labelled values rather than bare numbers.
+
+![Signal K's own data browser, filtered to "docker": watchdog notifications reading NORMAL, then each container's state and health under system.docker.boat.containers, all sourced from signalk-portainer](docs/images/signalk-paths.png)
 
 How much is published is a choice:
 

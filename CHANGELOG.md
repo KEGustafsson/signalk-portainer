@@ -93,6 +93,20 @@ containers you can afford to lose.
   container name, then short id, so `docker compose up` recreating a container
   does not move its paths.
 
+#### Documentation
+
+- Screenshots of the panel, the configuration page and the published Signal K
+  paths in the README, captured from the plugin running in a real Signal K
+  admin UI against a fixture Portainer — including the first-run state where
+  the environment has still to be chosen.
+- `tools/screenshots/` — the fixture Portainer those captures run against, and
+  the script that drives the admin UI and takes them, so an image can be
+  retaken rather than edited when the panel changes.
+- A Docker Compose example for running Portainer CE itself, with what each of
+  its choices is for: the LTS tag, a data directory that does not move with the
+  working directory, a restart policy that respects a container stopped on
+  purpose, and a port published to the Signal K server rather than to the boat.
+
 ### Security
 
 - **Self-protection.** The container running Signal K is identified from its
