@@ -8,8 +8,9 @@ publishes container health into the Signal K data model.
 
 Portainer may run on the same machine as the Signal K server or on any other
 reachable host, and several Portainer instances may be configured at once (boat
-and shore, for example). Each has its own scheme, host, port, TLS settings,
-credentials and environment.
+and shore, for example). Each has its own address, credentials and TLS settings;
+which Docker environment it works against is chosen in the panel rather than
+typed into the configuration.
 
 The plugin talks to Portainer server-side, so no token reaches the browser and
 there is no CORS, mixed-content or self-signed-certificate interstitial to work
@@ -50,9 +51,11 @@ Everything is configured from the plugin's own page in the Signal K admin UI.
 ### 1. Add an instance
 
 Give it a `name` — it is path-safe, and renaming it moves that instance's Signal
-K paths — then the `host` and `port` Portainer answers on (`https` and `9443` by
-default). Add several entries for several Portainers; the panel then shows an
-instance selector.
+K paths — then the address Portainer answers on, as one field:
+`https://localhost:9443`, `http://192.168.1.10:9000`, or
+`https://portainer.example.com` for one behind a proxy on the usual port. Add
+several entries for several Portainers; the panel then shows an instance
+selector.
 
 ### 2. Give it a credential
 
@@ -62,7 +65,8 @@ stays on the server; the browser never receives one.
 
 ### 3. Deal with the certificate
 
-Portainer's default certificate is self-signed, so pick one of:
+Under **Advanced**. Portainer's default certificate is self-signed, so pick one
+of:
 
 - paste its CA into **CA certificate (PEM)** — the option to prefer;
 - set **TLS servername override** when connecting by IP to a certificate issued
@@ -70,10 +74,15 @@ Portainer's default certificate is self-signed, so pick one of:
 - or turn **Verify TLS certificate** off for that instance, if you cannot supply
   a CA.
 
-### 4. Pick an environment
+The request timeout lives there too. Nothing else in that block needs touching
+on a normal setup.
 
-By id or by name. Leave it empty when Portainer has exactly one environment and
-the plugin selects it.
+### 4. Pick an environment, in the panel
+
+Not here. The panel opens on its **Environments** tab; press the row for the
+Docker host this Signal K server should work with, and the plugin writes the
+choice back into its own configuration, where it survives a restart. A Portainer
+with exactly one environment selects it without being asked.
 
 ### 5. Decide what the plugin may do
 
@@ -97,6 +106,15 @@ selector and tables for environments, containers, stacks, images, volumes and
 networks — plus services and nodes when the environment is a Swarm. It polls
 every 10 seconds, and shows facade errors with their hint rather than an empty
 table.
+
+### Environments
+
+Where the panel opens, since which Docker host it is working against is the
+first thing to establish. Each row says what the environment is, where it lives
+and whether it is answering; pressing one selects it, and the header then names
+the one in use. The choice is saved server-side, so the delta poller and the
+watchdog follow it too. Until a Portainer with several environments has been
+answered, the other tabs say so rather than showing another host's containers.
 
 ### Containers
 

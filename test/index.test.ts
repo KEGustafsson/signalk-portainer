@@ -87,6 +87,20 @@ describe('plugin lifecycle', () => {
     expect(typeof instance.registerWithRouter).toBe('function');
   });
 
+  it('keeps the environment out of the configuration form', () => {
+    // It is chosen by pressing a row on the panel's Environments tab, and the
+    // plugin writes it back itself. An id typed in here by hand is how an
+    // operator ends up managing the wrong Docker host.
+    const { app } = createApp();
+    const instance = plugin(app);
+
+    const ui = instance.uiSchema as {
+      instances: { items: Record<string, { 'ui:widget'?: string }> };
+    };
+    expect(ui.instances.items.environmentId?.['ui:widget']).toBe('hidden');
+    expect(ui.instances.items.environmentName?.['ui:widget']).toBe('hidden');
+  });
+
   it('reports a configuration problem as a plugin error rather than throwing', () => {
     const { app, errors } = createApp();
     const instance = plugin(app);
