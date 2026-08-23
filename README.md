@@ -54,6 +54,68 @@ npm install && npm run build && npm pack
 cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.0.tgz
 ```
 
+## Running Portainer
+
+If there is no Portainer on the boat yet, this is enough of one. Put it in a
+directory of its own as `docker-compose.yml` and run `docker compose up -d`:
+
+```yaml
+services:
+  portainer:
+    image: portainer/portainer-ce:lts
+    container_name: portainer
+    restart: unless-stopped
+    command: -H unix:///var/run/docker.sock
+    ports:
+      # HTTPS, published to this machine only: the plugin reaches Portainer
+      # from the Signal K server, and no browser ever talks to it directly.
+      - '127.0.0.1:9443:9443'
+      # - '9000:9000'   # plain HTTP, if you would rather not deal with a certificate
+      # - '8000:8000'   # only if you use Edge agents
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - ./data:/data
+```
+
+The address for [step 1](#1-add-an-instance) is then `https://localhost:9443`,
+and the certificate it answers with is Portainer's own self-signed one, which
+is what [step 3](#3-deal-with-the-certificate) is about. Naming the container
+`portainer` also keeps it recognisable in the Signal K paths, which lower-case
+what they are given: `system.docker.<instance>.containers.portainer.state`.
+
+Four of those lines are choices rather than boilerplate:
+
+- **`lts`, not `latest`.** Portainer publishes a long-term channel and a
+  short-term one, and `latest` follows the short-term releases. This plugin
+  speaks the CE 2.x API; pinning `lts` — or an exact tag like `2.39.6` — means
+  a version that moves it does so when you decide.
+- **`./data`, not `$PWD/data`.** Compose resolves a relative path against the
+  directory holding the compose file, but `$PWD` against wherever the command
+  was run from. `docker compose -f /opt/portainer/docker-compose.yml up -d`
+  from your home directory would put Portainer's database in your home
+  directory — and the next `up` from somewhere else would start it with an
+  empty one.
+- **`unless-stopped`, not `always`.** `always` starts a container again when
+  the daemon starts, including one you deliberately stopped — from this
+  plugin's panel, say. `unless-stopped` leaves that decision alone, which
+  matters when the thing being stopped is being stopped for a reason.
+- **`127.0.0.1:9443`, not `9443`.** The plugin talks to Portainer from the
+  Signal K server, so nothing has to reach it across the boat's network.
+  Publishing on every interface puts a UI that manages Docker on the same wifi
+  as the chartplotter and every guest's phone. Bind it wider only if you also
+  want Portainer's own UI from another machine, and then give it a certificate.
+
+And one line that is not a choice: mounting `/var/run/docker.sock` hands the
+container root-equivalent control of the host, since anything that can talk to
+that socket can start another container that mounts the host's filesystem.
+That is true of every Portainer installation rather than of this compose file
+in particular, and it is why this plugin's destructive and self-management
+switches are off until you turn them on.
+
+If Signal K itself runs in a container, `localhost` inside it is not the host:
+put both on the same compose network and use `https://portainer:9443`, or give
+the plugin the host's own address on the network they share.
+
 ## Configuration
 
 Everything is configured from the plugin's own page in the Signal K admin UI.

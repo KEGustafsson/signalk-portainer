@@ -102,6 +102,10 @@ containers you can afford to lose.
 - `tools/screenshots/` — the fixture Portainer those captures run against, and
   the script that drives the admin UI and takes them, so an image can be
   retaken rather than edited when the panel changes.
+- A Docker Compose example for running Portainer CE itself, with what each of
+  its choices is for: the LTS tag, a data directory that does not move with the
+  working directory, a restart policy that respects a container stopped on
+  purpose, and a port published to the Signal K server rather than to the boat.
 
 ### Security
 
