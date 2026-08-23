@@ -32,6 +32,13 @@ export interface ConsoleServer {
   close(): void;
 }
 
+/** Everything needed to reach Portainer's exec socket, TLS included. */
+export interface ConsoleTarget {
+  url: string;
+  headers: Record<string, string>;
+  tls?: { ca?: string; rejectUnauthorized?: boolean; servername?: string } | undefined;
+}
+
 export interface ConsoleOptions {
   register: (path: string) => ConsoleEndpoint;
   tickets: ExecTickets;
@@ -40,10 +47,7 @@ export interface ConsoleOptions {
   /** How many shells may be open at once; injectable for tests. */
   limits?: StreamLimiter;
   /** Opens the socket to Portainer; injectable so tests need no network. */
-  connect?: (target: {
-    url: string;
-    headers: Record<string, string>;
-  }) => Promise<RelaySocket> | RelaySocket;
+  connect?: (target: ConsoleTarget) => Promise<RelaySocket> | RelaySocket;
   idleMs?: number;
 }
 
@@ -57,15 +61,20 @@ export function openConsole(options: ConsoleOptions): ConsoleServer {
   const endpoint = options.register(CONSOLE_PATH);
   const limits = options.limits ?? new StreamLimiter(CONSOLE_LIMITS);
   const open = new Set<() => void>();
+  // Accepting is asynchronous — a ticket, then Portainer — and close() can run
+  // in the middle of it. Without this, a connection that finished arriving
+  // after shutdown would build a relay nothing was left to end.
+  const state = { closing: false };
 
   endpoint.on('error', (error) => options.log(`console endpoint: ${error.message}`));
 
   endpoint.on('connection', (socket, request) => {
-    void accept(socket, request, options, limits, open);
+    void accept(socket, request, options, limits, open, state);
   });
 
   return {
     close(): void {
+      state.closing = true;
       // The endpoint closing terminates the browser sockets; ending each pair
       // first is what closes the sockets to Portainer.
       for (const end of [...open]) end();
@@ -81,7 +90,15 @@ async function accept(
   options: ConsoleOptions,
   limits: StreamLimiter,
   open: Set<() => void>,
+  state: { closing: boolean },
 ): Promise<void> {
+  // Registered before anything is awaited: a browser that gives up while
+  // Portainer is still answering has already emitted close by the time the
+  // await resolves, and a listener added then never runs.
+  let gone = false;
+  browser.on('close', () => {
+    gone = true;
+  });
   const grant = options.tickets.consume(ticketOf(request.url));
   if (!grant) {
     // Deliberately uninformative: a caller without a ticket learns only that
@@ -102,6 +119,16 @@ async function accept(
     const client: PortainerClient = registry.get(grant.instance);
     const target = await client.execSocket(grant.execId);
     const upstream = await (options.connect ?? connectWithWs)(target);
+
+    // The plugin may have stopped, or the browser given up, while Portainer
+    // was answering. Either way there is nothing to relay to, and the socket
+    // just opened has to be closed rather than left holding a shell.
+    if (state.closing || gone) {
+      upstream.close();
+      release?.();
+      browser.close(RELAY_CLOSE.refused, 'the console is no longer available');
+      return;
+    }
 
     const end = relay(browser, upstream, {
       ...(options.idleMs !== undefined ? { idleMs: options.idleMs } : {}),
@@ -137,11 +164,16 @@ export function ticketOf(url: string | undefined): string | undefined {
 }
 
 /** The real client, kept apart so the relay can be tested without a network. */
-async function connectWithWs(target: {
-  url: string;
-  headers: Record<string, string>;
-}): Promise<RelaySocket> {
-  const socket = new WebSocket(target.url, { headers: target.headers });
+async function connectWithWs(target: ConsoleTarget): Promise<RelaySocket> {
+  // The same TLS settings the REST calls use. Without these a Portainer behind
+  // a private CA answers every request and refuses the console, which is a
+  // baffling thing to debug.
+  const socket = new WebSocket(target.url, {
+    headers: target.headers,
+    ...(target.tls?.ca ? { ca: target.tls.ca } : {}),
+    ...(target.tls?.servername ? { servername: target.tls.servername } : {}),
+    ...(target.tls?.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
+  });
   await new Promise<void>((resolve, reject) => {
     socket.once('open', () => resolve());
     socket.once('error', (error) => reject(error));

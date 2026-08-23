@@ -94,6 +94,66 @@ describe('ExecTickets', () => {
     expect(() => store.mint(grant())).not.toThrow();
   });
 
+  describe('reserving before there is a shell', () => {
+    it('holds a place that is not yet redeemable', () => {
+      // The exec instance does not exist yet; a ticket for it would be a
+      // ticket to nothing.
+      const { store } = tickets();
+      const reservation = store.reserve();
+
+      expect(store.outstanding).toBe(1);
+      expect(store.consume('ticket-1')).toBeUndefined();
+
+      const ticket = reservation.commit(grant());
+      expect(store.consume(ticket)).toEqual(grant());
+    });
+
+    it('gives the place back when the shell never came to exist', () => {
+      const { store } = tickets();
+      const reservation = store.reserve();
+
+      reservation.release();
+
+      expect(store.outstanding).toBe(0);
+    });
+
+    it('refuses a reservation when the store is full, before anything is created', () => {
+      // This is the point of reserving first: the refusal happens before the
+      // exec instance is made, so none is orphaned.
+      const { store } = tickets();
+      for (let index = 0; index < 32; index += 1) store.mint(grant(`exec-${index}`));
+
+      expect(() => store.reserve()).toThrow(ExecTicketError);
+    });
+
+    it('ignores a release after the reservation was committed', () => {
+      const { store } = tickets();
+      const reservation = store.reserve();
+      const ticket = reservation.commit(grant());
+
+      reservation.release();
+
+      expect(store.consume(ticket)).toEqual(grant());
+    });
+
+    it('refuses to be committed twice', () => {
+      const { store } = tickets();
+      const reservation = store.reserve();
+      reservation.commit(grant());
+
+      expect(() => reservation.commit(grant('exec-2'))).toThrow(/already been settled/);
+    });
+
+    it('expires like any other held place', () => {
+      const { store, advance } = tickets(30_000);
+      store.reserve();
+
+      advance(30_001);
+
+      expect(store.outstanding).toBe(0);
+    });
+  });
+
   it('forgets everything when the plugin stops', () => {
     const { store } = tickets();
     const ticket = store.mint(grant());

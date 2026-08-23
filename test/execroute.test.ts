@@ -201,6 +201,42 @@ describe('facade console', () => {
     expect(lines.join('\n')).toContain('console /bin/sh');
   });
 
+  it('refuses a shell before creating one, once no ticket can be held', async () => {
+    // The order is the point: creating the exec instance and then finding
+    // there is no room for its ticket leaves a shell in Docker that nothing
+    // can ever start, and a caller retrying accumulates them.
+    withEnvironment();
+    let created = false;
+    withExec(() => (created = true));
+    const tickets = new ExecTickets();
+    for (let index = 0; index < 32; index += 1)
+      tickets.mint({ instance: 'boat', execId: `exec-${index}`, containerId: CONTAINER });
+
+    const res = await request(app({ execTickets: tickets }))
+      .post(`/api/containers/${CONTAINER}/exec`)
+      .send({});
+
+    expect(res.status).toBe(429);
+    expect(res.body.hint).toContain('wait a moment');
+    expect(created).toBe(false);
+  });
+
+  it('gives the held place back when Docker refuses the shell', async () => {
+    // Otherwise a container that is stopped would eat a place in the store on
+    // every attempt, until nobody could open a console anywhere.
+    withEnvironment();
+    boat()
+      .intercept({ path: `/api/endpoints/1/docker/containers/${CONTAINER}/exec`, method: 'POST' })
+      .reply(409, { message: 'Container is not running' });
+    const tickets = new ExecTickets();
+
+    await request(app({ execTickets: tickets }))
+      .post(`/api/containers/${CONTAINER}/exec`)
+      .send({});
+
+    expect(tickets.outstanding).toBe(0);
+  });
+
   it('answers a Docker failure as a status rather than a ticket', async () => {
     withEnvironment();
     boat()

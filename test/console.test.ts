@@ -4,6 +4,30 @@ import { ExecTickets } from '../src/exectickets';
 import type { InstanceRegistry } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 
+/** Every `ws` socket the module under test asked for, and what it asked for. */
+const mockSockets: { url: string; options: Record<string, unknown> }[] = [];
+
+jest.mock('ws', () => ({
+  WebSocket: class {
+    constructor(url: string, options: Record<string, unknown>) {
+      mockSockets.push({ url, options });
+      // The real socket opens on the next turn, so the await in connectWithWs
+      // is a real one.
+      setImmediate(() => this.handlers.get('open')?.());
+    }
+    private readonly handlers = new Map<string, () => void>();
+    once(event: string, listener: () => void): this {
+      this.handlers.set(event, listener);
+      return this;
+    }
+    on(): this {
+      return this;
+    }
+    send(): void {}
+    close(): void {}
+  },
+}));
+
 /** Either end of a relay, driven by the test. */
 class FakeSocket implements RelaySocket {
   sent: (string | Uint8Array)[] = [];
@@ -72,9 +96,11 @@ describe('ticketOf', () => {
 describe('openConsole', () => {
   const setup = (
     overrides: {
-      connect?: () => RelaySocket | Promise<RelaySocket>;
+      connect?: (target: unknown) => RelaySocket | Promise<RelaySocket>;
       limits?: StreamLimiter;
       registry?: () => InstanceRegistry | undefined;
+      /** Leaves `connect` unset, so the real `ws` client is used. */
+      realConnect?: true;
     } = {},
   ) => {
     const endpoint = new FakeEndpoint();
@@ -87,7 +113,7 @@ describe('openConsole', () => {
         execSocket: async () => ({
           url: 'wss://boat.test:9443/api/websocket/exec?endpointId=1&id=exec-1',
           headers: { 'x-api-key': 'ptr_secret' },
-          tls: undefined,
+          tls: { ca: 'a private CA', rejectUnauthorized: false },
         }),
       }),
     } as unknown as InstanceRegistry;
@@ -99,7 +125,7 @@ describe('openConsole', () => {
       log: (message) => lines.push(message),
       idleMs: 0,
       ...(overrides.limits ? { limits: overrides.limits } : {}),
-      connect: overrides.connect ?? (() => upstream),
+      ...(overrides.realConnect ? {} : { connect: overrides.connect ?? (() => upstream) }),
     });
 
     /** Connects a browser holding a ticket for this container. */
@@ -207,6 +233,89 @@ describe('openConsole', () => {
     expect(upstream.closed).toBeDefined();
     expect(browser.closed).toBeDefined();
     expect(endpoint.closed).toBe(true);
+  });
+
+  it('does not build a relay for a connection that finished arriving after shutdown', async () => {
+    // Accepting is asynchronous — a ticket, then Portainer — and the plugin can
+    // stop in the middle of it. A relay built afterwards is one nothing is left
+    // to end, and the shell in the container outlives the plugin.
+    let arrive!: (socket: RelaySocket) => void;
+    const pending = new Promise<RelaySocket>((resolve) => {
+      arrive = resolve;
+    });
+    const upstream = new FakeSocket();
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    const { tickets, connect, server } = setup({ connect: () => pending, limits });
+
+    const browser = await connect(tickets.mint(grant));
+    server.close();
+    arrive(upstream);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(upstream.closed).toBeDefined();
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.refused);
+    // And the slot it took is given back, rather than held by a shell that
+    // never opened.
+    expect(limits.openCount).toBe(0);
+  });
+
+  it('does not build a relay for a browser that gave up while Portainer answered', async () => {
+    let arrive!: (socket: RelaySocket) => void;
+    const pending = new Promise<RelaySocket>((resolve) => {
+      arrive = resolve;
+    });
+    const upstream = new FakeSocket();
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    const { tickets, connect } = setup({ connect: () => pending, limits });
+
+    const browser = await connect(tickets.mint(grant));
+    browser.emit('close');
+    arrive(upstream);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(upstream.closed).toBeDefined();
+    expect(limits.openCount).toBe(0);
+  });
+
+  it('carries the TLS settings as far as the socket it opens', async () => {
+    // A Portainer behind a private CA answers every REST call and refuses the
+    // console, which is a baffling thing to debug. This drives the real `ws`
+    // client rather than an injected one, because that is where the settings
+    // were being dropped.
+    mockSockets.length = 0;
+    const { tickets, connect } = setup({ realConnect: true });
+
+    await connect(tickets.mint(grant));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockSockets).toHaveLength(1);
+    expect(mockSockets[0]?.url).toContain('/api/websocket/exec?endpointId=1&id=exec-1');
+    expect(mockSockets[0]?.options).toEqual({
+      headers: { 'x-api-key': 'ptr_secret' },
+      ca: 'a private CA',
+      rejectUnauthorized: false,
+    });
+  });
+
+  it('leaves the TLS settings out when there are none to pass', async () => {
+    // An http Portainer, or one with a publicly trusted certificate: `ws` must
+    // be left to its own defaults rather than handed undefined ones.
+    mockSockets.length = 0;
+    const registry = {
+      defaultName: 'boat',
+      get: () => ({
+        execSocket: async () => ({
+          url: 'ws://boat.test:9000/api/websocket/exec?endpointId=1&id=exec-1',
+          headers: { 'x-api-key': 'ptr_secret' },
+        }),
+      }),
+    } as unknown as InstanceRegistry;
+    const { tickets, connect } = setup({ realConnect: true, registry: () => registry });
+
+    await connect(tickets.mint(grant));
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(mockSockets[0]?.options).toEqual({ headers: { 'x-api-key': 'ptr_secret' } });
   });
 
   it('logs an endpoint error rather than throwing out of it', () => {

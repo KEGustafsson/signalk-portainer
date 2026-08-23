@@ -52,8 +52,16 @@ export class ExecTicketError extends Error {
   }
 }
 
+/** A held place in the store, filled in once there is a shell to point at. */
+export interface ExecReservation {
+  /** Fills the reservation and returns the ticket that redeems it. */
+  commit(grant: ExecGrant): string;
+  /** Gives the place back, for a shell that never came to exist. */
+  release(): void;
+}
+
 export class ExecTickets {
-  private readonly issued = new Map<string, { grant: ExecGrant; expiresAt: number }>();
+  private readonly issued = new Map<string, { grant?: ExecGrant; expiresAt: number }>();
 
   constructor(
     private readonly ttlMs: number = DEFAULT_TTL_MS,
@@ -63,11 +71,38 @@ export class ExecTickets {
 
   /** A ticket for this grant. Valid once, and only for a moment. */
   mint(grant: ExecGrant): string {
+    return this.reserve().commit(grant);
+  }
+
+  /**
+   * Takes a place in the queue before there is anything to put in it.
+   *
+   * The order matters: creating the exec instance and then finding there is no
+   * room for its ticket leaves an exec in Docker that nothing can ever start,
+   * and a caller retrying accumulates them. Reserving first means a full store
+   * is refused before anything is created.
+   */
+  reserve(): ExecReservation {
     this.expire();
     if (this.issued.size >= MAX_OUTSTANDING) throw new ExecTicketError();
-    const ticket = this.random();
-    this.issued.set(ticket, { grant, expiresAt: this.now() + this.ttlMs });
-    return ticket;
+    const placeholder = this.random();
+    this.issued.set(placeholder, { expiresAt: this.now() + this.ttlMs });
+    let settled = false;
+
+    return {
+      commit: (grant: ExecGrant): string => {
+        if (settled) throw new Error('this reservation has already been settled');
+        settled = true;
+        // The place is already held; filling it in is what makes it usable.
+        this.issued.set(placeholder, { grant, expiresAt: this.now() + this.ttlMs });
+        return placeholder;
+      },
+      release: (): void => {
+        if (settled) return;
+        settled = true;
+        this.issued.delete(placeholder);
+      },
+    };
   }
 
   /**
@@ -80,7 +115,9 @@ export class ExecTickets {
     if (!ticket) return undefined;
     this.expire();
     const held = this.issued.get(ticket);
-    if (!held) return undefined;
+    // A reservation that has not been committed holds a place and nothing
+    // else: there is no shell behind it yet.
+    if (!held?.grant) return undefined;
     this.issued.delete(ticket);
     return held.grant;
   }

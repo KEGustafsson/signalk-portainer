@@ -411,12 +411,22 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       const canonical = await requireNotSelf(deps, client, id, 'open a shell in');
 
       const command = readExecCommand(req);
-      const execId = await client.createExec(id, command);
-      const ticket = tickets.mint({
-        instance: instanceParam(req),
-        execId,
-        containerId: canonical ?? id,
-      });
+      // Reserved before the exec is created, not after: finding there is no
+      // room for the ticket afterwards would leave an exec instance in Docker
+      // that nothing can ever start, and a caller retrying accumulates them.
+      const reservation = tickets.reserve();
+      let ticket: string;
+      try {
+        const execId = await client.createExec(id, command);
+        ticket = reservation.commit({
+          instance: instanceParam(req),
+          execId,
+          containerId: canonical ?? id,
+        });
+      } catch (cause) {
+        reservation.release();
+        throw cause;
+      }
 
       audit(deps, req, `console ${command.join(' ')}`, id, canonical);
       return { id, ticket, command };

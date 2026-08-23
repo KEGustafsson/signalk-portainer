@@ -11,7 +11,7 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M6a — the console, server side.** Everything through M5, plus an
+> **Status: M6a — the server-side console.** Everything through M5, plus an
 > authenticated WebSocket relay that opens a shell in a container. The terminal
 > in the panel is M6b.
 
@@ -234,7 +234,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 595 unit tests, no network required, 80% coverage enforced
+npm test           # 607 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
