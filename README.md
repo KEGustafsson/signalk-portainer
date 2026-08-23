@@ -28,8 +28,11 @@ protected by Signal K's own authentication, and on top of that:
 
 > The screenshots here are the plugin running in a real Signal K admin UI, but
 > the Portainer behind them is a fixture that answers the API as documented
-> rather than a real server. What it is and how to retake the images is in
-> [`tools/screenshots/`](tools/screenshots/README.md).
+> rather than a real server. They are taken with **two** Portainers configured,
+> which is why the header carries an **Instance** selector: that control appears
+> only where there is more than one, so an installation with a single Portainer —
+> the usual case — shows the panel without it. What the fixture is and how to
+> retake the images is in [`tools/screenshots/`](tools/screenshots/README.md).
 
 ## Requirements
 
@@ -61,8 +64,10 @@ Give it a `name` — it is path-safe, and renaming it moves that instance's Sign
 K paths — then the address Portainer answers on, as one field:
 `https://localhost:9443`, `http://192.168.1.10:9000`, or
 `https://portainer.example.com` for one behind a proxy on the usual port. Add
-several entries for several Portainers; the panel then shows an instance
-selector.
+several entries for several Portainers; the panel then shows an **Instance**
+selector in its header, which is absent while there is only one to work with.
+The screenshots on this page are taken with a boat and a shore server
+configured, so they have it.
 
 ![The plugin's configuration page: the status line reading "Connected: boat 2.21.4 (boat); shore 2.21.4 (nas)", then name, address, sign-in method and access token for the first server, with the Advanced block below them](docs/images/plugin-config.png)
 
@@ -114,11 +119,11 @@ watchdog entry for any container whose absence should raise a Signal K alarm.
 
 ## Using the panel
 
-The plugin adds a **Portainer** panel to the Signal K admin UI with an instance
-selector and tables for environments, containers, stacks, images, volumes and
-networks — plus services and nodes when the environment is a Swarm. It polls
-every 10 seconds, and shows facade errors with their hint rather than an empty
-table.
+The plugin adds a **Portainer** panel to the Signal K admin UI with tables for
+environments, containers, stacks, images, volumes and networks — plus services
+and nodes when the environment is a Swarm, and an instance selector in the
+header when more than one Portainer is configured. It polls every 10 seconds,
+and shows facade errors with their hint rather than an empty table.
 
 ![The Images tab: repository tags, short image ids, sizes and ages](docs/images/panel-images.png)
 

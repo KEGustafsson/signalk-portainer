@@ -22,8 +22,10 @@ pointed at a real Portainer.
 
 ## Running it
 
-Two fixture Portainers, so the panel's instance picker has both a boat and a
-shore to choose between:
+Two fixture Portainers, so the panel's **Instance** selector has both a boat and
+a shore to choose between. That selector is what a second Portainer adds to the
+panel — configure one and it is not rendered at all — so a capture run with a
+single instance produces a header one control shorter than these images show:
 
 ```bash
 node tools/screenshots/mock-portainer.js 9500 boat &
