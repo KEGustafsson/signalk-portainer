@@ -13,6 +13,7 @@ import type {
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
 import { ConsoleDialog } from './ConsoleDialog';
+import { PanelBoundary } from './PanelBoundary';
 import { LogViewer } from './LogViewer';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
@@ -89,7 +90,19 @@ interface TabPayload {
   nodes?: DockerNode[];
 }
 
+/**
+ * The panel, wrapped so a render failure stays inside it rather than taking
+ * the Signal K admin UI down with it.
+ */
 export default function AppPanel(): ReactElement {
+  return (
+    <PanelBoundary>
+      <Panel />
+    </PanelBoundary>
+  );
+}
+
+function Panel(): ReactElement {
   const [instances, setInstances] = useState<InstanceSummary[]>([]);
   const [instance, setInstance] = useState<string | undefined>(undefined);
   const [capabilities, setCapabilities] = useState<Capabilities | undefined>(undefined);
@@ -547,15 +560,10 @@ export default function AppPanel(): ReactElement {
           stack={deleting}
           busy={busyStack === deleting.Id}
           onCancel={() => setDeleting(undefined)}
-          onConfirm={(options) => {
+          onConfirm={() => {
             void runStack(
               deleting,
-              () =>
-                apiSend(
-                  'DELETE',
-                  `/stacks/${deleting.Id}?removeVolumes=${options.removeVolumes ? 'true' : 'false'}`,
-                  instance,
-                ),
+              () => apiSend('DELETE', `/stacks/${deleting.Id}`, instance),
               'deleted',
             ).then(() => setDeleting(undefined));
           }}
@@ -589,7 +597,7 @@ function TabBody({
 }): ReactElement {
   switch (tab) {
     case 'environments':
-      return <EnvironmentsTable rows={payload.environments ?? []} />;
+      return <EnvironmentsTable rows={rowsOf(payload.environments)} />;
     case 'stacks':
       return (
         <div>
@@ -614,19 +622,32 @@ function TabBody({
         </div>
       );
     case 'images':
-      return <ImagesTable rows={payload.images ?? []} />;
+      return <ImagesTable rows={rowsOf(payload.images)} />;
     case 'volumes':
-      return <VolumesTable rows={payload.volumes ?? []} />;
+      return <VolumesTable rows={rowsOf(payload.volumes)} />;
     case 'networks':
-      return <NetworksTable rows={payload.networks ?? []} />;
+      return <NetworksTable rows={rowsOf(payload.networks)} />;
     case 'services':
-      return <ServicesTable rows={payload.services ?? []} />;
+      return <ServicesTable rows={rowsOf(payload.services)} />;
     case 'nodes':
-      return <NodesTable rows={payload.nodes ?? []} />;
+      return <NodesTable rows={rowsOf(payload.nodes)} />;
     case 'containers':
     default:
-      return <ContainersTable rows={payload.containers ?? []} actions={actions} />;
+      return <ContainersTable rows={rowsOf(payload.containers)} actions={actions} />;
   }
+}
+
+/**
+ * A tab's rows, or none.
+ *
+ * `apiGet<TabPayload>` casts whatever came back; nothing checks it. A truthy
+ * non-array — `{}` from a proxy, an error body from a future facade change —
+ * skips the `?? []` and throws from `.map` during render. The panel is a guest
+ * inside the Signal K admin UI, and a throw during render takes the host's
+ * tree down with it, not just this panel.
+ */
+function rowsOf<T>(value: T[] | undefined): T[] {
+  return Array.isArray(value) ? value : [];
 }
 
 function isAbort(cause: unknown): boolean {

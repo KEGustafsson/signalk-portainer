@@ -57,26 +57,36 @@ describe('PortainerClient stack writes', () => {
     // Portainer answers a stack delete with 204 and nothing else; parsing that
     // as JSON would fail a write that in fact succeeded.
     const pool = withStacks();
-    pool
-      .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=false', method: 'DELETE' })
-      .reply(204, '');
+    pool.intercept({ path: '/api/stacks/3?endpointId=1', method: 'DELETE' }).reply(204, '');
 
     const client = createClient(agent);
 
     await expect(client.deleteStack(3)).resolves.toBeUndefined();
   });
 
-  it('keeps a stack’s volumes unless removal is asked for', async () => {
+  it('deletes a stack without pretending to touch its volumes', async () => {
+    // Portainer CE's stack delete takes no volume option — its teardown runs
+    // `compose down` with no down-options — and Go ignores unknown query
+    // parameters. Sending one would report a removal that never happened, so
+    // the request carries nothing but the environment.
     const pool = withStacks();
+    let asked = '';
     pool
-      .intercept({ path: '/api/stacks/3?endpointId=1&removeVolumes=true', method: 'DELETE' })
+      .intercept({
+        path: (value: string) => {
+          if (!value.startsWith('/api/stacks/3')) return false;
+          asked = value;
+          return true;
+        },
+        method: 'DELETE',
+      })
       .reply(204, '');
 
     const client = createClient(agent);
 
-    // The data is the point of the volume; deleting a stack says nothing about
-    // wanting it gone, so it is only ever sent explicitly.
-    await expect(client.deleteStack(3, { removeVolumes: true })).resolves.toBeUndefined();
+    await expect(client.deleteStack(3)).resolves.toBeUndefined();
+    expect(asked).toBe('/api/stacks/3?endpointId=1');
+    expect(asked).not.toContain('removeVolumes');
   });
 
   it('sends the new file with prune and pull stated rather than defaulted', async () => {

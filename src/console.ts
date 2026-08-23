@@ -16,8 +16,14 @@ import type { ExecTickets } from './exectickets';
 import type { InstanceRegistry } from './registry';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
 
-/** The path the endpoint is registered at, under the plugin's own route. */
-export const CONSOLE_PATH = '/console';
+/**
+ * The path the endpoint is registered at, under the plugin's own route.
+ *
+ * The browser opens the absolute form of this, which the webapp holds as
+ * `CONSOLE_URL` — a different name on purpose, so a reader can tell the two
+ * apart.
+ */
+export const CONSOLE_MOUNT = '/console';
 
 /** What `registerWebSocket` gives back, narrowed to what this uses. */
 export interface ConsoleEndpoint {
@@ -61,7 +67,7 @@ export interface ConsoleOptions {
 const CONSOLE_LIMITS = { total: 3, perTarget: 2 };
 
 export function openConsole(options: ConsoleOptions): ConsoleServer {
-  const endpoint = options.register(CONSOLE_PATH);
+  const endpoint = options.register(CONSOLE_MOUNT);
   const limits = options.limits ?? new StreamLimiter(CONSOLE_LIMITS);
   const open = new Set<() => void>();
   // Accepting is asynchronous — a ticket, then Portainer — and close() can run

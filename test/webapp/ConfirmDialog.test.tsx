@@ -82,7 +82,7 @@ describe('ConfirmDialog', () => {
     expect(onConfirm).toHaveBeenCalledWith({ force: true, removeVolumes: false });
   });
 
-  it('ignores Escape while the request is in flight', async () => {
+  it('still closes on Escape while the request is in flight', async () => {
     const onCancel = jest.fn();
     const user = userEvent.setup();
     render(
@@ -96,8 +96,10 @@ describe('ConfirmDialog', () => {
 
     await user.keyboard('{Escape}');
 
-    // Closing would not stop the request, only hide it from the operator.
-    expect(onCancel).not.toHaveBeenCalled();
+    // Closing does not stop what was already sent — but a link that drops
+    // rather than resets leaves the request hanging for minutes, and a dialog
+    // with no way out is worse than one the operator dismissed knowingly.
+    expect(onCancel).toHaveBeenCalled();
   });
 
   it('will not submit a removal Docker would refuse', async () => {
@@ -134,7 +136,7 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('button', { name: 'Remove' })).toBeDisabled();
   });
 
-  it('locks both buttons while the request is in flight', () => {
+  it('locks the action but never the way out, while the request is in flight', () => {
     render(
       <ConfirmDialog
         request={{ container: container(), action: 'stop' }}
@@ -144,7 +146,10 @@ describe('ConfirmDialog', () => {
       />,
     );
 
-    expect(screen.getByRole('button', { name: 'Cancel' })).toBeDisabled();
+    // The action is locked so it cannot be sent twice; the dismiss button
+    // stays live, and says Close rather than Cancel because it no longer
+    // cancels anything.
     expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
   });
 });

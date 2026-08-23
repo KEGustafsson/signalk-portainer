@@ -32,7 +32,6 @@ export interface PluginConfig {
   telemetry: {
     level: TelemetryLevel;
     intervalSeconds: number;
-    emitStats: boolean;
     pathPrefix: string;
   };
   control: {
@@ -145,12 +144,6 @@ export const PLUGIN_SCHEMA = {
           default: 'health',
         },
         intervalSeconds: { type: 'number', title: 'Poll interval (s)', default: 30 },
-        emitStats: {
-          type: 'boolean',
-          title: 'Publish CPU and memory',
-          default: false,
-          description: 'Costs one API call per container per poll.',
-        },
         pathPrefix: { type: 'string', title: 'Path prefix', default: 'system.docker' },
       },
     },
@@ -170,6 +163,30 @@ export const PLUGIN_SCHEMA = {
           title: 'Allow managing the Signal K container itself',
           default: false,
           description: 'Stopping it stops this plugin. Off unless you mean it.',
+        },
+        watchdog: {
+          type: 'array',
+          title: 'Watchdog',
+          description:
+            'Containers whose absence raises a Signal K alarm. Nothing is published unless something is listed here.',
+          items: {
+            type: 'object',
+            required: ['container'],
+            properties: {
+              container: {
+                type: 'string',
+                title: 'Container',
+                default: '',
+                description: 'Its name, or the key it publishes under.',
+              },
+              instance: {
+                type: 'string',
+                title: 'Instance',
+                default: '',
+                description: 'Leave empty for the first enabled instance.',
+              },
+            },
+          },
         },
       },
     },
@@ -213,7 +230,6 @@ interface RawTelemetry {
   /** @deprecated superseded by `level`; still read so old options keep working. */
   enabled?: boolean;
   intervalSeconds?: number;
-  emitStats?: boolean;
   pathPrefix?: string;
 }
 
@@ -233,17 +249,25 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
 
   const telemetry = {
     level: telemetryLevel(raw?.telemetry),
-    intervalSeconds: Math.max(5, raw?.telemetry?.intervalSeconds ?? 30),
-    emitStats: raw?.telemetry?.emitStats ?? false,
+    intervalSeconds: pollInterval(raw?.telemetry?.intervalSeconds),
     pathPrefix: (raw?.telemetry?.pathPrefix || 'system.docker').replace(/\.+$/, ''),
   };
 
   const watchdog = (raw?.control?.watchdog ?? [])
     .filter((entry) => entry.container)
-    .map((entry) => ({
-      instance: entry.instance || (instances.find((i) => i.enabled)?.name ?? 'local'),
-      container: entry.container as string,
-    }));
+    .map((entry) => {
+      const instance = entry.instance || (instances.find((i) => i.enabled)?.name ?? 'local');
+      // Checked rather than trusted. The poller only evaluates instances that
+      // exist and are enabled, so a typo here does not fail — it silently
+      // watches nothing, and the operator discovers it the night the container
+      // they were watching dies and no alarm sounds.
+      if (!instances.some((candidate) => candidate.enabled && candidate.name === instance)) {
+        throw new ConfigError(
+          `Watchdog entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance`,
+        );
+      }
+      return { instance, container: entry.container as string };
+    });
 
   return {
     instances,
@@ -271,6 +295,19 @@ function telemetryLevel(raw: RawTelemetry | undefined): TelemetryLevel {
   return 'health';
 }
 
+/**
+ * The poll interval, floored and capped.
+ *
+ * A floor alone is not enough. `Math.max(5, "abc")` is NaN, and `setInterval`
+ * with NaN fires every millisecond; anything past ~24.8 days overflows Node's
+ * 32-bit timer and does the same. Either way the plugin becomes a busy loop on
+ * a Raspberry Pi, and nothing says why.
+ */
+function pollInterval(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 30;
+  return Math.min(3600, Math.max(5, Math.floor(value)));
+}
+
 function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>): InstanceConfig {
   const label = entry.name || `instance ${index + 1}`;
 
@@ -296,8 +333,13 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
   }
 
   const timeoutMs = entry.timeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 1000) {
-    throw new ConfigError(`Instance "${label}" needs a timeout of at least 1000 ms`);
+  // A ceiling as well as a floor. `AbortSignal.timeout` is bounded by the same
+  // 32-bit timer everything else in Node is, and a value past it aborts almost
+  // immediately — so an operator typing a very large number would get a plugin
+  // where every request fails at once, reported as a timeout, which is true
+  // and utterly misleading.
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
+    throw new ConfigError(`Instance "${label}" needs a timeout between 1000 and 120000 ms`);
   }
 
   const basePath = (entry.basePath || '').replace(/\/+$/, '');

@@ -1,5 +1,5 @@
 import { randomBytes } from 'node:crypto';
-import express, { type Request, type Response, type Router } from 'express';
+import express, { type NextFunction, type Request, type Response, type Router } from 'express';
 import type {
   PortainerClient,
   StackEnvVar,
@@ -14,10 +14,16 @@ import { redactValue } from './redact';
 import { toLines } from './logframes';
 import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
-import { stackHoldsSelf } from './stackguard';
+import { stackHoldsSelf, stackOfContainer } from './stackguard';
 import { StreamLimiter, StreamLimitError } from './streamlimit';
 import type { ConsoleSessions } from './consolesessions';
 import { ExecTicketError, type ExecTickets } from './exectickets';
+
+/** What `registerRoutes` hands back, so the plugin can end what it started. */
+export interface FacadeHandle {
+  /** Ends every open log stream. Called when the plugin stops. */
+  shutdown(): void;
+}
 
 export interface FacadeDeps {
   registry: () => InstanceRegistry | undefined;
@@ -47,6 +53,53 @@ export interface FacadeDeps {
  * proxies and NAT tables commonly use before reaping an idle connection.
  */
 const KEEPALIVE_MS = 20_000;
+
+/**
+ * Refuses a state-changing request that came from another site.
+ *
+ * Signal K authenticates these routes with a session cookie, and a cookie is
+ * attached by the browser however the request was started. `POST
+ * /containers/mosquitto/kill` carries no body, which makes it a CORS "simple
+ * request": no preflight, so the browser sends it and only hides the response.
+ * The container is dead either way. Docker resolves names as well as ids —
+ * which self-protection deliberately relies on — so an attacker needs no
+ * container id, just a plausible name.
+ *
+ * `Origin` is set by the browser on exactly these requests and cannot be
+ * forged by page script. A request without one is not from a browser form or
+ * fetch — curl, a Signal K plugin, an automation — and those are already
+ * authenticated by Signal K, so they are left alone rather than broken.
+ */
+export function sameOriginOnly(req: Request, res: Response, next: NextFunction): void {
+  if (SAFE_METHODS.has(req.method)) {
+    next();
+    return;
+  }
+
+  const origin = req.get('origin');
+  if (origin !== undefined && origin !== `${req.protocol}://${req.get('host')}`) {
+    res.status(403).json({
+      error: 'Refusing a request from another site',
+      hint: 'this route changes something, so it is only accepted from the Signal K admin UI itself',
+    });
+    return;
+  }
+
+  // Browsers that send it say where the request came from even when Origin is
+  // absent; anything else is left to the check above.
+  const site = req.get('sec-fetch-site');
+  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
+    res.status(403).json({
+      error: 'Refusing a request from another site',
+      hint: 'this route changes something, so it is only accepted from the Signal K admin UI itself',
+    });
+    return;
+  }
+
+  next();
+}
+
+const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
 
 /** Reads ?tail= and ?since= into the client's log options. */
 export function logOptions(req: Request): { tail?: number; since?: number; timestamps: boolean } {
@@ -79,9 +132,17 @@ export function instanceParam(req: Request): string | undefined {
  * Every route accepts ?instance=<name>; omitting it selects the first enabled
  * instance, so single-Portainer setups never mention it.
  */
-export function registerRoutes(router: Router, deps: FacadeDeps): void {
+export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   const limiter = deps.streams ?? new StreamLimiter();
   const keepaliveMs = deps.keepaliveMs ?? KEEPALIVE_MS;
+  // Every log stream currently open. `stop()` has no other way to reach them:
+  // the limiter and each request's AbortController live in this closure, and
+  // the router is registered once and never revisited. Without this a stream
+  // survives the plugin stopping — still relaying, still holding a permit
+  // against a ceiling of 8 — until Signal K itself restarts.
+  const openStreams = new Set<() => void>();
+
+  router.use(sameOriginOnly);
 
   // ── instances and health ────────────────────────────────────────────────
 
@@ -208,6 +269,11 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     withClient(deps, async (req, client) => {
       requireControlEnabled(deps);
       const create = readStackCreate(req);
+      // There is no stack id to guard yet, but the *name* is the guard: Docker
+      // keys a compose project by name, so creating one that collides with the
+      // project Signal K runs under can have Docker recreate that project from
+      // a file which does not mention Signal K at all.
+      await requireStackNameNotSelf(deps, client, create.name);
       const created =
         'content' in create
           ? await client.createStackFromString(create)
@@ -239,7 +305,14 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
 
       if (action === 'start') await client.startStack(id);
       else if (action === 'stop') await client.stopStack(id);
-      else await client.redeployStack(id, readRedeploy(req));
+      else {
+        const redeploy = readRedeploy(req);
+        // Pruning removes the services the compose file no longer names, which
+        // is destruction by another route: the containers go, and so does
+        // anything they were the only thing keeping alive.
+        if (redeploy.prune) requireDestructiveAllowed(deps);
+        await client.redeployStack(id, redeploy);
+      }
 
       audit(deps, req, action, String(id), undefined, 'stack');
       return { id, action, ok: true };
@@ -256,6 +329,8 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       await requireStackNotSelf(deps, client, id, 'update');
 
       const update = readStackUpdate(req);
+      // Same reason as redeploy: a prune deletes whatever the new file dropped.
+      if (update.prune) requireDestructiveAllowed(deps);
       const result = await client.updateStack(id, update);
 
       audit(deps, req, `update${update.prune ? ' --prune' : ''}`, String(id), undefined, 'stack');
@@ -279,23 +354,21 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
     '/api/stacks/:id',
     withClient(deps, async (req, client) => {
       const id = stackId(req, 'DELETE', '/api/stacks/:id');
-      const removeVolumes = req.query.removeVolumes === 'true';
 
       requireControlEnabled(deps);
       requireDestructiveAllowed(deps);
       await requireStackNotSelf(deps, client, id, 'delete');
 
-      await client.deleteStack(id, { removeVolumes });
+      // No volume option: Portainer CE's stack delete takes no `removeVolumes`
+      // parameter — its teardown runs `compose down` with no down-options — and
+      // Go ignores an unknown query parameter, so sending one would succeed
+      // while doing nothing. Reporting a volume removal that never happened is
+      // worse than not offering it: an operator would recreate the stack later
+      // and get the old database back believing it had been wiped.
+      await client.deleteStack(id);
 
-      audit(
-        deps,
-        req,
-        `delete${removeVolumes ? ' --volumes' : ''}`,
-        String(id),
-        undefined,
-        'stack',
-      );
-      return { id, action: 'delete', removeVolumes, ok: true };
+      audit(deps, req, 'delete', String(id), undefined, 'stack');
+      return { id, action: 'delete', ok: true };
     }),
   );
 
@@ -341,7 +414,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
    * without parsing anything.
    */
   router.get('/api/containers/:id/logs/stream', (req: Request, res: Response) => {
-    void streamLogs(deps, limiter, keepaliveMs, req, res);
+    void streamLogs(deps, limiter, keepaliveMs, req, res, openStreams);
   });
 
   // ── control surface ─────────────────────────────────────────────────────
@@ -366,7 +439,11 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
           available: deps.execTickets !== undefined,
           ...(deps.execTickets
             ? {}
-            : { reason: 'this Signal K server cannot serve a plugin WebSocket' }),
+            : {
+                reason: control?.allowPutControl
+                  ? 'this Signal K server cannot serve a plugin WebSocket'
+                  : 'container control is disabled in the plugin configuration',
+              }),
         },
         self: {
           inContainer: self.inContainer,
@@ -570,6 +647,13 @@ export function registerRoutes(router: Router, deps: FacadeDeps): void {
       return { nodes: await client.docker.listNodes() };
     }),
   );
+
+  return {
+    shutdown(): void {
+      for (const end of [...openStreams]) end();
+      openStreams.clear();
+    },
+  };
 }
 
 /**
@@ -585,6 +669,7 @@ async function streamLogs(
   keepaliveMs: number,
   req: Request,
   res: Response,
+  openStreams: Set<() => void>,
 ): Promise<void> {
   const registry = deps.registry();
   if (!registry) {
@@ -611,10 +696,13 @@ async function streamLogs(
     // follow stream would never be aborted, the loop below would write forever
     // into a dead socket, and the permit would be held until Signal K
     // restarted. Eight of those and every log stream is refused.
-    req.on('close', () => {
+    const end = (): void => {
       controller.abort();
       release?.();
-    });
+      openStreams.delete(end);
+    };
+    req.on('close', end);
+    openStreams.add(end);
 
     // Awaited before any header is written, so a container that does not exist
     // is a 404 rather than a 200 stream carrying one error event — which an
@@ -646,7 +734,11 @@ async function streamLogs(
     for await (const frame of frames) {
       if (res.writableEnded) break;
       for (const line of toLines([frame])) {
-        res.write(`data: ${JSON.stringify(line)}\n\n`);
+        // Redacted like every other response body. The one-shot read goes
+        // through `handle()`, which does this; the stream bypasses it, and a
+        // container printing a token would otherwise have it masked on one
+        // route and passed through verbatim on the other.
+        res.write(`data: ${JSON.stringify(redactValue(line))}\n\n`);
       }
     }
     // Docker ended it: a container that stopped, or a non-follow log that ran
@@ -918,6 +1010,33 @@ function readTerminalSize(payload: Record<string, unknown>): { cols: number; row
  * something else. The stack's containers are read including stopped ones: a
  * Signal K that is currently down is still what the operator would lose.
  */
+/**
+ * Refuses a new stack whose name is the compose project Signal K runs under.
+ *
+ * The id-based guard cannot help here: the stack does not exist yet. What
+ * exists is the name, and that is what Docker resolves.
+ */
+async function requireStackNameNotSelf(
+  deps: FacadeDeps,
+  client: PortainerClient,
+  name: string,
+): Promise<void> {
+  const self = deps.self();
+  if (deps.config()?.control.allowSelfManagement) return;
+  if (!self.identified) return;
+
+  const containers = await client.docker.listContainers(true);
+  const mine = containers.find((container) => isSelfContainer(self, container.Id));
+  const owner = mine ? stackOfContainer(mine) : undefined;
+  if (!owner) return;
+  if (owner.trim().toLowerCase() !== name.trim().toLowerCase()) return;
+
+  throw new PolicyError(
+    `Refusing to create a stack named ${name}, which is the compose project the container running Signal K belongs to`,
+    'deploying it would let Docker recreate that project without Signal K in it; enable "Allow managing the Signal K container itself" if you really mean to',
+  );
+}
+
 async function requireStackNotSelf(
   deps: FacadeDeps,
   client: PortainerClient,
@@ -1054,7 +1173,7 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
       res.json(redactValue(await handler(req, registry)));
     } catch (cause) {
       if (cause instanceof UnknownInstanceError) {
-        res.status(404).json({ error: cause.message });
+        res.status(404).json(redactValue({ error: cause.message }));
         return;
       }
       if (cause instanceof PolicyError || cause instanceof ExecTicketError) {
@@ -1066,16 +1185,18 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
       }
       if (cause instanceof PortainerError) {
         deps.log(`${req.method} ${req.path}: ${cause.message}`);
-        res.status(cause.facadeStatus).json({
-          error: cause.message,
-          portainerStatus: cause.status,
-          hint: cause.hint,
-        });
+        res.status(cause.facadeStatus).json(
+          redactValue({
+            error: cause.message,
+            portainerStatus: cause.status,
+            hint: cause.hint,
+          }),
+        );
         return;
       }
       const message = cause instanceof Error ? cause.message : String(cause);
       deps.log(`${req.method} ${req.path}: ${message}`);
-      res.status(500).json({ error: message });
+      res.status(500).json(redactValue({ error: message }));
     }
   };
 }

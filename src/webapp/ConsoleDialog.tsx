@@ -87,6 +87,14 @@ export function ConsoleDialog({
       // Escape belongs to the shell once it is running — it is half of every
       // arrow key — so it only closes the dialog while there is no shell.
       if (event.key === 'Escape' && phase.kind !== 'open') onClose();
+      // Ctrl+] is the break-out key telnet and `docker attach` already use, and
+      // it is the only way back to Close once a shell is running: xterm keeps
+      // Tab, and Escape belongs to the shell. Without it the terminal is a
+      // keyboard trap, and the shell nobody can leave is a root one.
+      if (event.key === ']' && event.ctrlKey) {
+        event.preventDefault();
+        closeRef.current?.focus();
+      }
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -280,7 +288,8 @@ export function ConsoleDialog({
 
             <div className="form-text mt-2">
               Anything typed here runs inside the container as the user its image runs as. The shell
-              ends when this dialog is closed, and after fifteen minutes with nothing typed.
+              ends when this dialog is closed, and after fifteen minutes with nothing typed. Press
+              Ctrl+] to leave the terminal without a mouse.
             </div>
           </div>
 

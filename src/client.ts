@@ -325,7 +325,13 @@ export class PortainerClient {
      * GET /api/endpoints.
      */
     const mutate = async (method: string, path: string): Promise<void> => {
-      const response = await this.send(method, `${await this.dockerBase()}${path}`, {}, true);
+      // `notModifiedIsFine`: Docker answers 304 for a lifecycle call that asks
+      // for the state a container is already in — starting a running one,
+      // stopping a stopped one. That is documented, idempotent success, and
+      // `Response.ok` is false for it, so without this a second Stop reads as
+      // a failure. Worse for a Signal K client asserting `state = running` on
+      // a schedule: every run after the first would report an error.
+      const response = await this.send(method, `${await this.dockerBase()}${path}`, {}, true, true);
       // Docker answers 204 for these; the body is drained so the connection is
       // released rather than left for the collector.
       await response.body?.cancel().catch(() => undefined);
@@ -443,6 +449,7 @@ export class PortainerClient {
     path: string,
     init: RawInit,
     mayRetryAuth: boolean,
+    notModifiedIsFine = false,
   ): Promise<Response> {
     const headers: Record<string, string> = {
       accept: 'application/json',
@@ -474,6 +481,10 @@ export class PortainerClient {
       return this.send(method, path, init, false);
     }
 
+    // 304 is only success for the callers that say so: Docker uses it to mean
+    // "already in that state" on the lifecycle routes, and nothing else here
+    // sends a conditional request that could earn one honestly.
+    if (notModifiedIsFine && res.status === 304) return res;
     if (!res.ok) throw await PortainerError.fromResponse(res, method, path, this.auth.mode);
     return res;
   }
@@ -845,14 +856,9 @@ export class PortainerClient {
    * Deletes a stack. Volumes are kept unless asked for: a stack's volumes hold
    * the data, and deleting a stack is not a statement about the data.
    */
-  async deleteStack(id: number, options: { removeVolumes?: boolean } = {}): Promise<void> {
+  async deleteStack(id: number): Promise<void> {
     await this.ownStack(id, 'DELETE', `/api/stacks/${id}`);
-    await this.stackWrite(
-      'DELETE',
-      `/api/stacks/${id}?${await this.endpointQuery()}&removeVolumes=${
-        options.removeVolumes ? 'true' : 'false'
-      }`,
-    );
+    await this.stackWrite('DELETE', `/api/stacks/${id}?${await this.endpointQuery()}`);
   }
 
   /**

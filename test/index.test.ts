@@ -259,7 +259,7 @@ describe('plugin lifecycle', () => {
     instance.stop();
   });
 
-  it('registers no PUT handlers when there are no published paths to write to', async () => {
+  it('registers PUT handlers with telemetry off, and none when control is off', async () => {
     agent
       .get('https://boat.test:9443')
       .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
@@ -286,16 +286,32 @@ describe('plugin lifecycle', () => {
     const { app, puts } = createApp();
     const instance = plugin(app);
 
+    // Turning deltas off saves bandwidth; it is not a request to give up
+    // control. The poll still runs, so the paths PUT writes to are still
+    // discovered — they are simply never published as values.
     instance.start({ ...validOptions, telemetry: { level: 'off' } }, noopRestart);
     await flush();
     await flush();
     await flush();
 
-    // PUT writes to a published path; with none published there is nothing to
-    // write to, and the REST facade remains the way to control containers.
-    expect(puts).toHaveLength(0);
+    expect(puts.length).toBeGreaterThan(0);
+    expect(puts.every((entry) => entry.path.endsWith('.state'))).toBe(true);
 
     instance.stop();
+
+    // Control off is what removes them. Telemetry stays on here so the poller
+    // definitely runs and definitely offers the keys: the handlers are absent
+    // because control refused them, not because nothing was ever discovered.
+    const second = createApp();
+    const other = plugin(second.app);
+    other.start({ ...validOptions, control: { allowPutControl: false } }, noopRestart);
+    await flush();
+    await flush();
+    await flush();
+
+    expect(second.puts).toHaveLength(0);
+
+    other.stop();
   });
 
   it('publishes nothing when telemetry is off', async () => {

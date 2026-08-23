@@ -53,6 +53,14 @@ module.exports = {
       shared: {
         react: { singleton: true, requiredVersion: '^19' },
         'react-dom': { singleton: true, requiredVersion: '^19' },
+        // Module Federation matches share keys by exact request, so sharing
+        // 'react' does not cover 'react/jsx-runtime'. With the automatic JSX
+        // runtime, leaving it out makes the panel build elements with its own
+        // bundled React while the components run on the host's — which works
+        // only for as long as the two agree on the element symbol. React 19
+        // renamed it, so a host on 18 would reject every element this panel
+        // produced.
+        'react/jsx-runtime': { singleton: true, requiredVersion: '^19' },
       },
     }),
   ],

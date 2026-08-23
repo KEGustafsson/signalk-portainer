@@ -1,5 +1,5 @@
 import type { ReactElement } from 'react';
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef } from 'react';
 import type { Stack } from '../types';
 
 /**
@@ -19,9 +19,8 @@ export function StackDeleteDialog({
   stack: Stack;
   busy: boolean;
   onCancel: () => void;
-  onConfirm: (options: { removeVolumes: boolean }) => void;
+  onConfirm: () => void;
 }): ReactElement {
-  const [removeVolumes, setRemoveVolumes] = useState(false);
   const cancelRef = useRef<HTMLButtonElement>(null);
 
   // Focus lands on Cancel: a stray Enter should do nothing.
@@ -31,7 +30,9 @@ export function StackDeleteDialog({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !busy) onCancel();
+      // Closing does not cancel a request already sent, but leaving no way
+      // out of the dialog while a dropped link hangs is worse.
+      if (event.key === 'Escape') onCancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -57,37 +58,20 @@ export function StackDeleteDialog({
               Every container in this stack is removed, and the stack stops existing. This cannot be
               undone.
             </p>
-            <div className="form-check">
-              <input
-                className="form-check-input"
-                type="checkbox"
-                id="portainer-stack-delete-volumes"
-                checked={removeVolumes}
-                onChange={(event) => setRemoveVolumes(event.target.checked)}
-              />
-              <label className="form-check-label" htmlFor="portainer-stack-delete-volumes">
-                Also delete its volumes
-                <span className="d-block text-muted small">
-                  Destroys the data they hold — databases, logs, anything the stack has written.
-                </span>
-              </label>
-            </div>
+            <p className="text-muted small mb-0">
+              Its volumes are left in place. Portainer CE offers no way to remove them with the
+              stack, so removing them is a separate step in Portainer itself.
+            </p>
           </div>
           <div className="modal-footer">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              ref={cancelRef}
-              disabled={busy}
-              onClick={onCancel}
-            >
-              Cancel
+            <button type="button" className="btn btn-secondary" ref={cancelRef} onClick={onCancel}>
+              {busy ? 'Close' : 'Cancel'}
             </button>
             <button
               type="button"
               className="btn btn-danger"
               disabled={busy}
-              onClick={() => onConfirm({ removeVolumes })}
+              onClick={() => onConfirm()}
             >
               {busy ? 'Deleting…' : 'Delete'}
             </button>

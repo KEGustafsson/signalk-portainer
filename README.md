@@ -93,8 +93,7 @@ essentials:
    | Allow managing the Signal K container itself | **off** | acting on the container Signal K runs in, which can stop this page |
 
 6. **Choose what to publish.** Deltas are off, health or full, on a poll
-   interval; CPU and memory are separate because they cost one API call per
-   container per poll. Add a watchdog entry for any container whose absence
+   interval. Add a watchdog entry for any container whose absence
    should raise a Signal K alarm.
 
 ## What works today (M6b)
@@ -201,6 +200,11 @@ essentials:
   altogether on a server that cannot serve a console, since that is not
   something an operator can change.
 
+  The terminal takes the keyboard once the shell is connected, including Tab,
+  and Escape belongs to the shell rather than the dialog — so **Ctrl+]**, the
+  break-out key `telnet` and `docker attach` already use, moves focus back to
+  Close. Without it a shell reached by keyboard could not be left by one.
+
   The browser is the only end that knows how big the terminal is, so it says
   so: the POST that mints the ticket also returns a session handle, and
   `POST /console/resize` tells Docker the size, on connect and whenever the
@@ -254,8 +258,12 @@ essentials:
   standalone route from the environment rather than asking the caller.
 
 - A REST facade under `/plugins/signalk-portainer/api/`, authenticated by
-  Signal K. Every route takes `?instance=<name>`, defaulting to the first
-  enabled instance:
+  Signal K, and refused when the browser says the request came from another
+  site — a mutating route with no body is a CORS "simple request", so the
+  cookie alone is not enough to authorise one. Almost every route takes
+  `?instance=<name>`, defaulting to the first enabled instance (`/instances`
+  and `/health` span them all, and `/console/resize` takes its instance from
+  the session):
 
   | Route                                      | Returns                                                                          |
   | ------------------------------------------ | -------------------------------------------------------------------------------- |
@@ -270,9 +278,9 @@ essentials:
   | `GET /stacks`                              | stacks belonging to this environment                                             |
   | `GET /stacks/:id/file`                     | the stack's compose file                                                         |
   | `POST /stacks`                             | create from `content` or from `repositoryUrl`                                    |
-  | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` `?pullImage=`)                          |
+  | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` needs destructive, `?pullImage=`)       |
   | `PUT /stacks/:id`                          | deploy a new compose file and environment                                        |
-  | `DELETE /stacks/:id`                       | delete (`?removeVolumes=`)                                                       |
+  | `DELETE /stacks/:id`                       | delete — Portainer CE cannot remove a stack's volumes with it                    |
   | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                         |
   | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                 |
   | `GET /control`                             | what the UI may offer, and whether self-protection is active                     |
@@ -326,7 +334,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 702 unit tests, no network required, 80% coverage enforced
+npm test           # 739 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -397,7 +405,7 @@ every container being down.
 Worth being explicit about, because the milestone plan is now complete and it
 would be easy to read that as "finished".
 
-**Verified.** 702 unit tests, no network required, covering every module in
+**Verified.** 739 unit tests, no network required, covering every module in
 `src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
 tests assert what the plugin _sent_ as well as what it did with the reply, so
 the request shapes match Portainer's documented API. The Signal K plugin

@@ -7,7 +7,7 @@ import { normalizeConfig } from '../src/config';
 import type { PluginConfig } from '../src/config';
 import { PortainerError } from '../src/errors';
 import type { SelfContainer } from '../src/self';
-import { registerRoutes, instanceParam } from '../src/facade';
+import { registerRoutes, instanceParam, type FacadeHandle } from '../src/facade';
 import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
@@ -32,11 +32,13 @@ const buildApp = (
     log?: (message: string) => void;
     streams?: StreamLimiter;
     keepalive?: number;
+    /** Receives the handle a stopping plugin would reach back through. */
+    onHandle?: (handle: FacadeHandle) => void;
   } = {},
 ) => {
   const app = express();
   const router = express.Router();
-  registerRoutes(router, {
+  const handle = registerRoutes(router, {
     registry: () => registry,
     config: () =>
       registry
@@ -45,7 +47,7 @@ const buildApp = (
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
-              emitStats: false,
+
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
@@ -56,6 +58,7 @@ const buildApp = (
     ...(opts.streams ? { streams: opts.streams } : {}),
     ...(opts.keepalive ? { keepaliveMs: opts.keepalive } : {}),
   });
+  opts.onHandle?.(handle);
   app.use(router);
   return app;
 };
@@ -685,6 +688,43 @@ describe('facade log stream lifecycle', () => {
       await server.close();
     }
   }, 20_000);
+
+  it('ends an open log stream when the plugin stops, giving its permit back', async () => {
+    // The limiter and each request's AbortController live inside the closure
+    // registerRoutes builds, and the router is registered once for the life of
+    // the server. Without a handle back into it, a stream survives the plugin
+    // stopping — still relaying, still holding one of eight permits — until
+    // Signal K itself restarts.
+    //
+    // Held open by the test rather than mocked: a mocked reply that arrives and
+    // ends releases the permit by itself, and the assertions below would then
+    // hold against a shutdown() that did nothing at all.
+    const limiter = new StreamLimiter({ total: 2, perTarget: 1 });
+    const held = heldStream();
+    let handle!: FacadeHandle;
+    const server = await serve(
+      buildApp(held.registry, { streams: limiter, onHandle: (given) => (handle = given) }),
+    );
+
+    try {
+      const req = open(server.port);
+      await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+      held.answer();
+      // Genuinely connected, genuinely holding a permit, and with nothing about
+      // to end it on its own: the container is simply quiet.
+      await waitFor('the stream to take its permit', () => limiter.openCount === 1);
+
+      handle.shutdown();
+
+      await waitFor('the permit to come back', () => limiter.openCount === 0);
+      // And the upstream follow stream is abandoned, rather than left relaying
+      // into a plugin that has stopped.
+      expect(held.signal()?.aborted).toBe(true);
+      req.destroy();
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
 });
 
 describe('facade container lifecycle', () => {
@@ -745,6 +785,48 @@ describe('facade container lifecycle', () => {
     expect(res.status).toBe(200);
     expect(res.body).toMatchObject({ action, ok: true });
     expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it.each([
+    ['start', 'start'],
+    ['stop', 'stop'],
+  ])("treats Docker's 304 on %s as the success it is", async (action, dockerPath) => {
+    // Docker answers 304 for a lifecycle call asking for the state a container
+    // is already in. Reading that as a failure makes a second Stop look broken,
+    // and makes any client that idempotently asserts a state fail on every run
+    // after the first.
+    withEnvironment();
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/abc123def456/${dockerPath}`,
+        method: 'POST',
+      })
+      .reply(304, '');
+
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      `/api/containers/abc123def456/${action}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ action, ok: true });
+  });
+
+  it('still reports a real Docker refusal as a failure', async () => {
+    // The 304 tolerance must not swallow anything else: a 409 from Docker is
+    // still an error the operator needs to see.
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456/stop',
+        method: 'POST',
+      })
+      .reply(409, { message: 'container is paused' });
+
+    const res = await request(buildApp(new InstanceRegistry(config))).post(
+      '/api/containers/abc123def456/stop',
+    );
+
+    expect(res.status).toBe(409);
   });
 
   it('rejects an unknown action before contacting Portainer', async () => {

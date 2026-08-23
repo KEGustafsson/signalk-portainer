@@ -7,6 +7,31 @@ const validInstance = {
 };
 
 describe('normalizeConfig', () => {
+  it('bounds the poll interval at both ends', () => {
+    // A floor alone is not enough: Math.max(5, NaN) is NaN, and setInterval
+    // with NaN fires every millisecond. Anything past ~24.8 days overflows
+    // Node's timer and does the same.
+    const at = (intervalSeconds: unknown): number =>
+      normalizeConfig({
+        instances: [{ name: 'local', host: 'h', apiKey: 'ptr_x' }],
+        telemetry: { intervalSeconds },
+      } as never).telemetry.intervalSeconds;
+
+    expect(at(1)).toBe(5);
+    expect(at('abc')).toBe(30);
+    expect(at(Number.NaN)).toBe(30);
+    expect(at(9_000_000)).toBe(3600);
+    expect(at(60)).toBe(60);
+  });
+
+  it('refuses a timeout large enough to abort instantly', () => {
+    expect(() =>
+      normalizeConfig({
+        instances: [{ name: 'local', host: 'h', apiKey: 'ptr_x', timeoutMs: 3_000_000_000 }],
+      }),
+    ).toThrow(/between 1000 and 120000 ms/);
+  });
+
   it('builds a base URL from protocol, host, port and base path', () => {
     const config = normalizeConfig({
       instances: [{ ...validInstance, protocol: 'http', port: 9000, basePath: '/portainer/' }],
@@ -62,7 +87,7 @@ describe('normalizeConfig', () => {
       /invalid port/,
     );
     expect(() => normalizeConfig({ instances: [{ ...validInstance, timeoutMs: 10 }] })).toThrow(
-      /at least 1000 ms/,
+      /between 1000 and 120000 ms/,
     );
   });
 
