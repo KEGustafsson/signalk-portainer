@@ -26,13 +26,10 @@ protected by Signal K's own authentication, and on top of that:
 
 ![The Containers tab of the Portainer panel, embedded in the Signal K admin UI: six containers with their state, image, published ports and per-row actions, with instance and environment named in the header](docs/images/panel-containers.png)
 
-> The screenshots here are the plugin running in a real Signal K admin UI, but
-> the Portainer behind them is a fixture that answers the API as documented
-> rather than a real server. They are taken with **two** Portainers configured,
-> which is why the header carries an **Instance** selector: that control appears
-> only where there is more than one, so an installation with a single Portainer —
-> the usual case — shows the panel without it. What the fixture is and how to
-> retake the images is in [`tools/screenshots/`](tools/screenshots/README.md).
+> The screenshots are taken with **two** Portainers configured, which is why the
+> header carries an **Instance** selector: that control appears only where there
+> is more than one, so an installation with a single Portainer — the usual case —
+> shows the panel without it.
 
 ## Requirements
 
