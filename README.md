@@ -24,7 +24,7 @@ protected by Signal K's own authentication, and on top of that:
   should be running is not;
 - **PUT handlers** so any Signal K client can start, stop or restart a container.
 
-![The Containers tab of the Portainer panel, embedded in the Signal K admin UI: six containers with their state, image, published ports and per-row actions, with instance and environment named in the header](docs/images/panel-containers.png)
+![The Containers tab of the Portainer panel, embedded in the Signal K admin UI: six containers with their state, image, published ports and per-row actions, with instance and environment named in the header](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-containers.png)
 
 > The screenshots are taken with **two** Portainers configured, which is why the
 > header carries an **Instance** selector: that control appears only where there
@@ -114,7 +114,7 @@ selector in its header, which is absent while there is only one to work with.
 The screenshots on this page are taken with a boat and a shore server
 configured, so they have it.
 
-![The plugin's configuration page: the status line reading "Connected: boat 2.21.4 (boat); shore 2.21.4 (nas)", then name, address, sign-in method and access token for the first server, with the Advanced block below them](docs/images/plugin-config.png)
+![The plugin's configuration page: the status line reading "Connected: boat 2.21.4 (boat); shore 2.21.4 (nas)", then name, address, sign-in method and access token for the first server, with the Advanced block below them](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/plugin-config.png)
 
 ### 2. Give it a credential
 
@@ -157,7 +157,7 @@ Docker host this Signal K server should work with, and the plugin writes the
 choice back into its own configuration, where it survives a restart. A Portainer
 with exactly one environment selects it without being asked.
 
-![The panel on a Portainer whose environment has not been chosen: a notice reading "Choose an environment to continue — This Portainer manages 3 environments. Press the one this Signal K server should work with", above the three rows, each with a Select button](docs/images/panel-environment-choose.png)
+![The panel on a Portainer whose environment has not been chosen: a notice reading "Choose an environment to continue — This Portainer manages 3 environments. Press the one this Signal K server should work with", above the three rows, each with a Select button](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-environment-choose.png)
 
 ### 5. Decide what the plugin may do
 
@@ -176,7 +176,7 @@ between 5 and 3600 seconds, since a poll faster than that is a busy loop on a
 Raspberry Pi and one slower is indistinguishable from none. Add a watchdog entry
 for any container whose absence should raise a Signal K alarm.
 
-![The rest of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three switches under "Control", and a watchdog entry naming a container and the server it belongs to](docs/images/plugin-control.png)
+![The rest of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three switches under "Control", and a watchdog entry naming a container and the server it belongs to](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/plugin-control.png)
 
 ## Using the panel
 
@@ -186,7 +186,7 @@ and nodes when the environment is a Swarm, and an instance selector in the
 header when more than one Portainer is configured. It polls every 10 seconds,
 and shows facade errors with their hint rather than an empty table.
 
-![The Images tab: repository tags, short image ids, sizes and ages](docs/images/panel-images.png)
+![The Images tab: repository tags, short image ids, sizes and ages](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-images.png)
 
 ### Environments
 
@@ -197,7 +197,7 @@ the one in use. The choice is saved server-side, so the delta poller and the
 watchdog follow it too. Until a Portainer with several environments has been
 answered, the other tabs say so rather than showing another host's containers.
 
-![The Environments tab: a local Docker host marked "selected", an agent environment and an edge agent that is down, each with a Select button on the rows not in use](docs/images/panel-environments.png)
+![The Environments tab: a local Docker host marked "selected", an agent environment and an edge agent that is down, each with a Select button on the rows not in use](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-environments.png)
 
 ### Containers
 
@@ -211,7 +211,7 @@ Signal K itself runs in is labelled as such and its buttons are disabled. A butt
 configuration does not allow is disabled, with the setting to change as its
 tooltip, rather than left to fail on click.
 
-![The confirmation dialog over the Containers table, headed "Stop mosquitto?", naming the container and its short id and saying "Its services stop until it is started again"](docs/images/panel-confirm.png)
+![The confirmation dialog over the Containers table, headed "Stop mosquitto?", naming the container and its short id and saying "Its services stop until it is started again"](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-confirm.png)
 
 ### Logs
 
@@ -232,7 +232,7 @@ is labelled `stdout`.
 At most 3 streams may be open per container and 8 in total, so forgotten browser
 tabs cannot exhaust file descriptors on a small machine.
 
-![The log viewer, following a running container: line and history selectors, Timestamps, Follow, stderr-only and Wrap toggles, "Live · 21 lines" in the corner, and stderr lines coloured apart from the rest](docs/images/panel-logs.png)
+![The log viewer, following a running container: line and history selectors, Timestamps, Follow, stderr-only and Wrap toggles, "Live · 21 lines" in the corner, and stderr lines coloured apart from the rest](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-logs.png)
 
 ### Console
 
@@ -256,7 +256,7 @@ The terminal is [xterm.js](https://xtermjs.org/), loaded in its own chunk the
 first time somebody opens a shell, so a panel that never does never downloads
 it.
 
-![The console dialog: a shell selector reading /bin/sh, "Connected" in the corner, and a terminal holding the output of uname, ls and df run inside the container](docs/images/panel-console.png)
+![The console dialog: a shell selector reading /bin/sh, "Connected" in the corner, and a terminal holding the output of uname, ls and df run inside the container](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-console.png)
 
 ### Stacks
 
@@ -278,9 +278,9 @@ any auto-update Portainer had on it, and the answer says so. `prune` is always
 sent explicitly and defaults to off; turning it on needs **Allow destructive
 operations**, because pruning removes whatever the new file stopped naming.
 
-![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](docs/images/panel-stacks.png)
+![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stacks.png)
 
-![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](docs/images/panel-stack-editor.png)
+![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stack-editor.png)
 
 ## Signal K integration
 
@@ -301,7 +301,7 @@ system.docker.<instance>.containers.<key>.id         string   (full level)
 The prefix `system.docker` is configurable. Paths carry Signal K metadata, so
 dashboards render labelled values rather than bare numbers.
 
-![Signal K's own data browser, filtered to "docker": watchdog notifications reading NORMAL, then each container's state and health under system.docker.boat.containers, all sourced from signalk-portainer](docs/images/signalk-paths.png)
+![Signal K's own data browser, filtered to "docker": watchdog notifications reading NORMAL, then each container's state and health under system.docker.boat.containers, all sourced from signalk-portainer](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/signalk-paths.png)
 
 How much is published is a choice:
 

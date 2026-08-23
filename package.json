@@ -9,10 +9,6 @@
     "appIcon": "logo.svg",
     "screenshots": [
       "docs/images/panel-containers.png",
-      "docs/images/panel-stacks.png",
-      "docs/images/panel-logs.png",
-      "docs/images/panel-console.png",
-      "docs/images/panel-stack-editor.png",
       "docs/images/plugin-config.png"
     ]
   },
@@ -58,10 +54,6 @@
     "CHANGELOG.md",
     "LICENSE",
     "docs/images/panel-containers.png",
-    "docs/images/panel-stacks.png",
-    "docs/images/panel-logs.png",
-    "docs/images/panel-console.png",
-    "docs/images/panel-stack-editor.png",
     "docs/images/plugin-config.png"
   ],
   "dependencies": {
