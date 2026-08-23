@@ -6,7 +6,17 @@
   "types": "dist/index.d.ts",
   "signalk": {
     "displayName": "Portainer",
-    "appIcon": "logo.svg"
+    "appIcon": "logo.svg",
+    "screenshots": [
+      {
+        "url": "https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-containers.png",
+        "caption": "The Containers tab: every container with its state, image, published ports and per-row actions"
+      },
+      {
+        "url": "https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/plugin-config.png",
+        "caption": "The configuration page: server name, address, sign-in method and access token, with the connection status above them"
+      }
+    ]
   },
   "keywords": [
     "signalk-node-server-plugin",
