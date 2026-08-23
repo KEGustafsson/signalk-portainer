@@ -13,6 +13,20 @@ export interface LogLine {
   text: string;
 }
 
+/**
+ * A line once it is in the viewer's buffer.
+ *
+ * `seq` is the identity React reconciles on. Lines repeat, carry no id of their
+ * own and are dropped from the front once the buffer is full, so a key built
+ * from the array index changes for every line still on screen each time one
+ * arrives — React then unmounts the whole buffer and mounts a replacement for
+ * it, per line. `seq` is assigned once, when the line is appended, and never
+ * moves again.
+ */
+export interface BufferedLine extends LogLine {
+  readonly seq: number;
+}
+
 export interface LogQuery {
   /** How many lines of history to start from. */
   tail: number;
@@ -90,14 +104,25 @@ export function parseLineEvent(data: string): LogLine | undefined {
   }
 }
 
-/** Appends, dropping the oldest lines once the buffer is full. */
+/**
+ * Appends, dropping the oldest lines once the buffer is full.
+ *
+ * Each new line is stamped with the next sequence number. Numbering from the
+ * last line already held — rather than from the buffer's length — keeps it
+ * monotonic across the drops: the buffer only ever grows at the end and
+ * shrinks at the front, so no line's number is ever reused or reordered.
+ */
 export function appendLines(
-  existing: readonly LogLine[],
+  existing: readonly BufferedLine[],
   incoming: readonly LogLine[],
   max = MAX_LINES,
-): LogLine[] {
-  if (incoming.length === 0) return existing as LogLine[];
-  const joined = [...existing, ...incoming];
+): BufferedLine[] {
+  if (incoming.length === 0) return existing as BufferedLine[];
+  let seq = (existing[existing.length - 1]?.seq ?? -1) + 1;
+  const joined: BufferedLine[] = [
+    ...existing,
+    ...incoming.map((line) => ({ ...line, seq: seq++ })),
+  ];
   return joined.length <= max ? joined : joined.slice(joined.length - max);
 }
 
@@ -107,9 +132,16 @@ export function toText(lines: readonly LogLine[]): string {
   return `${lines.map((line) => (line.stream === 'stderr' ? `[stderr] ${line.text}` : line.text)).join('\n')}\n`;
 }
 
-/** A filename that says which container, which instance and when. */
+/**
+ * A filename that says which container, which instance and when.
+ *
+ * The stamp keeps its trailing Z. `toISOString` is UTC, and a filename that
+ * reads as a wall-clock time but is not one is worse than no time at all: log
+ * filenames are exactly what gets lined up against the moment an incident was
+ * noticed, and a boat is rarely on UTC.
+ */
 export function downloadName(name: string, instance: string | undefined, now = new Date()): string {
-  const stamp = now.toISOString().replace(/[:.]/g, '-').slice(0, 19);
+  const stamp = `${now.toISOString().replace(/[:.]/g, '-').slice(0, 19)}Z`;
   const safe = (value: string) => value.replace(/[^A-Za-z0-9._-]+/g, '_').replace(/^_+|_+$/g, '');
   return (
     [safe(instance ?? ''), safe(name) || 'container', stamp].filter(Boolean).join('-') + '.log'

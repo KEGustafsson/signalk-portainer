@@ -24,6 +24,28 @@ describe('formatBytes', () => {
     expect(formatBytes(undefined)).toBe('—');
     expect(formatBytes(Number.NaN)).toBe('—');
   });
+
+  it('scales a negative size instead of printing it raw', () => {
+    // The `< 1000` shortcut used to catch every negative before the loop could
+    // scale it, so a Portainer that reported a negative size rendered
+    // "-5000000000 B" in the middle of a column of readable ones.
+    expect(formatBytes(-5_000_000_000)).toBe('-5.0 GB');
+    expect(formatBytes(-999)).toBe('-999 B');
+  });
+
+  it('refuses a size that is not a finite number, whatever the type says', () => {
+    // The signature says `number | undefined`, but these arrive through an
+    // unchecked cast of the Portainer response: a string reaching `.toFixed`
+    // throws during render, and the boundary's "Try again" lands right back on
+    // the same row. The placeholder is the only honest answer.
+    const unchecked = formatBytes as (value: unknown) => string;
+
+    expect(unchecked(null)).toBe('—');
+    expect(unchecked('abc')).toBe('—');
+    expect(unchecked({})).toBe('—');
+    expect(unchecked(Number.POSITIVE_INFINITY)).toBe('—');
+    expect(unchecked(Number.NEGATIVE_INFINITY)).toBe('—');
+  });
 });
 
 describe('formatAge', () => {

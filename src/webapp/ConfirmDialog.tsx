@@ -7,6 +7,7 @@ import {
   type ContainerAction,
   type RemoveOptions,
 } from './control';
+import { useDialogFocus } from './dialogfocus';
 import { containerName, shortId } from './format';
 
 /**
@@ -55,10 +56,10 @@ export function ConfirmDialog({
   // the dialog does not offer to send it.
   const blocked = action === 'remove' && needsForce && !force;
 
-  // Focus lands on Cancel, not Confirm: a stray Enter should do nothing.
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
+  // Focus lands on Cancel, not Confirm: a stray Enter should do nothing. The
+  // hook also keeps Tab inside the dialog and hands focus back to whatever
+  // opened it when it closes.
+  const dialogRef = useDialogFocus(cancelRef);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -78,6 +79,7 @@ export function ConfirmDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="portainer-confirm-title"
+      ref={dialogRef}
       style={{ background: 'rgba(0,0,0,0.5)' }}
     >
       <div className="modal-dialog modal-dialog-centered">

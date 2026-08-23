@@ -1,4 +1,5 @@
 import type { ReactElement } from 'react';
+import { useId } from 'react';
 import type {
   DockerContainer,
   DockerImage,
@@ -60,6 +61,63 @@ export function EmptyRow({ columns, message }: { columns: number; message: strin
         {message}
       </td>
     </tr>
+  );
+}
+
+/**
+ * A button that is offered, and says why it will not act.
+ *
+ * `disabled` takes a button out of the tab order, which means the `title`
+ * carrying the reason can never be reached from a keyboard, and most screen
+ * readers stay silent about `title` on a disabled control altogether. The
+ * panel's rule is that a disabled button explains itself; carried in `title`
+ * alone it explains itself to exactly the operators who can already hover, and
+ * to nobody else.
+ *
+ * So the button stays focusable and is made inert instead: `aria-disabled`
+ * tells assistive technology it will not act, `aria-describedby` points at the
+ * reason as real text, and the click handler drops the press so nothing can
+ * fire through the gap.
+ */
+export function GatedButton({
+  className,
+  label,
+  reason,
+  onPress,
+}: {
+  className: string;
+  /** The visible text, and the accessible name. */
+  label: string;
+  /** Why the press will be dropped; undefined when it will not be. */
+  reason?: string;
+  onPress: () => void;
+}): ReactElement {
+  const describedBy = useId();
+  const inert = reason !== undefined;
+  return (
+    <button
+      type="button"
+      className={className}
+      // Named explicitly because the reason is carried inside the button. As a
+      // sibling it would sit between two buttons of a btn-group and flatten
+      // the group's corners; inside and unnamed it would be read out as part
+      // of the button's own name.
+      aria-label={label}
+      {...(inert ? { 'aria-disabled': true, 'aria-describedby': describedBy } : {})}
+      // Kept for the pointer: a tooltip is still the fastest way to read this
+      // with a mouse. It is no longer the only way.
+      title={reason}
+      onClick={() => {
+        if (!inert) onPress();
+      }}
+    >
+      {label}
+      {inert ? (
+        <span id={describedBy} className="visually-hidden">
+          {reason}
+        </span>
+      ) : null}
+    </button>
   );
 }
 
@@ -245,15 +303,12 @@ function ConsoleButton({
 }): ReactElement {
   const state = consoleState(actions.control, row);
   return (
-    <button
-      type="button"
+    <GatedButton
       className="btn btn-outline-secondary"
-      disabled={!state.enabled}
-      {...(state.reason ? { title: state.reason } : {})}
-      onClick={() => actions.onConsole?.(row)}
-    >
-      Console
-    </button>
+      label="Console"
+      {...(state.enabled ? {} : { reason: state.reason ?? 'This container cannot be opened' })}
+      onPress={() => actions.onConsole?.(row)}
+    />
   );
 }
 
@@ -283,23 +338,19 @@ function ActionButtons({
         </button>
       ) : null}
       {actions.onConsole ? <ConsoleButton row={row} actions={actions} /> : null}
-      {actionsFor(row).map((action) => {
-        const state = actionState(actions.control, row, action);
-        return (
-          <button
-            key={action}
-            type="button"
-            className={`btn btn-${actionVariant(action)}`}
-            // A disabled button explains itself rather than leaving the
-            // operator to guess which setting is in the way.
-            title={state.reason}
-            disabled={!state.enabled || busy}
-            onClick={() => actions.onAction(row, action)}
-          >
-            {actionLabel(action)}
-          </button>
-        );
-      })}
+      {actionsFor(row).map((action) => (
+        <GatedButton
+          key={action}
+          className={`btn btn-${actionVariant(action)}`}
+          label={actionLabel(action)}
+          // A button that will not act explains itself rather than leaving the
+          // operator to guess which setting is in the way — including while
+          // this row is waiting on an answer, which is otherwise a button that
+          // goes silently dead under the operator's own focus.
+          reason={gateReason(actionState(actions.control, row, action), busy, 'container')}
+          onPress={() => actions.onAction(row, action)}
+        />
+      ))}
     </div>
   );
 }
@@ -353,24 +404,34 @@ function StackButtons({ row, actions }: { row: Stack; actions: StackActionsProps
   const busy = actions.busyId === row.Id;
   return (
     <div className="btn-group btn-group-sm" role="group" aria-label={`Actions for ${row.Name}`}>
-      {stackActionsFor(row).map((action) => {
-        const state = stackActionState(actions.control, row, action);
-        return (
-          <button
-            key={action}
-            type="button"
-            className={`btn btn-outline-${action === 'delete' ? 'danger' : 'secondary'}`}
-            // A disabled button carries the setting that would enable it.
-            title={state.reason}
-            disabled={!state.enabled || busy}
-            onClick={() => actions.onAction(row, action)}
-          >
-            {stackActionLabel(action)}
-          </button>
-        );
-      })}
+      {stackActionsFor(row).map((action) => (
+        <GatedButton
+          key={action}
+          className={`btn btn-outline-${action === 'delete' ? 'danger' : 'secondary'}`}
+          label={stackActionLabel(action)}
+          // A button that will not act carries the setting that would enable it.
+          reason={gateReason(stackActionState(actions.control, row, action), busy, 'stack')}
+          onPress={() => actions.onAction(row, action)}
+        />
+      ))}
     </div>
   );
+}
+
+/**
+ * Why a row's button will not act, or undefined when it will.
+ *
+ * A request already in flight is a reason like any other, and gets said out
+ * loud rather than being expressed as a button that silently stops answering.
+ */
+function gateReason(
+  state: { enabled: boolean; reason?: string },
+  busy: boolean,
+  subject: 'container' | 'stack',
+): string | undefined {
+  if (!state.enabled) return state.reason ?? 'This action is not available';
+  if (busy) return `Waiting for the last action on this ${subject} to finish`;
+  return undefined;
 }
 
 export function ImagesTable({ rows }: { rows: DockerImage[] }): ReactElement {

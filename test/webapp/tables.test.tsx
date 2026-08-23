@@ -318,8 +318,33 @@ describe('the console button', () => {
     show({}, { State: 'exited' });
 
     const button = screen.getByRole('button', { name: 'Console' });
-    expect(button).toBeDisabled();
+    // Inert rather than `disabled`: a disabled button cannot be focused, so
+    // the reason in `title` is unreachable from a keyboard and unread by most
+    // screen readers — which leaves the panel explaining itself only to the
+    // operators who could already hover.
+    expect(button).toHaveAttribute('aria-disabled', 'true');
+    expect(button).toHaveAccessibleDescription('The container is not running');
     expect(button).toHaveAttribute('title', 'The container is not running');
+  });
+
+  it('drops the press on the inert button rather than opening the dialog', async () => {
+    const user = userEvent.setup();
+    const onConsole = jest.fn();
+    render(
+      <ContainersTable
+        rows={[{ ...row, State: 'exited' }]}
+        actions={{ control, onAction: () => {}, onConsole }}
+      />,
+    );
+
+    const button = screen.getByRole('button', { name: 'Console' });
+    // Focusable — that is the whole point — so the click has to be refused by
+    // the handler rather than by the browser.
+    button.focus();
+    expect(button).toHaveFocus();
+    await user.click(button);
+
+    expect(onConsole).not.toHaveBeenCalled();
   });
 
   it('is absent entirely when the panel was given no way to open one', () => {

@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type { DockerContainer } from '../types';
 import { ApiError, apiGet, apiUrl } from './api';
+import { useDialogFocus } from './dialogfocus';
 import { containerName, shortId } from './format';
 import {
   DEFAULT_QUERY,
@@ -14,7 +15,7 @@ import {
   normalizeLines,
   parseLineEvent,
   toText,
-  type LogLine,
+  type BufferedLine,
   type LogQuery,
 } from './logstream';
 
@@ -45,7 +46,7 @@ export function LogViewer({
 }): ReactElement {
   const [query, setQuery] = useState<LogQuery>(DEFAULT_QUERY);
   const [follow, setFollow] = useState(false);
-  const [lines, setLines] = useState<LogLine[]>([]);
+  const [lines, setLines] = useState<BufferedLine[]>([]);
   const [status, setStatus] = useState<Status>({ kind: 'loading' });
   const [error, setError] = useState<ApiError | undefined>(undefined);
   const [stderrOnly, setStderrOnly] = useState(false);
@@ -59,14 +60,13 @@ export function LogViewer({
   // following at all.
   const pinned = useRef(true);
   const closeRef = useRef<HTMLButtonElement>(null);
+  // Focus starts on Close, stays inside the dialog, and goes back to the row
+  // the operator opened it from.
+  const dialogRef = useDialogFocus(closeRef);
 
   const name = containerName(container.Names);
   const id = container.Id;
   const streaming = follow && canFollow();
-
-  useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -186,6 +186,7 @@ export function LogViewer({
       role="dialog"
       aria-modal="true"
       aria-labelledby="portainer-logs-title"
+      ref={dialogRef}
       style={{ background: 'rgba(0,0,0,0.5)' }}
     >
       <div className="modal-dialog modal-xl modal-dialog-centered">
@@ -266,7 +267,12 @@ export function LogViewer({
               />
               <Check id="portainer-logs-wrap" label="Wrap" checked={wrap} onChange={setWrap} />
 
-              <span className="small text-muted ms-auto">{describe(status, shown.length)}</span>
+              {/* The live region for this dialog. A screen reader hears "Live
+                  · 412 lines" or "Stream ended" from here — one short sentence
+                  — rather than every line the container writes. */}
+              <span className="small text-muted ms-auto" role="status">
+                {describe(status, shown.length)}
+              </span>
             </div>
 
             {error ? (
@@ -293,6 +299,12 @@ export function LogViewer({
               ref={pane}
               onScroll={onScroll}
               role="log"
+              // Silenced while following. `role="log"` makes the whole buffer a
+              // polite live region, so a followed container reads its own
+              // output aloud, without pause and with no way to stop it short of
+              // closing the dialog. The status beside the controls carries what
+              // is worth announcing instead.
+              aria-live={streaming ? 'off' : 'polite'}
               aria-label={`Logs for ${name}`}
             >
               {shown.length === 0 ? (
@@ -300,17 +312,27 @@ export function LogViewer({
                   {status.kind === 'loading' ? 'Loading…' : 'No log lines'}
                 </div>
               ) : (
-                shown.map((line, index) => (
+                shown.map((line) => (
                   <div
-                    // Lines repeat and carry no id of their own; position in the
-                    // buffer is what distinguishes them.
-                    key={`${index}-${line.text}`}
+                    // The sequence number the buffer stamped on, never the
+                    // index: the buffer drops its oldest line once it is full,
+                    // which shifts every remaining line down a position, and an
+                    // index key would then match nothing — React would unmount
+                    // and rebuild all 5000 rows for every single line that
+                    // arrives.
+                    key={line.seq}
                     className={line.stream === 'stderr' ? 'text-warning' : undefined}
                     style={{
                       whiteSpace: wrap ? 'pre-wrap' : 'pre',
                       overflowWrap: wrap ? 'anywhere' : 'normal',
                     }}
                   >
+                    {/* Written out, not only coloured: colour alone is no
+                        distinction to an operator who cannot see it, and the
+                        downloaded file has marked stderr this way all along. */}
+                    {line.stream === 'stderr' ? (
+                      <span className="badge text-bg-warning me-1">stderr</span>
+                    ) : null}
                     {line.text}
                   </div>
                 ))

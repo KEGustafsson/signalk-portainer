@@ -2,16 +2,31 @@
 
 const UNITS = ['B', 'kB', 'MB', 'GB', 'TB'] as const;
 
+/**
+ * A byte count, scaled.
+ *
+ * The type says `number | undefined`, but the value arrives through an
+ * unchecked cast of whatever Portainer answered with: a string, a null, or an
+ * Infinity from a daemon that could not measure something all reach here. So
+ * the guard is a runtime one — anything that is not a finite number renders as
+ * the placeholder rather than as "null B", "Infinity TB", or a TypeError from
+ * `.toFixed` that takes the whole table down mid-render.
+ */
 export function formatBytes(bytes: number | undefined): string {
-  if (bytes === undefined || Number.isNaN(bytes)) return '—';
-  if (bytes < 1000) return `${bytes} B`;
-  let value = bytes;
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes)) return '—';
+  // Scaled on the magnitude and signed afterwards: a negative size is a
+  // Portainer bug rather than a real reading, but "-5000000000 B" hides that
+  // it is one, because the early return below catches every negative before
+  // the loop can scale it.
+  const sign = bytes < 0 ? '-' : '';
+  let value = Math.abs(bytes);
+  if (value < 1000) return `${sign}${value} B`;
   let unit = 0;
   while (value >= 1000 && unit < UNITS.length - 1) {
     value /= 1000;
     unit += 1;
   }
-  return `${value.toFixed(value < 10 ? 1 : 0)} ${UNITS[unit]}`;
+  return `${sign}${value.toFixed(value < 10 ? 1 : 0)} ${UNITS[unit]}`;
 }
 
 /** Docker reports epoch seconds; the admin UI wants something readable. */
