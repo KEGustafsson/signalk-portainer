@@ -57,12 +57,14 @@ const REQUEST_TIMEOUT_MS = 30_000;
  * than the deadline being dropped on exactly the old browser most likely to
  * need it.
  */
-function withDeadline(caller: AbortSignal | undefined): {
+interface Deadline {
   signal: AbortSignal;
   /** True when it was the deadline that fired, not the caller. */
   expired: () => boolean;
   release: () => void;
-} {
+}
+
+function withDeadline(caller: AbortSignal | undefined): Deadline {
   const deadline = new AbortController();
   const timer = setTimeout(() => deadline.abort(), REQUEST_TIMEOUT_MS);
   const expired = (): boolean => deadline.signal.aborted && caller?.aborted !== true;
@@ -98,6 +100,33 @@ async function request<T>(
   payload?: unknown,
 ): Promise<T> {
   const deadline = withDeadline(signal);
+  try {
+    return await send<T>(method, path, instance, payload, deadline);
+  } finally {
+    // Released only once the body has been read. `fetch` resolves as soon as
+    // the headers arrive, so clearing the timer here rather than after the
+    // response was fully consumed left a stalled body with no deadline at all
+    // — the row would stay disabled with no error, which is the failure this
+    // deadline exists to prevent.
+    deadline.release();
+  }
+}
+
+function timedOut(): ApiError {
+  return new ApiError(
+    0,
+    `The request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds`,
+    'Signal K did not answer — the connection may have dropped. Check the server is reachable, then try again.',
+  );
+}
+
+async function send<T>(
+  method: string,
+  path: string,
+  instance: string | undefined,
+  payload: unknown,
+  deadline: Deadline,
+): Promise<T> {
   let response: Response;
   try {
     response = await fetch(apiUrl(path, instance), {
@@ -113,22 +142,18 @@ async function request<T>(
   } catch (cause) {
     // Told apart from the caller's own abort, which is the panel replacing one
     // read with the next and not something to report.
-    if (deadline.expired()) {
-      throw new ApiError(
-        0,
-        `The request timed out after ${REQUEST_TIMEOUT_MS / 1000} seconds`,
-        'Signal K did not answer — the connection may have dropped. Check the server is reachable, then try again.',
-      );
-    }
+    if (deadline.expired()) throw timedOut();
     throw cause;
-  } finally {
-    deadline.release();
   }
 
   let body: unknown;
   try {
     body = await response.json();
-  } catch {
+  } catch (cause) {
+    // The body is read under the same deadline as the headers: a server that
+    // answers and then stalls mid-body is the case that hangs longest.
+    if (deadline.expired()) throw timedOut();
+    if (cause instanceof Error && cause.name === 'AbortError') throw cause;
     if (response.ok) {
       // A 200 that is not JSON means something answered instead of the plugin —
       // a proxy, or a login page. Falling back to {} would render an empty

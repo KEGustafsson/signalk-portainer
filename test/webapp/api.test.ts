@@ -185,6 +185,38 @@ describe('apiSend', () => {
     }
   });
 
+  it('gives up when the headers arrive and the body then stalls', async () => {
+    // fetch resolves on the headers, not the body. Releasing the deadline at
+    // that point left the body read unbounded, so a server that answered and
+    // then stopped sending held the row disabled with no error — the very
+    // failure the deadline was added to prevent.
+    jest.useFakeTimers();
+    try {
+      fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
+        Promise.resolve({
+          ok: true,
+          status: 200,
+          json: () =>
+            new Promise((_resolve, reject) => {
+              init?.signal?.addEventListener('abort', () =>
+                reject(new DOMException('The user aborted a request.', 'AbortError')),
+              );
+            }),
+        }),
+      );
+
+      const pending = apiSend('POST', '/containers/abc/stop').catch((cause: unknown) => cause);
+      await jest.advanceTimersByTimeAsync(30_000);
+      const error = (await pending) as ApiError;
+
+      expect(error).toBeInstanceOf(ApiError);
+      expect(error.message).toContain('timed out');
+      expect(error.hint).toContain('connection');
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+
   it('leaves the deadline behind once the request has answered', async () => {
     // The timer is cleared in a finally: a 30 second timer left running per
     // request would keep the tab busy long after the panel was done with it.
