@@ -5,7 +5,7 @@ import type { PluginConfig } from '../src/config';
 import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 import type { MockAgent } from 'undici';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
@@ -18,11 +18,13 @@ const buildApp = (registry: InstanceRegistry | undefined) => {
     config: () =>
       ({
         instances: [],
+        problems: [],
         telemetry: { level: 'off' as const, intervalSeconds: 30, pathPrefix: 'x' },
         control: {
           allowPutControl: true,
           allowDestructive: true,
           allowSelfManagement: false,
+          putContainers: [],
           watchdog: [],
         },
       }) as PluginConfig,
@@ -46,6 +48,7 @@ describe('requests from another site', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const app = () => buildApp(new InstanceRegistry(config));

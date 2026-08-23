@@ -79,12 +79,105 @@ describe('normalizeConfig', () => {
     expect(() => normalizeConfig(undefined)).toThrow(/No Portainer instance configured/);
   });
 
-  it('rejects duplicate instance names case-insensitively', () => {
+  it('drops a duplicate instance name case-insensitively, keeping the first', () => {
+    const config = normalizeConfig({
+      instances: [validInstance, { ...validInstance, name: 'LOCAL' }],
+    });
+
+    expect(config.instances.map((instance) => instance.name)).toEqual(['local']);
+    expect(config.problems.join(' ')).toMatch(/Duplicate instance name/);
+  });
+
+  /**
+   * One unusable row must not take the working ones with it. The admin UI
+   * writes the schema's defaults the moment "+" is pressed, so an operator
+   * preparing a second Portainer saves a half-filled row beside a working one
+   * — and the whole configuration used to throw, leaving the boat's own
+   * Portainer with no registry, no poller, no PUT handlers and no deltas.
+   */
+  describe('an instance that does not validate', () => {
+    const halfFilled = { name: 'local', enabled: true, url: '' };
+
+    it('is dropped, and the working instance still starts', () => {
+      const config = normalizeConfig({
+        instances: [{ ...validInstance, name: 'boat' }, halfFilled],
+      });
+
+      expect(config.instances.map((instance) => instance.name)).toEqual(['boat']);
+      expect(config.problems).toHaveLength(1);
+      expect(config.problems[0]).toMatch(/has no address/);
+    });
+
+    it('is reported whichever position it was saved in', () => {
+      const config = normalizeConfig({
+        instances: [halfFilled, { ...validInstance, name: 'boat' }],
+      });
+
+      expect(config.instances.map((instance) => instance.name)).toEqual(['boat']);
+      expect(config.problems[0]).toMatch(/has no address/);
+    });
+
+    it('fails the configuration only when no instance is left', () => {
+      expect(() => normalizeConfig({ instances: [halfFilled] })).toThrow(
+        /No Portainer instance could be used/,
+      );
+      expect(() => normalizeConfig({ instances: [halfFilled] })).toThrow(/has no address/);
+    });
+
+    it('drops the watchdog entries that watched it, rather than failing', () => {
+      // Failing here would undo the point of dropping the instance: the boat's
+      // own telemetry would stop because a row it does not depend on is
+      // half-filled.
+      const config = normalizeConfig({
+        instances: [
+          { ...validInstance, name: 'boat' },
+          { name: 'shore', enabled: true, url: '' },
+        ],
+        control: {
+          watchdog: [
+            { instance: 'boat', container: 'ais-logger' },
+            { instance: 'shore', container: 'weather' },
+          ],
+        },
+      });
+
+      expect(config.control.watchdog).toEqual([{ instance: 'boat', container: 'ais-logger' }]);
+      expect(config.problems.join(' ')).toMatch(/watchdog entry for "weather"/);
+    });
+
+    it('still refuses a watchdog naming an instance that was never configured', () => {
+      expect(() =>
+        normalizeConfig({
+          instances: [validInstance],
+          control: { watchdog: [{ instance: 'typo', container: 'ais-logger' }] },
+        }),
+      ).toThrow(/not a configured, enabled instance/);
+    });
+  });
+
+  it('never validates a disabled instance', () => {
+    // Switching an instance off is how an operator parks one they have not
+    // finished filling in; validating it anyway makes the switch useless.
+    const config = normalizeConfig({
+      instances: [
+        { ...validInstance, name: 'boat' },
+        { name: 'shore', enabled: false, url: 'nonsense', apiKey: '' },
+      ],
+    });
+
+    expect(config.instances.map((instance) => instance.name)).toEqual(['boat']);
+    expect(config.problems).toEqual([]);
+  });
+
+  it('still rejects a configuration whose every instance is disabled', () => {
     expect(() =>
       normalizeConfig({
-        instances: [validInstance, { ...validInstance, name: 'LOCAL' }],
+        instances: [
+          { ...validInstance, enabled: false },
+          { ...validInstance, name: 'other', enabled: false },
+        ],
       }),
-    ).toThrow(/Duplicate instance name/);
+    ).toThrow(/Every configured Portainer instance is disabled/);
   });
 
   it('rejects names that would not be valid Signal K path segments', () => {
@@ -135,6 +228,43 @@ describe('normalizeConfig', () => {
       rejectUnauthorized: false,
       ca: 'PEM',
       servername: 'pi',
+    });
+  });
+
+  /**
+   * The prefix was the only Signal K path segment that reached a delta
+   * unnormalised, while instance names and container keys both went through
+   * strict rules.
+   */
+  describe('the telemetry path prefix', () => {
+    const prefixOf = (pathPrefix: unknown): string =>
+      normalizeConfig({
+        instances: [validInstance],
+        telemetry: { pathPrefix },
+      } as never).telemetry.pathPrefix;
+
+    it('normalises each segment the way every other path segment is normalised', () => {
+      expect(prefixOf('my docker')).toBe('my_docker');
+      expect(prefixOf('System.Docker')).toBe('system.docker');
+    });
+
+    it('drops empty segments rather than emitting an empty one', () => {
+      expect(prefixOf('.system.docker')).toBe('system.docker');
+      expect(prefixOf('system..docker')).toBe('system.docker');
+      expect(prefixOf('system.docker.')).toBe('system.docker');
+    });
+
+    it('falls back to the default rather than collapsing to nothing', () => {
+      // A prefix of "." used to leave an empty string, which silently moved
+      // every path the plugin publishes.
+      expect(prefixOf('.')).toBe('system.docker');
+      expect(prefixOf('')).toBe('system.docker');
+      expect(prefixOf(undefined)).toBe('system.docker');
+    });
+
+    it('leaves nothing in a path that Signal K would read as a separator', () => {
+      expect(prefixOf('boat/docker')).toBe('boat_docker');
+      expect(prefixOf('  spaced  ')).toBe('spaced');
     });
   });
 

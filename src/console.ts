@@ -56,9 +56,20 @@ export interface ConsoleOptions {
   /** How many shells may be open at once; injectable for tests. */
   limits?: StreamLimiter;
   /** Opens the socket to Portainer; injectable so tests need no network. */
-  connect?: (target: ConsoleTarget) => Promise<RelaySocket> | RelaySocket;
+  connect?: (target: ConsoleTarget, timeoutMs: number) => Promise<RelaySocket> | RelaySocket;
   idleMs?: number;
+  /** How long Portainer has to finish the handshake; injectable for tests. */
+  connectTimeoutMs?: number;
 }
+
+/**
+ * How long Portainer has to complete the console handshake.
+ *
+ * A socket that connects and never upgrades has nothing to time it out: `ws`
+ * emits neither 'open' nor 'error', so the await below would stay pending for
+ * the life of the process while holding one of the three console permits.
+ */
+const CONNECT_TIMEOUT_MS = 15_000;
 
 /**
  * A shell holds a socket to the browser, a socket to Portainer and a process in
@@ -78,7 +89,14 @@ export function openConsole(options: ConsoleOptions): ConsoleServer {
   endpoint.on('error', (error) => options.log(`console endpoint: ${error.message}`));
 
   endpoint.on('connection', (socket, request) => {
-    void accept(socket, request, options, limits, open, state);
+    // accept() contains its own failures, but a throw from outside its try —
+    // the listeners it registers first, say — would otherwise be an unhandled
+    // rejection, and Node ends the whole Signal K process on one of those.
+    void accept(socket, request, options, limits, open, state).catch((cause: unknown) => {
+      options.log(
+        `console connection failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+    });
   });
 
   return {
@@ -108,6 +126,13 @@ async function accept(
   browser.on('close', () => {
     gone = true;
   });
+  // Attached here rather than left to relay(): four of the paths below never
+  // reach relay, and a `ws` socket that emits 'error' with no listener throws
+  // it into the process. signalk-server installs a baseline handler of its
+  // own, but the plugin should not depend on the host for that.
+  browser.on('error', () => {
+    gone = true;
+  });
   const grant = options.tickets.consume(ticketOf(request.url));
   if (!grant) {
     // Deliberately uninformative: a caller without a ticket learns only that
@@ -123,11 +148,26 @@ async function accept(
   }
 
   let release: (() => void) | undefined;
+  // Recorded before anything is awaited. `ws` writes the 101 response before it
+  // fires 'connection', so the browser's onopen — and the resize it sends the
+  // moment after — arrive while this function is still waiting for the exec
+  // socket and the upstream handshake. A session added after those awaits made
+  // that first resize a 404, and the shell then stayed at Docker's 80x24 for
+  // the rest of its life, which is the failure this session table exists to
+  // prevent. Removed again on every path below that does not reach the relay.
+  options.sessions.add(grant.session, {
+    instance: grant.instance,
+    execId: grant.execId,
+    containerId: grant.containerId,
+  });
   try {
     release = limits.acquire(`${grant.instance ?? registry.defaultName}/${grant.containerId}`);
     const client: PortainerClient = registry.get(grant.instance);
     const target = await client.execSocket(grant.execId);
-    const upstream = await (options.connect ?? connectWithWs)(target);
+    const upstream = await (options.connect ?? connectWithWs)(
+      target,
+      options.connectTimeoutMs ?? CONNECT_TIMEOUT_MS,
+    );
 
     // The plugin may have stopped, or the browser given up, while Portainer
     // was answering. Either way there is nothing to relay to, and the socket
@@ -135,6 +175,7 @@ async function accept(
     if (state.closing || gone) {
       upstream.close();
       release?.();
+      options.sessions.remove(grant.session);
       browser.close(RELAY_CLOSE.refused, 'the console is no longer available');
       return;
     }
@@ -149,15 +190,11 @@ async function accept(
         options.log(`console on ${grant.containerId.slice(0, 12)} ended: ${reason}`);
       },
     });
-    options.sessions.add(grant.session, {
-      instance: grant.instance,
-      execId: grant.execId,
-      containerId: grant.containerId,
-    });
     open.add(end);
     options.log(`console opened on ${grant.containerId.slice(0, 12)}`);
   } catch (cause) {
     release?.();
+    options.sessions.remove(grant.session);
     const refused = cause instanceof StreamLimitError;
     options.log(
       `console on ${grant.containerId.slice(0, 12)} refused: ${
@@ -180,7 +217,7 @@ export function ticketOf(url: string | undefined): string | undefined {
 }
 
 /** The real client, kept apart so the relay can be tested without a network. */
-async function connectWithWs(target: ConsoleTarget): Promise<RelaySocket> {
+async function connectWithWs(target: ConsoleTarget, timeoutMs: number): Promise<RelaySocket> {
   // The same TLS settings the REST calls use. Without these a Portainer behind
   // a private CA answers every request and refuses the console, which is a
   // baffling thing to debug.
@@ -191,8 +228,25 @@ async function connectWithWs(target: ConsoleTarget): Promise<RelaySocket> {
     ...(target.tls?.rejectUnauthorized === false ? { rejectUnauthorized: false } : {}),
   });
   await new Promise<void>((resolve, reject) => {
-    socket.once('open', () => resolve());
-    socket.once('error', (error) => reject(error));
+    // A Portainer that accepts the connection and never completes the upgrade
+    // emits neither 'open' nor 'error'. Without this the await never settles,
+    // and the console permit it holds is only ever released by an error that
+    // will not come: three such sockets and the console is refused until
+    // Signal K restarts. `terminate` rather than `close`, because a socket
+    // still in the handshake has no close handshake to complete.
+    const expiry = setTimeout(() => {
+      socket.terminate();
+      reject(new Error(`Portainer did not complete the console handshake within ${timeoutMs} ms`));
+    }, timeoutMs);
+    expiry.unref?.();
+    socket.once('open', () => {
+      clearTimeout(expiry);
+      resolve();
+    });
+    socket.once('error', (error) => {
+      clearTimeout(expiry);
+      reject(error);
+    });
   });
   return socket as unknown as RelaySocket;
 }

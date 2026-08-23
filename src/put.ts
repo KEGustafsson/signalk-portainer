@@ -1,5 +1,5 @@
 import type { PluginConfig } from './config';
-import { joinPath } from './paths';
+import { joinPath, matchesContainerIdentity } from './paths';
 import type { InstanceRegistry } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
 
@@ -21,6 +21,23 @@ export interface ActionResult {
   state: 'COMPLETED' | 'PENDING' | 'FAILED';
   statusCode?: number;
   message?: string;
+}
+
+/**
+ * A container that has gone between the guard and the call.
+ *
+ * A poll can land in the space between `refusalFor`'s lookup and `apply`'s, and
+ * the two used to collapse into one "The plugin is not running" — a message
+ * about the plugin, for a plugin that is running perfectly well, when the truth
+ * is that the container is no longer there.
+ */
+class MissingContainerError extends Error {
+  readonly statusCode = 404;
+
+  constructor(message: string) {
+    super(message);
+    this.name = 'MissingContainerError';
+  }
 }
 
 export type ActionHandler = (
@@ -74,6 +91,33 @@ export function replaceKnownContainers(
   return next;
 }
 
+/** The one wording for a key that resolves to no container, used by both checks. */
+function unknownContainer(instance: string, key: string): string {
+  return `No container is currently known for ${key} on ${instance}`;
+}
+
+/**
+ * May a Signal K PUT control this container?
+ *
+ * An empty allowlist means every container, which is what an operator who
+ * never opened the setting gets. A non-empty one is exact: a reference that
+ * matches nothing simply allows nothing, because failing open here would turn
+ * a typo into the very exposure the setting exists to prevent.
+ */
+function putAllowed(
+  allowed: readonly { instance: string; container: string }[],
+  instance: string,
+  key: string,
+  container: { id: string; name?: string } | undefined,
+): boolean {
+  if (allowed.length === 0) return true;
+  if (!container) return false;
+  return allowed.some(
+    (entry) =>
+      entry.instance === instance && matchesContainerIdentity(container, key, entry.container),
+  );
+}
+
 export class PutHandlers {
   /** Paths already registered, since keys are discovered poll by poll. */
   private readonly registered = new Set<string>();
@@ -92,7 +136,12 @@ export class PutHandlers {
   register(instance: string, keys: Iterable<string>, prefix: string): void {
     if (!this.deps.config()?.control.allowPutControl) return;
 
+    const allowed = this.deps.config()?.control.putContainers ?? [];
     for (const key of keys) {
+      // Not registered at all rather than registered and refused: an
+      // unregistered path is not writable by anyone, so the allowlist holds
+      // even if a later refusal check is missed.
+      if (!putAllowed(allowed, instance, key, this.lookup(instance, key))) continue;
       const path = joinPath(prefix, instance, 'containers', key, 'state');
       if (this.registered.has(path)) continue;
       this.registered.add(path);
@@ -124,7 +173,10 @@ export class PutHandlers {
         .catch((cause: unknown) => {
           const message = cause instanceof Error ? cause.message : String(cause);
           this.deps.log(`PUT ${path} = ${requested}: ${message}`);
-          callback({ state: 'FAILED', statusCode: 502, message });
+          // A container that has gone is the writer's 404, not a gateway
+          // failure: nothing was ever sent to Docker.
+          const statusCode = cause instanceof MissingContainerError ? cause.statusCode : 502;
+          callback({ state: 'FAILED', statusCode, message });
         });
 
       return { state: 'PENDING' };
@@ -144,10 +196,17 @@ export class PutHandlers {
 
     const container = this.lookup(instance, key);
     if (!container) {
+      return { state: 'FAILED', statusCode: 404, message: unknownContainer(instance, key) };
+    }
+
+    // Re-checked rather than trusted from registration time: the allowlist can
+    // change under a handler Signal K has already been given, and there is no
+    // way to withdraw one.
+    if (!putAllowed(control.putContainers, instance, key, container)) {
       return {
         state: 'FAILED',
-        statusCode: 404,
-        message: `No container is currently known for ${key} on ${instance}`,
+        statusCode: 403,
+        message: `${key} is not in the list of containers a Signal K PUT may control`,
       };
     }
 
@@ -164,8 +223,15 @@ export class PutHandlers {
 
   private async apply(instance: string, key: string, requested: PutState): Promise<void> {
     const registry = this.deps.registry();
+    // Reserved for the one thing it actually describes: the plugin stopped
+    // between the guard and the call, so there is nothing left to send with.
+    if (!registry) throw new Error('The plugin is not running');
+
     const container = this.lookup(instance, key);
-    if (!registry || !container) throw new Error('The plugin is not running');
+    // A poll refreshes the lookup table while a PUT is on its way here, so a
+    // container removed a moment ago lands in this gap. It is the same absence
+    // `refusalFor` reports, and it says so in the same words.
+    if (!container) throw new MissingContainerError(unknownContainer(instance, key));
 
     const client = registry.get(instance);
     switch (requested) {

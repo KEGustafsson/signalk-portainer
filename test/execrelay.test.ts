@@ -75,6 +75,28 @@ describe('relay', () => {
     expect(browser.text).toBe('bytes');
   });
 
+  it('always sends a close code, so the reason reaches the browser', () => {
+    // `ws` discards the reason when the code is undefined, so the peer saw a
+    // bare 1005 and the panel's handling of the reason never ran.
+    const { browser, end } = pair();
+
+    end();
+
+    expect(browser.closed).toEqual({
+      code: RELAY_CLOSE.normal,
+      reason: 'the plugin stopped',
+    });
+  });
+
+  it('sends a code with the reason when the shell exits', () => {
+    const { browser, upstream } = pair();
+
+    upstream.emit('close');
+
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.normal);
+    expect(browser.closed?.reason).toBe('the shell ended');
+  });
+
   it('ends both sides when the browser closes', () => {
     // A shell whose browser has gone still holds a process in the container.
     const ended: string[] = [];
@@ -149,16 +171,31 @@ describe('relay', () => {
       expect(browser.closed?.code).toBe(RELAY_CLOSE.idle);
     });
 
-    it('counts typing and output as use', () => {
-      const { browser, upstream } = pair({ idleMs: 1000 });
+    it('counts typing as use', () => {
+      const { browser } = pair({ idleMs: 1000 });
 
       jest.advanceTimersByTime(900);
       browser.emit('message', 'x');
       jest.advanceTimersByTime(900);
-      upstream.emit('message', 'x');
+      browser.emit('message', 'x');
       jest.advanceTimersByTime(900);
 
       expect(browser.closed).toBeUndefined();
+    });
+
+    it('does not count output alone as use', () => {
+      // Output used to restart the countdown, and there is no ping/pong on
+      // this path: a shell printing continuously to a browser that vanished
+      // without a FIN was never idle, so it held a process in the container
+      // and an outbound buffer that only grew.
+      const { browser, upstream } = pair({ idleMs: 1000 });
+
+      for (let elapsed = 0; elapsed < 1200; elapsed += 300) {
+        upstream.emit('message', 'still printing\n');
+        jest.advanceTimersByTime(300);
+      }
+
+      expect(browser.closed?.code).toBe(RELAY_CLOSE.idle);
     });
 
     it('is off when the timeout is zero', () => {

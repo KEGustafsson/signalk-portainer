@@ -1,4 +1,5 @@
 import type { AuthOptions, TlsOptions } from './client';
+import { normalizeSegment } from './paths';
 
 export interface InstanceConfig {
   name: string;
@@ -29,6 +30,14 @@ export const TELEMETRY_LEVELS: readonly TelemetryLevel[] = ['off', 'health', 'fu
 
 export interface PluginConfig {
   instances: InstanceConfig[];
+  /**
+   * Configured instances that could not be used, in the operator's words.
+   *
+   * An enabled instance that fails validation is dropped rather than failing
+   * the whole configuration, so the rest of the boat keeps its telemetry — and
+   * this is what is left to say that one of them is missing.
+   */
+  problems: string[];
   telemetry: {
     level: TelemetryLevel;
     intervalSeconds: number;
@@ -38,6 +47,17 @@ export interface PluginConfig {
     allowPutControl: boolean;
     allowDestructive: boolean;
     allowSelfManagement: boolean;
+    /**
+     * Containers a Signal K PUT may control, empty meaning all of them.
+     *
+     * Signal K authorises a PUT with its own rules, which admit any readwrite
+     * client — unlike the REST facade, which the server gates to admins. An
+     * action handler is not told who is writing, so the plugin cannot narrow
+     * that by principal. Narrowing it by container is what it can do: list the
+     * one container a dashboard button needs and the database beside it stays
+     * out of reach.
+     */
+    putContainers: { instance: string; container: string }[];
     watchdog: { instance: string; container: string }[];
   };
 }
@@ -173,6 +193,30 @@ export const PLUGIN_SCHEMA = {
           default: false,
           description: 'Stopping it stops this plugin. Off unless you mean it.',
         },
+        putContainers: {
+          type: 'array',
+          title: 'Containers a Signal K PUT may control',
+          description:
+            'Leave empty to allow every container. A Signal K PUT is open to any readwrite client, not only admins, so listing containers here keeps the rest out of reach.',
+          items: {
+            type: 'object',
+            required: ['container'],
+            properties: {
+              container: {
+                type: 'string',
+                title: 'Container',
+                default: '',
+                description: 'Its name, the key it publishes under, or an id prefix.',
+              },
+              instance: {
+                type: 'string',
+                title: 'Portainer server',
+                default: '',
+                description: 'Leave empty for the first enabled one.',
+              },
+            },
+          },
+        },
         watchdog: {
           type: 'array',
           title: 'Watchdog',
@@ -265,8 +309,9 @@ interface RawInstance extends RawAdvanced {
 export interface RawConfig {
   instances?: RawInstance[];
   telemetry?: RawTelemetry;
-  control?: Omit<Partial<PluginConfig['control']>, 'watchdog'> & {
+  control?: Omit<Partial<PluginConfig['control']>, 'watchdog' | 'putContainers'> & {
     watchdog?: { instance?: string; container?: string }[];
+    putContainers?: { instance?: string; container?: string }[];
   };
 }
 
@@ -290,45 +335,140 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
     throw new ConfigError('No Portainer instance configured — add one under Portainer instances');
   }
 
-  const seen = new Set<string>();
-  const instances = rawInstances.map((entry, index) => normalizeInstance(entry, index, seen));
+  const { instances, problems, dropped, enabledCount } = normalizeInstances(rawInstances);
 
-  if (!instances.some((instance) => instance.enabled)) {
+  if (enabledCount === 0) {
     throw new ConfigError('Every configured Portainer instance is disabled');
+  }
+  // Only when nothing is left. One bad row used to take the working ones with
+  // it: no registry, no poller, no PUT handlers and no deltas for a Portainer
+  // that was answering perfectly well.
+  if (instances.length === 0) {
+    throw new ConfigError(`No Portainer instance could be used — ${problems.join('; ')}`);
   }
 
   const telemetry = {
     level: telemetryLevel(raw?.telemetry),
     intervalSeconds: pollInterval(raw?.telemetry?.intervalSeconds),
-    pathPrefix: (raw?.telemetry?.pathPrefix || 'system.docker').replace(/\.+$/, ''),
+    pathPrefix: pathPrefix(raw?.telemetry?.pathPrefix),
   };
 
-  const watchdog = (raw?.control?.watchdog ?? [])
-    .filter((entry) => entry.container)
-    .map((entry) => {
-      const instance = entry.instance || (instances.find((i) => i.enabled)?.name ?? 'local');
-      // Checked rather than trusted. The poller only evaluates instances that
-      // exist and are enabled, so a typo here does not fail — it silently
-      // watches nothing, and the operator discovers it the night the container
-      // they were watching dies and no alarm sounds.
-      if (!instances.some((candidate) => candidate.enabled && candidate.name === instance)) {
-        throw new ConfigError(
-          `Watchdog entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance`,
-        );
-      }
-      return { instance, container: entry.container as string };
-    });
+  // An allowlist, not a watch: an entry naming a dropped instance is simply a
+  // rule that can never match, so it is recorded and skipped rather than
+  // widening the list by accident.
+  const putContainers: PluginConfig['control']['putContainers'] = [];
+  for (const entry of raw?.control?.putContainers ?? []) {
+    if (!entry.container) continue;
+    const instance = entry.instance || (instances[0]?.name ?? 'local');
+    if (dropped.has(instance.toLowerCase())) {
+      problems.push(
+        `PUT allowlist entry for "${entry.container}" names instance "${instance}", which could not be used`,
+      );
+      continue;
+    }
+    putContainers.push({ instance, container: entry.container });
+  }
+
+  const watchdog: PluginConfig['control']['watchdog'] = [];
+  for (const entry of raw?.control?.watchdog ?? []) {
+    if (!entry.container) continue;
+    const instance = entry.instance || (instances[0]?.name ?? 'local');
+    // A watch on an instance that was dropped a moment ago is not a typo, and
+    // failing here would undo the whole point of dropping it: the boat's own
+    // instance would lose its telemetry because a half-filled second row was
+    // being watched.
+    if (dropped.has(instance.toLowerCase())) {
+      problems.push(
+        `watchdog entry for "${entry.container}" watches instance "${instance}", which could not be used`,
+      );
+      continue;
+    }
+    // Checked rather than trusted. The poller only evaluates instances that
+    // exist and are enabled, so a typo here does not fail — it silently
+    // watches nothing, and the operator discovers it the night the container
+    // they were watching dies and no alarm sounds.
+    if (!instances.some((candidate) => candidate.name === instance)) {
+      throw new ConfigError(
+        `Watchdog entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance`,
+      );
+    }
+    watchdog.push({ instance, container: entry.container });
+  }
 
   return {
     instances,
+    problems,
     telemetry,
     control: {
       allowPutControl: raw?.control?.allowPutControl ?? true,
       allowDestructive: raw?.control?.allowDestructive ?? false,
       allowSelfManagement: raw?.control?.allowSelfManagement ?? false,
+      putContainers,
       watchdog,
     },
   };
+}
+
+/**
+ * The instances that can actually be used, and what was wrong with the rest.
+ *
+ * Validated one row at a time rather than all at once. The admin UI fills a
+ * new row with the schema's defaults the moment "+" is pressed, so an operator
+ * preparing a second Portainer has a half-filled row (`name: 'local'`,
+ * `enabled: true`, `url: ''`) saved beside a working one — and validating them
+ * together threw before the first was ever built, leaving the boat's working
+ * Portainer with no registry, no poller, no PUT handlers and no deltas.
+ *
+ * A disabled row is not looked at at all: switching an instance off is how an
+ * operator parks one they have not finished filling in, and validating it
+ * anyway makes that switch useless.
+ */
+function normalizeInstances(rawInstances: RawInstance[]): {
+  instances: InstanceConfig[];
+  problems: string[];
+  /** Names of enabled rows that were dropped, lowercased, for the watchdog. */
+  dropped: Set<string>;
+  enabledCount: number;
+} {
+  const seen = new Set<string>();
+  const instances: InstanceConfig[] = [];
+  const problems: string[] = [];
+  const dropped = new Set<string>();
+  let enabledCount = 0;
+
+  rawInstances.forEach((entry, index) => {
+    if (entry?.enabled === false) return;
+    enabledCount += 1;
+    try {
+      instances.push(normalizeInstance(entry, index, seen));
+    } catch (cause) {
+      // Only a validation failure is a row to drop; anything else is a bug in
+      // this file and must not be turned into a message about configuration.
+      if (!(cause instanceof ConfigError)) throw cause;
+      problems.push(cause.message);
+      const name = (entry?.name ?? '').trim();
+      if (name) dropped.add(name.toLowerCase());
+    }
+  });
+
+  return { instances, problems, dropped, enabledCount };
+}
+
+/**
+ * The telemetry prefix, one Signal K path segment at a time.
+ *
+ * The only path segment that used to reach a delta unnormalised, while
+ * instance names and container keys both went through strict rules: a prefix
+ * of "my docker" emitted a path with a space in it, ".system.docker" emitted
+ * an empty first segment, and "." collapsed the prefix to nothing and moved
+ * every path the plugin publishes.
+ */
+function pathPrefix(value: string | undefined): string {
+  const segments = (value ?? '')
+    .split('.')
+    .filter((segment) => segment.trim().length > 0)
+    .map(normalizeSegment);
+  return segments.length > 0 ? segments.join('.') : 'system.docker';
 }
 
 /**

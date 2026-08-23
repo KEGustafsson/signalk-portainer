@@ -9,7 +9,7 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -26,6 +26,7 @@ const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  putContainers: [],
   watchdog: [],
   ...overrides,
 });
@@ -48,6 +49,7 @@ const buildApp = (
       registry
         ? ({
             instances: [],
+            problems: [],
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
@@ -79,6 +81,7 @@ describe('facade console', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const boat = () => agent.get('https://boat.test:9443');
@@ -160,6 +163,29 @@ describe('facade console', () => {
       .send({});
 
     expect(res.status).toBe(403);
+    expect(res.body.error).toContain('Container control is disabled');
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('blames the configuration, not the server, when control is off', async () => {
+    // Tickets only exist while control is enabled, so asking about them first
+    // told the operator their Signal K server was too old to serve a console —
+    // for a switch they had turned off themselves, and while /api/control was
+    // saying the opposite. Built without tickets on purpose: injecting them
+    // here is what hid this.
+    const surface = buildApp(new InstanceRegistry(config), {
+      control: control({ allowPutControl: false }),
+    });
+
+    const res = await request(surface).post(`/api/containers/${CONTAINER}/exec`).send({});
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('Container control is disabled');
+    expect(res.body.error).not.toContain('Signal K server');
+
+    // And the control surface says the same thing about the same switch.
+    const control_ = await request(surface).get('/api/control');
+    expect(control_.body.console.reason).toContain('disabled in the plugin configuration');
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 

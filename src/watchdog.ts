@@ -1,6 +1,5 @@
 import type { InstanceSnapshot } from './deltas';
-import { assignKeys, joinPath, normalizeSegment } from './paths';
-import type { DockerContainer } from './types';
+import { assignKeys, joinPath, matchesContainerRef, normalizeSegment } from './paths';
 
 /**
  * Containers that are supposed to be running, and the Signal K alarms raised
@@ -26,26 +25,6 @@ export interface Notification {
 /** Signal K's own convention: an active alarm asks for attention, a cleared one does not. */
 function notification(state: AlarmState, message: string): Notification['value'] {
   return { state, method: state === 'alarm' ? ['visual', 'sound'] : [], message };
-}
-
-/**
- * Whether a configured watch names this container.
- *
- * Operators write what they know — the name they gave it in compose, the name
- * `docker ps` shows, or an id they copied — so all three are accepted rather
- * than making them discover which one the plugin wanted.
- */
-function matches(container: DockerContainer, key: string, wanted: string): boolean {
-  const target = wanted.trim();
-  if (!target) return false;
-  const normalized = normalizeSegment(target);
-  if (key === normalized) return true;
-
-  const name = container.Names?.[0]?.replace(/^\//, '');
-  if (name && normalizeSegment(name) === normalized) return true;
-
-  const id = target.toLowerCase();
-  return id.length >= 6 && container.Id.toLowerCase().startsWith(id);
 }
 
 /**
@@ -125,7 +104,7 @@ export class Watchdog {
 
     for (const entry of watched) {
       const found = snapshot.containers.find((container) =>
-        matches(container, keys.get(container.Id)?.key ?? '', entry.container),
+        matchesContainerRef(container, keys.get(container.Id)?.key ?? '', entry.container),
       );
 
       // While the container exists its own key names the path, so the alarm

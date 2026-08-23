@@ -18,6 +18,8 @@ export interface RelaySocket {
 
 /** Codes the browser sees, chosen so the panel can say what happened. */
 export const RELAY_CLOSE = {
+  /** An ordinary end — the shell exited, or the plugin stopped. */
+  normal: 1000,
   /** The ticket was missing, expired, or already used. */
   unauthorized: 4401,
   /** The console is not available, or the guards refused it. */
@@ -62,12 +64,24 @@ export function relay(
     if (ended) return;
     ended = true;
     if (idle) clearTimeout(idle);
-    // Both, always, whichever one reported first.
-    safely(() => browser.close(code, reason));
+    // Both, always, whichever one reported first. The code is always sent:
+    // `ws` drops the reason when the code is undefined, so the peer saw a bare
+    // 1005 and the panel's handling of the reason never ran.
+    safely(() => browser.close(code ?? RELAY_CLOSE.normal, reason));
     safely(() => upstream.close());
     options.onEnd?.(reason);
   };
 
+  /**
+   * Restarts the idle countdown. Called for what the operator types and for
+   * nothing else.
+   *
+   * Output used to count as use, and there is no ping/pong on this path, so a
+   * shell printing continuously — `tail -f`, a build log — to a browser that
+   * vanished without a FIN was never idle: it held a process in the container
+   * and an outbound buffer that only grew. The cost is that a shell watched
+   * silently for fifteen minutes ends; the alternative is one that never does.
+   */
   const touch = (): void => {
     if (ended || idleMs <= 0) return;
     if (idle) clearTimeout(idle);
@@ -83,7 +97,6 @@ export function relay(
 
   upstream.on('message', (data) => {
     if (ended) return;
-    touch();
     safely(() => browser.send(asPayload(data)));
   });
 
