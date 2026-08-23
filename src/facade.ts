@@ -31,6 +31,12 @@ export interface FacadeDeps {
   /** Identity of the container this plugin runs in, for self-protection. */
   self: () => SelfContainer;
   log: (message: string) => void;
+  /**
+   * Persists the environment the panel picked, so the choice outlives the
+   * process. Absent when the Signal K server offers no way to save plugin
+   * options, and then a selection simply lasts until the plugin restarts.
+   */
+  saveEnvironment?: (instance: string, environmentId: number) => Promise<void>;
   /** Shared across requests so the ceiling is a ceiling; injectable for tests. */
   streams?: StreamLimiter;
   /** Keepalive period for open log streams; injectable for tests. */
@@ -170,19 +176,22 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.get(
     '/api/environments',
     withClient(deps, async (_req, client) => {
+      // `environmentOrNone` rather than `environment`: this route is what the
+      // picker reads, and refusing to list the choices because no choice has
+      // been made yet would leave the operator no way to make one.
       const [environments, selected] = await Promise.all([
         client.listEnvironments({ excludeSnapshots: true }),
-        client.environment(),
+        client.environmentOrNone(),
       ]);
       return {
-        selected: selected.Id,
+        selected: selected?.Id ?? null,
         environments: environments.map((environment) => ({
           id: environment.Id,
           name: environment.Name,
           type: environment.Type,
           url: environment.URL,
           health: environmentHealth(environment),
-          isSelected: environment.Id === selected.Id,
+          isSelected: environment.Id === selected?.Id,
         })),
       };
     }),
@@ -262,6 +271,73 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       });
     });
   };
+
+  /**
+   * Chooses the environment this instance works against, from the panel.
+   *
+   * Persisted rather than held per browser: the delta poller and the watchdog
+   * run server-side against the same client, so a choice only this tab knew
+   * about would leave telemetry publishing nothing while the panel looked
+   * fine. Saving it is also the point — it is what replaces editing the id
+   * into the plugin configuration by hand.
+   */
+  router.put(
+    '/api/environment',
+    body,
+    withClient(deps, async (req, client) => {
+      const body = req.body as { id?: unknown } | undefined;
+      const id = Number(body?.id);
+      if (!Number.isInteger(id)) {
+        throw new PortainerError({
+          status: 400,
+          method: 'PUT',
+          path: '/api/environment',
+          message: `Environment id "${String(body?.id)}" is not a number`,
+          hint: 'send { "id": <number> } from the environment picker',
+        });
+      }
+
+      // Checked before it is stored, so a typo cannot persist a selection that
+      // points at nothing and break the panel on the next restart.
+      const environments = await client.listEnvironments({ excludeSnapshots: true });
+      const match = environments.find((environment) => environment.Id === id);
+      if (!match) {
+        throw new PortainerError({
+          status: 404,
+          method: 'PUT',
+          path: '/api/environment',
+          message: `Portainer environment id ${id} not found`,
+          hint: `available: ${environments.map((e) => `${e.Id}:${e.Name}`).join(', ')}`,
+        });
+      }
+
+      client.selectEnvironment(id);
+
+      const instance = instanceParam(req) ?? deps.registry()?.defaultName;
+      let persisted = true;
+      try {
+        await deps.saveEnvironment?.(instance ?? '', id);
+      } catch (cause) {
+        // The selection is live either way; only its survival across a restart
+        // is at stake, so this reports rather than fails the request.
+        persisted = false;
+        deps.log(
+          `could not save the environment selection: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+
+      return {
+        selected: id,
+        name: match.Name,
+        persisted,
+        ...(persisted
+          ? {}
+          : {
+              warning: 'Selected for now, but it could not be saved and will not survive a restart',
+            }),
+      };
+    }),
+  );
 
   router.post(
     '/api/stacks',

@@ -9,6 +9,6 @@ export type SignalKApp = Pick<
   ServerAPI,
   'debug' | 'error' | 'setPluginStatus' | 'setPluginError' | 'handleMessage'
 > &
-  Partial<Pick<ServerAPI, 'registerPutHandler' | 'registerWebSocket'>>;
+  Partial<Pick<ServerAPI, 'registerPutHandler' | 'registerWebSocket' | 'savePluginOptions'>>;
 
 export type { Plugin as SignalKPlugin, PluginConstructor };

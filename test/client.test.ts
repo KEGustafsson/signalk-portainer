@@ -161,15 +161,52 @@ describe('PortainerClient environment resolution', () => {
     await expect(client.environmentId()).resolves.toBe(4);
   });
 
-  it('refuses to guess when several exist and none is configured', async () => {
+  it('refuses to guess when several exist and none is selected', async () => {
     interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
     const client = createClient(agent);
     const error = await client.environment().catch((e: unknown) => e);
 
     expect(error).toBeInstanceOf(PortainerError);
-    expect((error as PortainerError).message).toContain('none is configured');
+    expect((error as PortainerError).message).toContain('none is selected');
     expect((error as PortainerError).message).toContain('1:local');
     expect((error as PortainerError).message).toContain('4:nas');
+  });
+
+  it('offers the choice rather than failing when nothing is selected yet', async () => {
+    // What the picker reads: the panel cannot ask the operator to choose an
+    // environment if the call that lists them refuses to answer.
+    interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
+    const client = createClient(agent);
+
+    await expect(client.environmentOrNone()).resolves.toBeUndefined();
+  });
+
+  it('still reports a selection that names nothing, rather than calling it unmade', async () => {
+    interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
+    const client = createClient(agent, { environment: { id: 99 } });
+
+    await expect(client.environmentOrNone()).rejects.toThrow('99 not found');
+  });
+
+  it('works against the environment the picker chose', async () => {
+    interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
+    const client = createClient(agent);
+    client.selectEnvironment(4);
+
+    await expect(client.environmentId()).resolves.toBe(4);
+    expect(client.selection).toEqual({ id: 4 });
+  });
+
+  it('drops what it cached for the environment it was pointed away from', async () => {
+    // The cached reads describe the previous environment's Docker daemon;
+    // serving them for the new one would show the wrong host's containers.
+    interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
+    const client = createClient(agent, { environment: { id: 1 } });
+    await expect(client.environmentId()).resolves.toBe(1);
+
+    client.selectEnvironment(4);
+    interceptEnvironments([fixtures.localEnvironment, fixtures.nasEnvironment]);
+    await expect(client.environmentId()).resolves.toBe(4);
   });
 
   it('says ids are creation-order when a configured id is missing', async () => {

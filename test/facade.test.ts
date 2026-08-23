@@ -34,6 +34,7 @@ const buildApp = (
     keepalive?: number;
     /** Receives the handle a stopping plugin would reach back through. */
     onHandle?: (handle: FacadeHandle) => void;
+    saveEnvironment?: (instance: string, environmentId: number) => Promise<void>;
   } = {},
 ) => {
   const app = express();
@@ -57,6 +58,7 @@ const buildApp = (
     log: opts.log ?? (() => {}),
     ...(opts.streams ? { streams: opts.streams } : {}),
     ...(opts.keepalive ? { keepaliveMs: opts.keepalive } : {}),
+    ...(opts.saveEnvironment ? { saveEnvironment: opts.saveEnvironment } : {}),
   });
   opts.onHandle?.(handle);
   app.use(router);
@@ -187,6 +189,104 @@ describe('facade read routes', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('nope');
+  });
+
+  /**
+   * The picker. Before this, a Portainer with several environments and none
+   * configured could only be fixed by editing the plugin configuration by
+   * hand — and the route that lists the choices refused to answer, so the
+   * panel could not even show what they were.
+   */
+  describe('choosing an environment', () => {
+    const twoEnvironments = (times = 1) =>
+      boat()
+        .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+        .reply(200, [fixtures.localEnvironment, fixtures.nasEnvironment])
+        .times(times);
+
+    it('lists them all with no selection, rather than refusing to answer', async () => {
+      twoEnvironments(2);
+      const res = await request(app()).get('/api/environments');
+
+      expect(res.status).toBe(200);
+      expect(res.body.selected).toBeNull();
+      expect(res.body.environments).toHaveLength(2);
+      expect(
+        res.body.environments.every((entry: { isSelected: boolean }) => !entry.isSelected),
+      ).toBe(true);
+    });
+
+    it('selects one, and works against it afterwards', async () => {
+      twoEnvironments(3);
+      boat()
+        .intercept({ path: '/api/endpoints/4/docker/containers/json', method: 'GET' })
+        .reply(200, fixtures.containers);
+
+      const server = app();
+      const chosen = await request(server).put('/api/environment').send({ id: 4 });
+      expect(chosen.status).toBe(200);
+      expect(chosen.body).toMatchObject({ selected: 4, name: 'nas' });
+
+      // The point of the whole exercise: reads now go to endpoint 4.
+      const containers = await request(server).get('/api/containers');
+      expect(containers.status).toBe(200);
+    });
+
+    it('refuses an environment Portainer does not have', async () => {
+      twoEnvironments();
+      const res = await request(app()).put('/api/environment').send({ id: 99 });
+
+      expect(res.status).toBe(404);
+      expect(res.body.error).toContain('99');
+      expect(res.body.hint).toContain('4:nas');
+    });
+
+    it('refuses an id that is not a number', async () => {
+      const res = await request(app()).put('/api/environment').send({ id: 'primary' });
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('not a number');
+    });
+
+    it('saves the choice, so it outlives the process', async () => {
+      twoEnvironments();
+      const saved: { instance: string; id: number }[] = [];
+      const server = buildApp(new InstanceRegistry(config), {
+        saveEnvironment: async (instance, id) => {
+          saved.push({ instance, id });
+        },
+      });
+
+      const res = await request(server).put('/api/environment').send({ id: 4 });
+
+      expect(res.body.persisted).toBe(true);
+      expect(saved).toEqual([{ instance: 'boat', id: 4 }]);
+    });
+
+    it('still selects when the choice cannot be saved, and says so', async () => {
+      // A selection that works for this session is worth more than a refusal:
+      // the operator asked to look at an environment, not to edit a file.
+      twoEnvironments();
+      const server = buildApp(new InstanceRegistry(config), {
+        saveEnvironment: () => Promise.reject(new Error('read-only config')),
+      });
+
+      const res = await request(server).put('/api/environment').send({ id: 4 });
+
+      expect(res.status).toBe(200);
+      expect(res.body.selected).toBe(4);
+      expect(res.body.persisted).toBe(false);
+      expect(res.body.warning).toContain('will not survive a restart');
+    });
+
+    it('is refused from another site, like every other mutation', async () => {
+      const res = await request(app())
+        .put('/api/environment')
+        .set('origin', 'https://evil.test')
+        .send({ id: 4 });
+
+      expect(res.status).toBe(403);
+    });
   });
 
   it('lists containers, and passes ?all= through', async () => {

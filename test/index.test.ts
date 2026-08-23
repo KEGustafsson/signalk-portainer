@@ -1,16 +1,20 @@
+import express from 'express';
+import request from 'supertest';
 import type { MockAgent } from 'undici';
 import plugin from '../src/index';
 import type { SignalKApp } from '../src/signalk';
 import * as fixtures from './fixtures';
 import { createMockAgent } from './support';
 
-const createApp = () => {
+const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
   const statuses: string[] = [];
   const errors: string[] = [];
   const debug: string[] = [];
   const deltas: unknown[] = [];
   const puts: { context: string; path: string; handler: unknown }[] = [];
   const sockets: { path: string; close: () => void }[] = [];
+  /** Every options object the plugin asked the server to persist. */
+  const saved: object[] = [];
   const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
     enabled: true,
   });
@@ -25,6 +29,21 @@ const createApp = () => {
     registerPutHandler: (context: string, path: string, handler: unknown) => {
       puts.push({ context, path, handler });
     },
+    ...(opts.canSave === false
+      ? {}
+      : {
+          savePluginOptions: (
+            configuration: object,
+            cb: (err: NodeJS.ErrnoException | null) => void,
+          ) => {
+            if (opts.saveFails) {
+              cb(new Error('read-only') as NodeJS.ErrnoException);
+              return;
+            }
+            saved.push(JSON.parse(JSON.stringify(configuration)) as object);
+            cb(null);
+          },
+        }),
     registerWebSocket: (path: string) => {
       const endpoint = {
         on: () => endpoint,
@@ -35,7 +54,7 @@ const createApp = () => {
       return endpoint as unknown as ReturnType<NonNullable<SignalKApp['registerWebSocket']>>;
     },
   } as SignalKApp;
-  return { app, statuses, errors, debug, deltas, puts, sockets };
+  return { app, statuses, errors, debug, deltas, puts, sockets, saved };
 };
 
 const noopRestart = (): void => {};
@@ -525,6 +544,145 @@ describe('the console endpoint', () => {
     instance.start({ ...validOptions, control: { allowPutControl: false } }, noopRestart);
 
     expect(sockets).toHaveLength(0);
+    instance.stop();
+  });
+});
+
+/**
+ * The panel's environment picker, end to end through the plugin: the choice
+ * has to reach the plugin options, or it is forgotten on the next restart and
+ * the operator is back to editing configuration by hand.
+ */
+describe('saving the environment the panel picked', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  const twoEnvironments = (times = 1): void => {
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment, fixtures.nasEnvironment])
+      .times(times);
+  };
+
+  /** The plugin started, with its own routes mounted as the server mounts them. */
+  const startWith = (
+    harness: ReturnType<typeof createApp>,
+    options: object = { instances: [{ name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' }] },
+  ) => {
+    const instance = plugin(harness.app);
+    instance.start(options, noopRestart);
+    const router = express.Router();
+    // Signal K hands plugins a router with an extra `access()` for route
+    // scoping. This plugin never calls it, so a plain express Router is the
+    // whole of what it uses.
+    instance.registerWithRouter!(
+      router as unknown as Parameters<NonNullable<typeof instance.registerWithRouter>>[0],
+    );
+    const server = express();
+    server.use(router);
+    return { instance, server };
+  };
+
+  it('writes the chosen id into the plugin options', async () => {
+    twoEnvironments();
+    const harness = createApp();
+    const { instance, server } = startWith(harness);
+
+    const res = await request(server).put('/api/environment').send({ id: 4 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.persisted).toBe(true);
+    expect(harness.saved).toHaveLength(1);
+    expect(harness.saved[0]).toMatchObject({
+      instances: [{ name: 'boat', environmentId: 4 }],
+    });
+    instance.stop();
+  });
+
+  it('leaves the rest of the configuration alone', async () => {
+    // Saving the normalized config instead of the options as given would
+    // rewrite fields the operator set — the host among them.
+    twoEnvironments();
+    const harness = createApp();
+    const { instance, server } = startWith(harness, {
+      instances: [
+        {
+          name: 'boat',
+          host: 'boat.test',
+          apiKey: 'ptr_boat',
+          port: 9443,
+          timeoutMs: 15000,
+        },
+      ],
+      telemetry: { level: 'full', intervalSeconds: 45 },
+    });
+
+    await request(server).put('/api/environment').send({ id: 4 });
+
+    expect(harness.saved[0]).toMatchObject({
+      instances: [
+        {
+          name: 'boat',
+          host: 'boat.test',
+          apiKey: 'ptr_boat',
+          port: 9443,
+          timeoutMs: 15000,
+          environmentId: 4,
+        },
+      ],
+      telemetry: { level: 'full', intervalSeconds: 45 },
+    });
+    instance.stop();
+  });
+
+  it('clears a stale environment name, which the id would have overruled anyway', async () => {
+    twoEnvironments();
+    const harness = createApp();
+    const { instance, server } = startWith(harness, {
+      instances: [
+        { name: 'boat', host: 'boat.test', apiKey: 'ptr_boat', environmentName: 'somewhere-else' },
+      ],
+    });
+
+    await request(server).put('/api/environment').send({ id: 4 });
+
+    expect(harness.saved[0]).toMatchObject({
+      instances: [{ environmentId: 4, environmentName: '' }],
+    });
+    instance.stop();
+  });
+
+  it('selects anyway on a server that cannot save plugin options', async () => {
+    twoEnvironments();
+    const harness = createApp({ canSave: false });
+    const { instance, server } = startWith(harness);
+
+    const res = await request(server).put('/api/environment').send({ id: 4 });
+
+    expect(res.status).toBe(200);
+    expect(res.body.selected).toBe(4);
+    expect(res.body.persisted).toBe(false);
+    instance.stop();
+  });
+
+  it('reports a save that failed without losing the selection', async () => {
+    twoEnvironments();
+    const harness = createApp({ saveFails: true });
+    const { instance, server } = startWith(harness);
+
+    const res = await request(server).put('/api/environment').send({ id: 4 });
+
+    expect(res.body.selected).toBe(4);
+    expect(res.body.persisted).toBe(false);
+    expect(res.body.warning).toContain('will not survive a restart');
     instance.stop();
   });
 });

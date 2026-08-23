@@ -260,7 +260,7 @@ export class PortainerClient {
   private readonly baseUrl: string;
   private readonly auth: AuthOptions;
   private readonly timeoutMs: number;
-  private readonly selector: EnvironmentSelector;
+  private selector: EnvironmentSelector;
   private readonly dispatcher: Dispatcher | undefined;
   /** Kept for the exec WebSocket, which is a ws client rather than a fetch. */
   private readonly tls: TlsOptions | undefined;
@@ -565,6 +565,28 @@ export class PortainerClient {
    * ambiguous configuration is an error, not a coin flip.
    */
   async environment(): Promise<Environment> {
+    const chosen = await this.environmentOrNone();
+    if (chosen) return chosen;
+
+    const environments = await this.listEnvironments({ excludeSnapshots: true });
+    throw new PortainerError({
+      status: 400,
+      method: 'GET',
+      path: '/api/endpoints',
+      message: 'Portainer has several environments and none is selected',
+      hint: `choose one in the Portainer panel — available: ${describe(environments)}`,
+    });
+  }
+
+  /**
+   * The environment this client would use, or undefined while the choice is
+   * still open. The distinction matters to the picker: it has to list what
+   * there is to choose from, and an unmade choice is the reason it is being
+   * asked rather than a failure. A selection that names something Portainer
+   * does not have is still an error here — that is a wrong answer, not an
+   * absent one.
+   */
+  async environmentOrNone(): Promise<Environment | undefined> {
     return this.cache.get('environment', TTL.environments, async () => {
       const environments = await this.listEnvironments({ excludeSnapshots: true });
 
@@ -606,14 +628,26 @@ export class PortainerClient {
         });
       }
 
-      throw new PortainerError({
-        status: 400,
-        method: 'GET',
-        path: '/api/endpoints',
-        message: 'Portainer has several environments and none is configured',
-        hint: `set environment.id or environment.name — available: ${describe(environments)}`,
-      });
+      // Several, and no choice made: not an error at this level. The caller
+      // decides what an open question means — `environment()` refuses, the
+      // picker offers the list.
+      return undefined;
     });
+  }
+
+  /**
+   * Points this client at a different environment, as the panel's picker does.
+   * Every cached read belongs to the environment it was read from — the
+   * resolved environment among them — so they all go.
+   */
+  selectEnvironment(id: number | null): void {
+    this.selector = id === null ? {} : { id };
+    this.cache.invalidate();
+  }
+
+  /** What the picker currently has selected, without asking Portainer. */
+  get selection(): EnvironmentSelector {
+    return { ...this.selector };
   }
 
   async environmentId(): Promise<number> {
