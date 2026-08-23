@@ -7,8 +7,52 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
-Nothing has been published to npm yet, so everything below is the contents of
-the first release rather than a change against one.
+### Fixed
+
+- **The plugin loads.** 0.1.0 as published does not: it imports `express` at
+  runtime while declaring it only under `devDependencies`, so a fresh install
+  fails with `Cannot find module 'express'` and the plugin never starts. The
+  JSON body parsing that needed it now uses `body-parser`, which is a real
+  dependency. This is the whole reason for the release that carries it.
+- One instance that fails validation no longer takes the working ones with it.
+  The bad entry is dropped and named in the plugin status, and the Portainer
+  that was answering perfectly well keeps its panel, its deltas and its
+  watchdog.
+- Log output from a container started with a TTY is no longer discarded when it
+  is shorter than a frame header, and a UTF-8 character split across two
+  network chunks no longer arrives as a replacement character.
+- Two containers whose names normalise to the same Signal K key — `ais-logger`
+  beside `ais_logger` — no longer publish onto one path, where the value
+  flickered between them. The collision is broken by appending the short id.
+- A slow browser reading a live log no longer makes the plugin buffer the
+  container's output without limit.
+- Cached reads and the panel's error banner no longer outlive what they
+  describe: a failure that has passed clears, and a mutation is not answered
+  from a cache filled before it.
+- The panel's dialogs are usable from the keyboard: focus moves into a dialog
+  when it opens, stays inside it while it is open, and returns to the control
+  that opened it afterwards. The table tabs are marked up as tabs.
+
+### Changed
+
+- A refused Portainer request now says what Portainer said. The message it sent
+  is surfaced instead of being replaced by a generic one, so "environment 3 not
+  found" reads as itself rather than as a bare 404.
+
+### Added
+
+- Two App Store screenshots in the package manifest, so the plugin's entry in
+  the Signal K app store shows the panel and the configuration page rather than
+  a name alone.
+- CI packs the tarball, installs it on its own declared dependencies and starts
+  the plugin from it. That is the check the missing `express` walked past: the
+  test suite ran against a tree where every devDependency was present.
+
+## [0.1.0] - 2026-08-23
+
+The first published release. It is on npm and in the Signal K plugin registry,
+and it **does not load**: see the `express` defect at the top of this file. Use
+the release that follows it.
 
 **Not yet exercised against a real Portainer.** Start with an instance whose
 containers you can afford to lose.
@@ -67,8 +111,10 @@ containers you can afford to lose.
   thing that has to be answered. Pressing a row chooses it — the row already
   says what the environment is, where it lives and whether it is answering,
   which is what the choice actually turns on.
-- Lifecycle buttons per container, each behind a confirmation step that names
-  the container and says what the action does to it.
+- Lifecycle buttons per container. Everything that interrupts something already
+  running is behind a confirmation step that names the container and says what
+  the action does to it; starting and resuming are not, since their worst case
+  is that nothing happens.
 - A log viewer with follow, tail and since controls, an stderr filter, and a
   download.
 - A stacks editor for the compose file and the stack's environment variables,
@@ -149,3 +195,6 @@ containers you can afford to lose.
   in the repository and redeploy instead.
 - Updating a file-based stack drops any auto-update schedule Portainer had on
   it, which no field in the request can prevent. The answer says so.
+
+[Unreleased]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.0...HEAD
+[0.1.0]: https://github.com/KEGustafsson/signalk-portainer/releases/tag/0.1.0

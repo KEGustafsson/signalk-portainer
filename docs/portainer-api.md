@@ -15,10 +15,10 @@ run on the same machine as Signal K, on another box on the boat LAN, or ashore.
 
 ## 2. Authentication — two mechanisms, do not mix them up
 
-| Mechanism | Header | Lifetime | Use for |
-| --- | --- | --- | --- |
-| API access token | `X-API-Key: ptr_...` | long-lived, revocable in UI | automation (**preferred**) |
-| JWT | `Authorization: Bearer <jwt>` | ~8 hours | when only user/password is known |
+| Mechanism        | Header                        | Lifetime                    | Use for                          |
+| ---------------- | ----------------------------- | --------------------------- | -------------------------------- |
+| API access token | `X-API-Key: ptr_...`          | long-lived, revocable in UI | automation (**preferred**)       |
+| JWT              | `Authorization: Bearer <jwt>` | ~8 hours                    | when only user/password is known |
 
 JWT is obtained with:
 
@@ -42,7 +42,7 @@ Token creation in the UI: **My account → Access tokens**. The token is shown o
    Documented in the bundled Swagger spec.
 2. **Docker proxy** — `/api/endpoints/{id}/docker/<Docker Engine API path>`
    Forwards straight to the daemon. Request/response bodies are exactly the
-   Docker Engine API. *Deliberately absent from the Swagger spec.*
+   Docker Engine API. _Deliberately absent from the Swagger spec._
 3. **Kubernetes proxy** — `/api/endpoints/{id}/kubernetes/<k8s path>`
    Out of scope for a boat.
 
@@ -63,15 +63,15 @@ name — always resolve by listing first.
 
 `Type` enum:
 
-| Type | Meaning | Health signal |
-| --- | --- | --- |
-| 1 | Local Docker (socket) | `Status` |
-| 2 | Agent on Docker | `Status` |
-| 3 | Azure ACI | `Status` |
-| 4 | Edge agent on Docker | `Heartbeat` |
-| 5 | Local Kubernetes | `Status` |
-| 6 | Agent on Kubernetes | `Status` |
-| 7 | Edge agent on Kubernetes | `Heartbeat` |
+| Type | Meaning                  | Health signal |
+| ---- | ------------------------ | ------------- |
+| 1    | Local Docker (socket)    | `Status`      |
+| 2    | Agent on Docker          | `Status`      |
+| 3    | Azure ACI                | `Status`      |
+| 4    | Edge agent on Docker     | `Heartbeat`   |
+| 5    | Local Kubernetes         | `Status`      |
+| 6    | Agent on Kubernetes      | `Status`      |
+| 7    | Edge agent on Kubernetes | `Heartbeat`   |
 
 `Status`: `1` = up, `2` = down, and it is omitted entirely (`omitempty`) on an
 environment Portainer has never snapshotted. For Edge types (4, 7) `Status` is
@@ -82,11 +82,17 @@ Edge health is `Heartbeat`, a boolean the endpoint list computes per request and
 what Portainer's own UI shows. **Prefer it over recomputing the window.** It is
 `now - LastCheckInDate <= 2 × interval + 20s`, but with `now` on Portainer's
 clock and an `interval` that depends on `Edge.AsyncMode`: standard mode uses
-`EdgeCheckinInterval` (falling back to the global setting, 5s by default),
-async mode ignores that field and uses the shortest of `Edge.PingInterval`,
-`Edge.CommandInterval` and `Edge.SnapshotInterval`, capped at 60s. Recomputing
-locally is how a healthy async edge agent — checking in every 60s, against a
-window built from the 5s default — ends up badged "down".
+`EdgeCheckinInterval`, async mode ignores that field and uses the shortest of
+`Edge.PingInterval`, `Edge.CommandInterval` and `Edge.SnapshotInterval`, capped
+at 60s.
+
+Where the field a mode calls for is absent or zero, this plugin falls back to
+**60s**, not to Portainer's own 5s standard-mode default: 5s builds a window
+three times shorter than a healthy async agent's ping period, and the failure
+mode worth avoiding here is a false "down", not a slow one. The recomputation
+runs at all only when `Heartbeat` is missing from the payload — a Portainer old
+enough not to send it — since `Heartbeat` is the answer Portainer's own UI
+shows.
 
 Snapshot fields (heavy — exclude unless needed): `ContainerCount`,
 `RunningContainerCount`, `StoppedContainerCount`, `ImageCount`, `VolumeCount`,
@@ -215,13 +221,13 @@ different origin cannot.
 
 ## 8. Error semantics
 
-| Code | Meaning |
-| --- | --- |
-| 400 | missing required query param or malformed body |
-| 401 | wrong header type, or invalid/expired token |
-| 403 | credential valid, RBAC role insufficient |
-| 404 | wrong environment id, EE-only endpoint on CE, or version skew |
-| 409 | conflict (e.g. stack name already exists) |
+| Code | Meaning                                                       |
+| ---- | ------------------------------------------------------------- |
+| 400  | missing required query param or malformed body                |
+| 401  | wrong header type, or invalid/expired token                   |
+| 403  | credential valid, RBAC role insufficient                      |
+| 404  | wrong environment id, EE-only endpoint on CE, or version skew |
+| 409  | conflict (e.g. stack name already exists)                     |
 
 ## Sources
 

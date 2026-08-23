@@ -76,9 +76,13 @@ services:
 
 The address for [step 1](#1-add-an-instance) is then `https://localhost:9443`,
 and the certificate it answers with is Portainer's own self-signed one, which
-is what [step 3](#3-deal-with-the-certificate) is about. Naming the container
-`portainer` also keeps it recognisable in the Signal K paths, which lower-case
-what they are given: `system.docker.<instance>.containers.portainer.state`.
+is what [step 3](#3-deal-with-the-certificate) is about. What it publishes
+under in Signal K comes from the Compose labels rather than from
+`container_name:`, which the plugin never reads: the key is
+`<project>_<service>`, and Compose names the project after the directory the
+file sits in — so a directory called `portainer` gives
+`system.docker.<instance>.containers.portainer_portainer.state`. Renaming that
+directory moves the paths; renaming the container does not.
 
 What that file does: runs Portainer's current long-term release — `lts` follows
 the long-term channel rather than a fixed version, so name an exact tag or
@@ -118,6 +122,16 @@ Either an **API access token** from Portainer → My account → Access tokens
 (these start with `ptr_`), or a username and password. Either way the credential
 stays on the server; the browser never receives one.
 
+Scope it before you mint it. A Portainer access token carries the whole of its
+owner's privileges — a token made by an administrator can do anything an
+administrator can, on every environment that Portainer fronts, and this plugin
+is only one of the things that could then use it. Create a Portainer user
+limited to the environments this boat actually needs, give it no more than the
+role those environments call for, and mint the token as that user. The
+credential is stored in the plugin's own options file,
+`~/.signalk/plugin-config-data/signalk-portainer.json`, readable by whatever the
+Signal K server runs as.
+
 ### 3. Deal with the certificate
 
 Under **Advanced**. Portainer's default certificate is self-signed, so pick one
@@ -129,8 +143,12 @@ of:
 - or turn **Verify TLS certificate** off for that instance, if you cannot supply
   a CA.
 
-The request timeout lives there too. Nothing else in that block needs touching
-on a normal setup.
+The request timeout lives there too; it has to be between 1000 and 120000 ms,
+and a value outside that is refused rather than quietly corrected — that
+instance is dropped with the reason in the plugin status, since a timeout past
+Node's own timer limit fails every request at once and reports it as a timeout,
+which is true and useless. Nothing else in that block needs touching on a normal
+setup.
 
 ### 4. Pick an environment, in the panel
 
@@ -153,8 +171,10 @@ Three independent switches, each enforced server-side however the panel behaves:
 
 ### 6. Choose what to publish
 
-Deltas are `off`, `health` or `full`, on a configurable poll interval. Add a
-watchdog entry for any container whose absence should raise a Signal K alarm.
+Deltas are `off`, `health` or `full`, on a configurable poll interval — held
+between 5 and 3600 seconds, since a poll faster than that is a busy loop on a
+Raspberry Pi and one slower is indistinguishable from none. Add a watchdog entry
+for any container whose absence should raise a Signal K alarm.
 
 ![The rest of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three switches under "Control", and a watchdog entry naming a container and the server it belongs to](docs/images/plugin-control.png)
 
@@ -181,10 +201,13 @@ answered, the other tabs say so rather than showing another host's containers.
 
 ### Containers
 
-Start, stop, restart, kill and remove, each behind the guards described below.
-Everything except starting asks for confirmation in a dialog that names the
-container and says what the action does to it. The container Signal K itself
-runs in is labelled as such and its buttons are disabled. A button the
+Start, stop, restart, pause, resume, kill and remove, each behind the guards
+described below, and each offered only where it applies — a paused container is
+offered Resume rather than Start, since Docker would refuse the one the word
+does not describe. Everything except starting and resuming asks for confirmation
+in a dialog that names the container and says what the action does to it; those
+two are the actions whose worst case is that nothing happens. The container
+Signal K itself runs in is labelled as such and its buttons are disabled. A button the
 configuration does not allow is disabled, with the setting to change as its
 tooltip, rather than left to fail on click.
 
@@ -215,9 +238,11 @@ tabs cannot exhaust file descriptors on a small machine.
 
 **Console** opens a shell in a dialog — `/bin/sh`, `/bin/bash` or `/bin/ash`,
 picked before it starts. The button is disabled, with the reason as its tooltip,
-for a container that is not running, for the Signal K container, and while
-control is off. It is absent altogether on a Signal K server that cannot serve a
-plugin WebSocket, in which case `GET /control` says so.
+for a container that is not running and for the Signal K container. Where no
+shell can be opened at all — while control is off, and on a Signal K server that
+cannot serve a plugin WebSocket — it is absent altogether rather than disabled,
+because a permanently dead button is only clutter; `GET /control` says which of
+the two it is.
 
 The terminal takes the keyboard once the shell is connected, including Tab, and
 Escape belongs to the shell rather than the dialog — so **Ctrl+]**, the same
@@ -240,14 +265,18 @@ started, never both, and Redeploy appears only for a stack that has a
 repository. **Edit** opens the compose file and the stack's environment
 variables side by side, with toggles for pruning and re-pulling, and a Deploy
 that stays disabled until something changes. **New stack** creates one from a
-file or from a repository. Deleting asks first, in a dialog that names the stack
-and offers its volumes as a separate, unticked choice. A failed deploy leaves
-the editor open with the file still in it.
+file or from a repository. Destructive and disruptive stack actions are
+confirmed first, in a dialog that names the stack. The delete dialog says
+plainly that the stack's volumes are **left in place**: Portainer CE offers no
+way to remove them with the stack, so that is a separate step in Portainer
+itself. A failed deploy leaves the editor open with the file still in it.
 
-A stack deployed from a repository is shown read-only: deploying a file over it
-would detach it from git, so change the file in git and redeploy instead.
-Updating a file-based stack drops any auto-update Portainer had on it, and the
-answer says so. `prune` is always sent explicitly and defaults to off.
+A stack deployed from a repository is shown read-only, and the facade refuses a
+file deploy over it as well: deploying one would detach the stack from git, so
+change the file in git and redeploy instead. Updating a file-based stack drops
+any auto-update Portainer had on it, and the answer says so. `prune` is always
+sent explicitly and defaults to off; turning it on needs **Allow destructive
+operations**, because pruning removes whatever the new file stopped naming.
 
 ![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](docs/images/panel-stacks.png)
 
@@ -276,11 +305,18 @@ dashboards render labelled values rather than bare numbers.
 
 How much is published is a choice:
 
-| Level    | Publishes                                                                                         |
-| -------- | ------------------------------------------------------------------------------------------------- |
-| `off`    | nothing — no polling at all, unless a watchdog is configured; the facade and the panel still work |
-| `health` | instance reachability and version, running/total counts, and each container's state and health    |
-| `full`   | the above plus each container's image, name and short id                                          |
+| Level    | Publishes                                                                                      |
+| -------- | ---------------------------------------------------------------------------------------------- |
+| `off`    | nothing — and no polling either, unless a watchdog is configured or PUT control is on          |
+| `health` | instance reachability and version, running/total counts, and each container's state and health |
+| `full`   | the above plus each container's image, name and short id                                       |
+
+`off` still polls in those two cases because both are fed by the poll: the
+watchdog cannot tell that a container is missing without looking, and the PUT
+paths are discovered from what a poll finds rather than from the configuration.
+The values are then built and dropped rather than sent. **Allow Signal K PUT
+control** is on by default, so the stock configuration with deltas off is still
+polling on its interval.
 
 `health` is the default: it is what a dashboard and the watchdog need, without
 carrying an image name and a container id for every container through the delta
@@ -316,7 +352,11 @@ that anything stopped.
 Alarms are raised on the transition, not on every poll. Nothing is published
 here unless the watchdog lists something. A watch names its container however
 you know it: the container name, the normalised path key, a compose service key,
-or an id prefix.
+or an id prefix — of at least 6 characters, since a shorter one matches whatever
+happens to start with it. An instance has to fail **two consecutive polls**
+before it is called unreachable: a shore Portainer over a marina or LTE link
+drops a poll now and then, and an operator woken by a false alarm learns to
+ignore the channel that raised it.
 
 ### PUT control
 
@@ -327,6 +367,12 @@ registered only when **Allow Signal K PUT control** is set, are subject to the
 same self-protection as everything else, and answer `PENDING` until Docker
 finishes.
 
+A path exists only once a poll has found the container it belongs to. The keys
+come from Docker's own labels rather than from the configuration, so nothing can
+be registered before the first successful poll, and a container the plugin has
+never seen has no path — a write aimed at one is answered 404 rather than
+reaching Docker.
+
 ## REST API
 
 The facade lives under `/plugins/signalk-portainer/api/`, is authenticated by
@@ -335,32 +381,44 @@ site. Almost every route takes `?instance=<name>`, defaulting to the first
 enabled instance (`/instances` and `/health` span them all, and
 `/console/resize` takes its instance from the session):
 
-| Route                                      | Returns                                                                          |
-| ------------------------------------------ | -------------------------------------------------------------------------------- |
-| `GET /instances`                           | configured instances and which is default                                        |
-| `GET /health`                              | reachability, version and capabilities per instance                              |
-| `GET /environments`                        | environments with health, and which is selected                                  |
-| `GET /capabilities`                        | swarm support, swarm id, Docker and Portainer versions                           |
-| `GET /containers`                          | container list (`?all=true` to include stopped)                                  |
-| `GET /containers/:id`                      | container inspect                                                                |
-| `GET /containers/:id/logs`                 | log lines (`?tail=` `?since=` `?timestamps=`)                                    |
-| `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                                            |
-| `GET /stacks`                              | stacks belonging to this environment                                             |
-| `GET /stacks/:id/file`                     | the stack's compose file                                                         |
-| `POST /stacks`                             | create from `content` or from `repositoryUrl`                                    |
-| `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` needs destructive, `?pullImage=`)       |
-| `PUT /stacks/:id`                          | deploy a new compose file and environment                                        |
-| `DELETE /stacks/:id`                       | delete — Portainer CE cannot remove a stack's volumes with it                    |
-| `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                         |
-| `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                 |
-| `GET /control`                             | what the UI may offer, and whether self-protection is active                     |
-| `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                      |
-| `POST /containers/:id/exec`                | a console ticket, redeemed on `ws://…/plugins/signalk-portainer/console?ticket=` |
-| `POST /console/resize`                     | `{ session, cols, rows }` — the size of an open console's terminal               |
-| `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                                             |
+| Route                                      | Returns                                                                                               |
+| ------------------------------------------ | ----------------------------------------------------------------------------------------------------- |
+| `GET /instances`                           | configured instances and which is default                                                             |
+| `GET /health`                              | reachability, version and capabilities per instance                                                   |
+| `GET /environments`                        | environments with health, and which is selected                                                       |
+| `PUT /environment`                         | choose this instance's environment: body `{ id }`                                                     |
+| `GET /capabilities`                        | swarm support, swarm id, Docker and Portainer versions                                                |
+| `GET /containers`                          | container list (`?all=true` to include stopped)                                                       |
+| `GET /containers/:id`                      | container inspect                                                                                     |
+| `GET /containers/:id/logs`                 | log lines (`?tail=` `?since=` `?timestamps=`)                                                         |
+| `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                                                                 |
+| `GET /stacks`                              | stacks belonging to this environment                                                                  |
+| `GET /stacks/:id/file`                     | the stack's compose file                                                                              |
+| `POST /stacks`                             | create from `content` or from `repositoryUrl`                                                         |
+| `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` needs destructive, `?pullImage=`)                            |
+| `PUT /stacks/:id`                          | deploy a new compose file and environment (`prune` needs destructive; refused for a git-backed stack) |
+| `DELETE /stacks/:id`                       | delete — Portainer CE cannot remove a stack's volumes with it                                         |
+| `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                                              |
+| `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                                      |
+| `GET /control`                             | what the UI may offer, and whether self-protection is active                                          |
+| `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                                           |
+| `POST /containers/:id/exec`                | a console ticket, redeemed on `ws://…/plugins/signalk-portainer/console?ticket=`                      |
+| `POST /console/resize`                     | `{ session, cols, rows }` — the size of an open console's terminal                                    |
+| `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                                                                  |
 
 `tail` bounds the history a log request starts from — 200 lines by default, 5000
 at most.
+
+`PUT /environment` answers `{ selected, name, persisted }`, with a `warning` when
+`persisted` is false: the choice is live either way, but a server that offers a
+plugin no way to save its options cannot carry it across a restart. It is what
+step 4 of the configuration writes.
+
+The routes that take a body — the environment choice and the stack writes — read
+it as JSON and stop at **512 kb**, answering 413 rather than reading further.
+That is a compose file's worth of room and not an upload endpoint's, so a very
+large compose file is refused instead of becoming a way to exhaust the memory of
+a Signal K server on a Raspberry Pi.
 
 The console is a WebSocket relay rather than a proxy. Signal K hands a plugin
 the raw WebSocket upgrade to authenticate itself, and a session cookie is the
@@ -383,10 +441,12 @@ offers:
   never destroyed by implication.
 - **Self-protection** — the plugin identifies the container it runs in and
   refuses to start, stop, restart, kill or remove it, and refuses to stop,
-  update, redeploy or delete the _stack_ that contains it. Stopping that
-  container stops Signal K, the admin UI and the plugin issuing the request,
-  leaving no way back except a shell on the host. Override with **Allow managing
-  the Signal K container itself**.
+  update, redeploy or delete the _stack_ that contains it. Creating a stack whose
+  name is that same compose project is refused too: Docker keys a project by its
+  name, so deploying one from a file that does not mention Signal K would have
+  Docker remove Signal K from it. Stopping that container stops Signal K, the
+  admin UI and the plugin issuing the request, leaving no way back except a shell
+  on the host. Override with **Allow managing the Signal K container itself**.
 
 The stack check reads the compose project and swarm namespace labels off the
 containers themselves, and counts a Signal K container that is currently
@@ -403,8 +463,47 @@ already our id is inspected and the guard applied to the canonical id Docker
 reports. A reference that cannot be resolved is never mutated: not knowing what
 it points at is not the same as knowing it is safe.
 
-Every mutation the guards accept, and every refusal, is logged through
-`app.debug` — enable the plugin on the server's Log page to keep the trail.
+Every mutation the REST facade accepts, and every refusal it makes, is logged
+through `app.debug` — enable the plugin on the server's Log page to keep the
+trail. The Signal K PUT path is quieter: it logs each write that reached Docker
+and each error that came back, but a refusal there — control disabled, an
+unknown container, the Signal K container itself — is answered `FAILED` with its
+reason and not written to the log.
+
+### Who may write
+
+The REST facade is reached through Signal K's own plugin routes, which are
+admin-only, so a non-admin account cannot use it at all. Signal K PUT handlers
+are authorised separately, by the server's own PUT security, and that admits
+**readwrite** clients as well as administrators. The handler signature Signal K
+passes — context, path, value, callback — carries no principal, so the plugin
+cannot tell one caller from another and cannot narrow it.
+
+The consequence is worth stating plainly rather than discovering: with **Allow
+Signal K PUT control** on, any readwrite client or device — a dashboard, a
+script, an automation rule holding a readwrite token — can start, stop or
+restart a container by writing to its `…state` path, including containers the
+same account would be refused over REST. Self-protection still holds: the
+container running Signal K is refused whoever asks. If that is not the access
+model you want on this boat, leave PUT control off; the panel and the facade
+keep working, and only the delta-path writes go away.
+
+Between those two extremes there is **Containers a Signal K PUT may control**.
+Left empty — the default — every container is writable, which is the behaviour
+described above. List containers in it and only those get a PUT handler at all;
+everything else has no writable path for any client to write to. Each entry
+takes a container's name, the key it publishes under, or an id prefix of at
+least six characters, and an optional server name that defaults to the first
+enabled one. So a boat that wants a dashboard button for its AIS logger can
+list that one container and leave the database and the broker unreachable,
+without turning PUT control off altogether.
+
+Signal K's own ACLs are the other lever, and they are finer than anything the
+plugin can offer: `checkACL` matches a context and a path pattern and can grant
+`put` to named subjects, so an ACL over `system.docker.*` restricts container
+writes to the accounts you choose. ACLs are ignored entirely when none are
+configured, which is the default, so this only applies once you have set some
+up.
 
 ## Development
 

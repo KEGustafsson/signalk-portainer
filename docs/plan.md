@@ -85,31 +85,26 @@ is configuration, never a migration.
     {
       "name": "local", // identity: also the Signal K path segment
       "enabled": true,
-      "connection": {
-        "protocol": "https", // http | https
-        "host": "localhost", // same box, boat LAN, or ashore
-        "port": 9443,
-        "basePath": "", // if Portainer sits behind a path prefix
-        "timeoutMs": 10000,
-      },
-      "tls": {
-        "rejectUnauthorized": true, // secure by default
+      "url": "https://localhost:9443", // scheme, host and port in one field
+      "authMode": "apiKey", // apiKey | userPass
+      "apiKey": "", // ptr_...  →  X-API-Key
+      "username": "",
+      "password": "", // →  POST /api/auth, JWT cached ~8h
+      "advanced": {
         "caCert": "", // PEM for Portainer's self-signed cert
+        "rejectUnauthorized": true, // secure by default
         "servername": "", // SNI override when connecting by IP
+        "timeoutMs": 10000, // 1000–120000; outside that the instance is refused
       },
-      "auth": {
-        "mode": "apiKey", // apiKey | userPass
-        "apiKey": "", // ptr_...  →  X-API-Key
-        "username": "",
-        "password": "", // →  POST /api/auth, JWT cached ~8h
-      },
-      "environment": { "id": null, "name": "" }, // null = auto-select
+      // Written by the panel's Environments tab, hidden from the form: an id
+      // typed by hand is how an operator manages the wrong Docker host.
+      "environmentId": null, // null = not chosen yet
+      "environmentName": "",
     },
   ],
   "telemetry": {
     "level": "health", // off | health | full — see §6.1
-    "intervalSeconds": 30,
-    "emitStats": false, // one API call per container per tick
+    "intervalSeconds": 30, // held between 5 and 3600
     "pathPrefix": "system.docker",
   },
   "control": {
@@ -120,6 +115,14 @@ is configuration, never a migration.
   },
 }
 ```
+
+The address is one field because that is how everybody already writes it. The
+four-field `connection` block this section used to show, the sibling `tls` and
+`auth` blocks, and the flat `timeoutMs`/`caCert`/`rejectUnauthorized`/
+`servername` that preceded `advanced`, are still **read** — a configuration
+saved by an earlier build keeps connecting rather than coming up empty — but
+they are a migration path, not the schema, and nothing writes them any more.
+`telemetry.emitStats` was never built; there is no per-container stats poll.
 
 `name` is the instance's identity: it keys the facade, names the tab in the UI,
 and forms the Signal K path segment. It must be unique, and renaming it moves
@@ -133,14 +136,17 @@ UI tab, Signal K path.
 
 Config is validated on `start()`; a bad target fails loudly through
 `app.setPluginError()` rather than silently retrying forever. One unreachable
-instance degrades to a warning and never blocks the others.
+instance degrades to a warning and never blocks the others — and so does one
+that fails validation: the entry is dropped and named in the plugin status, and
+only a configuration with nothing usable left in it refuses to start.
 
 ## 4. Client layer
 
 ### 4.1 `PortainerClient`
 
-One class per instance, no external HTTP dependency — Node 18 `fetch` with an
-`undici` `Agent` supplying the TLS options.
+One class per instance, no external HTTP dependency — the global `fetch` with
+an `undici` `Agent` supplying the TLS options. The plugin requires Node 22, so
+`fetch` is simply there.
 
 ```ts
 interface PortainerClientOptions {
@@ -166,8 +172,9 @@ class PortainerClient {
     start / stop / restart / kill / remove(...): Promise<void>;
     logs(id: string, o: LogOpts): Promise<string>;
     logStream(id: string, o: LogOpts): AsyncIterable<LogFrame>;
-    statsOnce(id: string): Promise<DockerStats>;
-    listImages / pullImage / listVolumes / listNetworks / info / df(...);
+    statsOnce(id: string): Promise<DockerStats>;   // NOT BUILT
+    listImages / listVolumes / listNetworks / info / df(...);
+    pullImage(...);                         // NOT BUILT
     listServices / listNodes(...);          // only when capabilities().swarm
   };
 
@@ -222,8 +229,13 @@ exist.
 ## 5. HTTP facade
 
 Mounted by `registerWithRouter(router)` at
-`/plugins/signalk-portainer/api/*`. Signal K authenticates the request; the
-facade additionally requires an admin-level principal for anything that mutates.
+`/plugins/signalk-portainer/api/*`. Authorisation is Signal K's own: plugin
+routes are behind the server's admin gate, and the facade adds no principal
+check of its own — there is nothing in the request it could check one against
+that Signal K has not already decided. What the facade adds is an origin check
+(`sameOriginOnly`, so a mutation with no body cannot be driven from another
+site) and the three configuration gates: `requireControlEnabled`,
+`requireDestructiveAllowed` and `requireNotSelf`.
 
 Every route below takes `?instance=<name>`, defaulting to the first enabled
 instance so single-Portainer setups never mention it.
@@ -232,20 +244,27 @@ instance so single-Portainer setups never mention it.
 GET    /instances                               names, health, version, capabilities
 GET    /health                                  plugin + all instances
 GET    /environments                            id, name, type, health, counts
+PUT    /environment                             choose one: {id}, saved to the options
+GET    /capabilities                            swarm, Docker and Portainer versions
+GET    /control                                 what the UI may offer; self-protection
 GET    /containers                              list (?all=true)
 GET    /containers/:id                          inspect
-POST   /containers/:id/:action                  start|stop|restart|kill
+POST   /containers/:id/:action                  start|stop|restart|kill|pause|unpause
+POST   /containers/:id/exec                     a single-use console ticket
+POST   /console/resize                          {session, cols, rows}
 DELETE /containers/:id                          guarded by allowDestructive
 GET    /containers/:id/logs?tail=&since=        one-shot
 GET    /containers/:id/logs/stream              Server-Sent Events
-GET    /containers/:id/stats                    one snapshot
+GET    /containers/:id/stats                    NOT BUILT — no stats poll exists
 GET    /stacks                                  list
 GET    /stacks/:id/file                         compose yaml
+POST   /stacks                                  create from a file or a repository
 POST   /stacks/:id/:action                      start|stop|redeploy
 PUT    /stacks/:id                              update compose / env
+DELETE /stacks/:id                              guarded by allowDestructive
 GET    /images | /volumes | /networks | /df
-POST   /images/pull                             {image, tag}
-POST   /prune/:kind                             guarded by allowDestructive
+POST   /images/pull                             NOT BUILT
+POST   /prune/:kind                             NOT BUILT — only stack prune exists
 GET    /swarm/services | /swarm/nodes           404 unless capabilities.swarm
 ```
 
@@ -276,18 +295,25 @@ system.docker.local.status.containersTotal              number
 system.docker.local.containers.<key>.state              "running" | "exited" | ...
 system.docker.local.containers.<key>.health             "healthy" | "unhealthy" | "starting"
 system.docker.local.containers.<key>.image              string
-system.docker.local.containers.<key>.restartCount       number
-system.docker.local.containers.<key>.uptime             seconds
-system.docker.local.containers.<key>.cpuPercent         ratio    (emitStats only)
-system.docker.local.containers.<key>.memoryBytes        bytes    (emitStats only)
-system.docker.local.stacks.<name>.status                "active" | "inactive"
+system.docker.local.containers.<key>.name               string
+system.docker.local.containers.<key>.id                 string
 ```
+
+Planned here and **not built**: `.restartCount`, `.uptime`, `.cpuPercent`,
+`.memoryBytes` and `stacks.<name>.status`. The three numeric ones need an
+inspect or a stats call per container per poll, which is the cost this plugin's
+publishing levels exist to avoid; nothing publishes stack status as a delta.
+What is published is exactly the suffix list above: `state` and `health` at the
+`health` level, plus `image`, `name` and `id` at `full`.
 
 **`<key>` prefers the compose service identity** (decision D4). Resolution order:
 
 1. `com.docker.compose.project` + `com.docker.compose.service` labels →
    `<project>_<service>`
-2. the Portainer stack name + service, when the container belongs to a stack
+2. Swarm identity: the `com.docker.swarm.service.name` label as it stands —
+   already `<stack>_<service>` — or `com.docker.stack.namespace` plus the
+   compose service label. Portainer's own stack name is never consulted: it is
+   Portainer's record, not something Docker puts on the container.
 3. the container name
 4. the short container id, if the name is somehow unusable
 
@@ -321,11 +347,16 @@ boundary: everything remains available through the REST facade regardless.
 
 ### 6.2 Metadata
 
-On first publication each numeric path gets a Signal K meta delta — `units`
-(`s`, `ratio`, `bytes`), `displayName`, and `description` — so KIP and Freeboard
-render "CPU 12%" instead of a bare number on an unlabelled path. This is cheap
-and it is the difference between data that is technically present and data that
-is usable in a dashboard.
+On first publication each path that has a definition gets a Signal K meta delta
+— `displayName` and `description` — so KIP and Freeboard render a labelled value
+instead of a bare number on an unlabelled path. This is cheap and it is the
+difference between data that is technically present and data that is usable in a
+dashboard.
+
+`units` is defined only for `uptime`, which is not published, so nothing
+currently carries one: the two numeric paths that are published are counts of
+containers, and a count has no unit to give. `units` becomes relevant again if
+the stats paths above are ever built.
 
 ### 6.3 Notifications
 
@@ -333,13 +364,14 @@ Watchdog entries (`{instance, container}`) that are not running raise:
 
 ```
 notifications.system.docker.local.containers.<key>
-  { state: "alarm", method: ["visual"], message: "Container ais_logger is exited" }
+  { state: "alarm", method: ["visual", "sound"], message: "Container ais_logger is exited" }
 ```
 
-Cleared to `normal` when the container comes back. An unreachable instance
-raises `notifications.system.docker.<instance>.status`. This is the feature that
-justifies the whole plugin at 3am in an anchorage: the chartplotter beeps when
-the AIS-logger container dies.
+Cleared to `normal` when the container comes back — with `method: []`, since a
+cleared alarm has nothing to ask for. An unreachable instance raises
+`notifications.system.docker.<instance>.status`, and only after two consecutive
+failed polls. This is the feature that justifies the whole plugin at 3am in an
+anchorage: the chartplotter beeps when the AIS-logger container dies.
 
 ### 6.4 PUT control
 
@@ -353,8 +385,12 @@ app.registerPutHandler(
 
 Returns `{ state: 'PENDING' }` immediately and completes asynchronously, since
 a container stop can take the full 10s timeout. Registered only when
-`control.allowPutControl` is set, and it respects Signal K's own PUT security so
-a read-only client cannot stop containers.
+`control.allowPutControl` is set, and authorised by Signal K's own PUT security
+— which admits **readwrite** clients as well as administrators. The handler
+signature carries no principal, so the plugin cannot narrow that itself; a
+readwrite client can therefore reach a container this way that the same account
+could not reach through the admin-only facade. Self-protection still applies.
+The README's "Who may write" states the consequence for an operator.
 
 ## 7. Safety rails
 
@@ -367,9 +403,13 @@ process is a footgun.
   it unless `allowSelfManagement` is explicitly enabled, and surface it in the
   UI as a locked row rather than a failing button. The check matches on
   container id, so it holds across every instance that can see this host.
-- **Destructive ops off by default.** remove container, remove volume, delete
-  stack and any prune require `allowDestructive` **and** a typed confirmation in
-  the UI.
+- **Destructive ops off by default.** Removing a container, deleting a stack,
+  and pruning as part of a stack update or redeploy all require
+  `allowDestructive`. The panel confirms them in a dialog that names the thing
+  and says what happens to it — buttons and checkboxes, not the typed
+  confirmation this line originally promised: the mistake worth catching is
+  acting on the wrong row, and a name to read catches that. Removing a volume
+  on its own and pruning as an operation of its own have **no route at all**.
 - **Volume removal is never implicit.** `removeVolumes` defaults to false
   everywhere; deleting a stack's data has to be asked for twice.
 - **Read-only mode.** `allowPutControl: false` + `allowDestructive: false`
@@ -396,8 +436,10 @@ process is a footgun.
 
 Every milestone in this table is implemented, M6 in two parts: M6a the relay
 and the ticket handoff, M6b the terminal in the panel. None of it has been run
-against a real Portainer — see "What has and has not been verified" in the
-README.
+against a real Portainer: the tests and the screenshots both run against the
+fixture in [`tools/screenshots/`](../tools/screenshots/README.md), which answers
+as the API is documented rather than as any particular Portainer build actually
+does.
 
 M0–M3 is the useful product; M4–M6 is the "actually replaces the Portainer UI
 for daily use" tier. Swarm read views (`/swarm/services`, `/swarm/nodes`) ride
