@@ -232,6 +232,15 @@ export interface PortainerClientOptions {
   auth: AuthOptions;
   tls?: TlsOptions;
   timeoutMs?: number;
+  /**
+   * The budget for a write, separate from the read timeout.
+   *
+   * A stack deploy that pulls a multi-gigabyte image routinely takes minutes,
+   * and Portainer answers only when it is done. Held to the 10s read budget the
+   * request aborts while the deploy carries on and succeeds, so the operator is
+   * told the instance is unreachable and then finds the stack running.
+   */
+  writeTimeoutMs?: number;
   environment?: EnvironmentSelector;
   /** Test seam: inject an undici MockAgent instead of a real connection. */
   dispatcher?: Dispatcher;
@@ -260,6 +269,7 @@ export class PortainerClient {
   private readonly baseUrl: string;
   private readonly auth: AuthOptions;
   private readonly timeoutMs: number;
+  private readonly writeTimeoutMs: number;
   private selector: EnvironmentSelector;
   private readonly dispatcher: Dispatcher | undefined;
   /** Kept for the exec WebSocket, which is a ws client rather than a fetch. */
@@ -277,6 +287,10 @@ export class PortainerClient {
     this.baseUrl = options.baseUrl.replace(/\/+$/, '');
     this.auth = options.auth;
     this.timeoutMs = options.timeoutMs ?? 10_000;
+    // Five minutes: long enough for a compose pull over a marina uplink, short
+    // enough that a wedged connection is eventually released rather than held
+    // for the life of the process.
+    this.writeTimeoutMs = options.writeTimeoutMs ?? 300_000;
     this.selector = options.environment ?? {};
     this.log = options.log ?? (() => {});
 
@@ -315,6 +329,20 @@ export class PortainerClient {
       value === undefined ? '' : `?t=${Math.max(0, Math.floor(value))}`;
 
     /**
+     * How long to wait for a stop or a restart.
+     *
+     * Docker holds the request open for the whole grace period before it sends
+     * SIGKILL, so `stopContainer(id, 30)` against the 10s read budget aborts a
+     * call that was going to succeed — and Docker stops the container anyway,
+     * leaving the operator with an error and a stopped container. The extra 10s
+     * covers the kill itself and the round trip.
+     */
+    const stopBudget = (timeoutSeconds?: number): number | undefined =>
+      timeoutSeconds === undefined
+        ? undefined
+        : Math.max(this.timeoutMs, (Math.max(0, Math.floor(timeoutSeconds)) + 10) * 1000);
+
+    /**
      * Runs a state-changing proxy call and drops the cached reads it can
      * change, so the UI's next poll shows the result rather than a pre-change
      * snapshot.
@@ -324,14 +352,20 @@ export class PortainerClient {
      * dropping them would make every button press pay for a fresh
      * GET /api/endpoints.
      */
-    const mutate = async (method: string, path: string): Promise<void> => {
+    const mutate = async (method: string, path: string, timeoutMs?: number): Promise<void> => {
       // `notModifiedIsFine`: Docker answers 304 for a lifecycle call that asks
       // for the state a container is already in — starting a running one,
       // stopping a stopped one. That is documented, idempotent success, and
       // `Response.ok` is false for it, so without this a second Stop reads as
       // a failure. Worse for a Signal K client asserting `state = running` on
       // a schedule: every run after the first would report an error.
-      const response = await this.send(method, `${await this.dockerBase()}${path}`, {}, true, true);
+      const response = await this.send(
+        method,
+        `${await this.dockerBase()}${path}`,
+        timeoutMs === undefined ? {} : { timeoutMs },
+        true,
+        true,
+      );
       // Docker answers 204 for these; the body is drained so the connection is
       // released rather than left for the collector.
       await response.body?.cancel().catch(() => undefined);
@@ -375,10 +409,18 @@ export class PortainerClient {
       startContainer: (id) => mutate('POST', `/containers/${encode(id)}/start`),
 
       stopContainer: (id, timeoutSeconds) =>
-        mutate('POST', `/containers/${encode(id)}/stop${seconds(timeoutSeconds)}`),
+        mutate(
+          'POST',
+          `/containers/${encode(id)}/stop${seconds(timeoutSeconds)}`,
+          stopBudget(timeoutSeconds),
+        ),
 
       restartContainer: (id, timeoutSeconds) =>
-        mutate('POST', `/containers/${encode(id)}/restart${seconds(timeoutSeconds)}`),
+        mutate(
+          'POST',
+          `/containers/${encode(id)}/restart${seconds(timeoutSeconds)}`,
+          stopBudget(timeoutSeconds),
+        ),
 
       pauseContainer: (id) => mutate('POST', `/containers/${encode(id)}/pause`),
 
@@ -451,10 +493,15 @@ export class PortainerClient {
     mayRetryAuth: boolean,
     notModifiedIsFine = false,
   ): Promise<Response> {
+    const auth = await this.authHeaders();
+    // The JWT this attempt carries, read with no await in between so it is the
+    // one the headers were built from. A 401 retry compares against it rather
+    // than clearing blindly; see below.
+    const attemptJwt = this.jwt?.token;
     const headers: Record<string, string> = {
       accept: 'application/json',
       ...(init.headers ?? {}),
-      ...(await this.authHeaders()),
+      ...auth,
     };
     if (init.json !== undefined) headers['content-type'] = 'application/json';
 
@@ -473,12 +520,20 @@ export class PortainerClient {
 
     // A rejected JWT is renewable; a rejected API key is not.
     if (res.status === 401 && mayRetryAuth && this.auth.mode === 'userPass') {
-      this.jwt = undefined;
+      // Only the token this attempt actually used is dropped. Clearing
+      // unconditionally throws away a token a sibling request refreshed
+      // microseconds earlier, so after a Portainer restart every in-flight
+      // request queues its own POST /api/auth instead of the one that
+      // jwtToken() would have coalesced them into.
+      if (this.jwt && this.jwt.token === attemptJwt) this.jwt = undefined;
       // Release the connection before the retry rather than leaving the body
       // dangling for the garbage collector.
       await res.body?.cancel().catch(() => undefined);
       this.log('Portainer rejected the cached JWT, re-authenticating');
-      return this.send(method, path, init, false);
+      // `notModifiedIsFine` is passed on: dropping it turned Docker's 304
+      // ("already in that state") from idempotent success into a thrown error
+      // whenever the retry was the attempt that reached Portainer.
+      return this.send(method, path, init, false, notModifiedIsFine);
     }
 
     // 304 is only success for the callers that say so: Docker uses it to mean
@@ -734,7 +789,15 @@ export class PortainerClient {
    * inventory that follows from them.
    */
   private async stackWrite(method: string, path: string, body?: unknown): Promise<unknown> {
-    const response = await this.send(method, path, body === undefined ? {} : { json: body }, true);
+    // The write budget, not the read one: Portainer answers a deploy only once
+    // compose has finished pulling and starting, which is minutes rather than
+    // seconds for anything with an image to fetch.
+    const response = await this.send(
+      method,
+      path,
+      { ...(body === undefined ? {} : { json: body }), timeoutMs: this.writeTimeoutMs },
+      true,
+    );
     // Read defensively rather than through json(): Portainer answers a delete
     // with 204 and no body at all, and a stack write is not worth failing over
     // a body nobody needed.
@@ -887,8 +950,10 @@ export class PortainerClient {
   }
 
   /**
-   * Deletes a stack. Volumes are kept unless asked for: a stack's volumes hold
-   * the data, and deleting a stack is not a statement about the data.
+   * Deletes a stack. Its volumes are always left in place — Portainer CE's
+   * stack delete accepts no volume parameter, so there is nothing to ask for
+   * and nothing this method could pass on. Removing them is a separate step in
+   * Portainer itself.
    */
   async deleteStack(id: number): Promise<void> {
     await this.ownStack(id, 'DELETE', `/api/stacks/${id}`);
@@ -1026,6 +1091,7 @@ export class PortainerClient {
       authMode: this.auth.mode,
       environment: this.selector,
       timeoutMs: this.timeoutMs,
+      writeTimeoutMs: this.writeTimeoutMs,
     });
   }
 }

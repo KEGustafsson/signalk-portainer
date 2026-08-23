@@ -33,7 +33,10 @@ describe('PortainerClient stack writes', () => {
       .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
       .reply(200, info)
       .times(2);
-    pool.intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+    // /api/system/status, which is what the client asks for: registered under
+    // the older /api/status the probe always failed and capabilities() quietly
+    // swallowed it, so these tests never exercised the version at all.
+    pool.intercept({ path: '/api/system/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
     return pool;
   };
 
@@ -315,6 +318,10 @@ describe('PortainerClient stack writes', () => {
     await client.createStackFromString({ name: 'swarmed', content: 'services:\n' });
 
     expect(body.SwarmID).toBe('abc123swarmcluster');
+    // The version probe really ran: an unconsumed interceptor here means the
+    // capability probe failed and nobody noticed.
+    await expect(client.capabilities()).resolves.toMatchObject({ portainerVersion: '2.21.0' });
+    expect(pendingPaths(agent)).not.toContain('/api/system/status');
   });
 
   it('creates from a repository, sending credentials only when there are some', async () => {
@@ -344,6 +351,41 @@ describe('PortainerClient stack writes', () => {
     expect(body.ComposeFile).toBe('boat/docker-compose.yml');
     expect(body.RepositoryAuthentication).toBe(false);
     expect(body).not.toHaveProperty('RepositoryPassword');
+  });
+
+  it('gives a deploy longer to answer than a read gets', async () => {
+    // Portainer answers a stack write only once compose has finished pulling
+    // and starting, which is minutes for anything with an image to fetch. Held
+    // to the read budget the request aborts while the deploy carries on and
+    // succeeds, so the operator is told the instance is unreachable and then
+    // finds the stack running.
+    const pool = withStacks();
+    pool
+      .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+      .reply(200, fixtures.stacks[0])
+      .delay(150);
+
+    const client = createClient(agent, { timeoutMs: 50 });
+
+    await expect(client.updateStack(3, { content: 'services:\n' })).resolves.toEqual({
+      autoUpdateRemoved: false,
+    });
+  });
+
+  it('still gives up on a write that outlives the write budget', async () => {
+    // The budget is a bound, not an absence of one: a Portainer that accepts
+    // the request and never answers must not hold the connection for ever.
+    const pool = withStacks();
+    pool
+      .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+      .reply(200, fixtures.stacks[0])
+      .delay(150);
+
+    const client = createClient(agent, { timeoutMs: 50, writeTimeoutMs: 60 });
+
+    await expect(client.updateStack(3, { content: 'services:\n' })).rejects.toBeInstanceOf(
+      PortainerError,
+    );
   });
 
   it('survives a create whose answer is not a stack', async () => {
