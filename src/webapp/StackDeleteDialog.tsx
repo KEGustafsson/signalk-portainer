@@ -30,7 +30,9 @@ export function StackDeleteDialog({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      if (event.key === 'Escape' && !busy) onCancel();
+      // Closing does not cancel a request already sent, but leaving no way
+      // out of the dialog while a dropped link hangs is worse.
+      if (event.key === 'Escape') onCancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -62,14 +64,8 @@ export function StackDeleteDialog({
             </p>
           </div>
           <div className="modal-footer">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              ref={cancelRef}
-              disabled={busy}
-              onClick={onCancel}
-            >
-              Cancel
+            <button type="button" className="btn btn-secondary" ref={cancelRef} onClick={onCancel}>
+              {busy ? 'Close' : 'Cancel'}
             </button>
             <button
               type="button"

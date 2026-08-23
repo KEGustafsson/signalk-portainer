@@ -198,9 +198,12 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
             ? new Watchdog(config.telemetry.pathPrefix, config.control.watchdog)
             : undefined;
 
-        // PUT writes to a published path, so there is nothing to register when
-        // nothing is published. The REST facade still controls containers.
-        const putsWanted = config.control.allowPutControl && config.telemetry.level !== 'off';
+        // Deliberately not coupled to the telemetry level. PUT paths are
+        // discovered from the poll, and the poll runs whenever there is a
+        // watchdog or anything to publish — but turning deltas off to save
+        // bandwidth should not silently remove PUT control, which is what a
+        // `level !== 'off'` condition here used to do, with nothing saying so.
+        const putsWanted = config.control.allowPutControl;
         const puts =
           putsWanted && app.registerPutHandler
             ? new PutHandlers(

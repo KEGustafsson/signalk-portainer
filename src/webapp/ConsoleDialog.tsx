@@ -280,7 +280,8 @@ export function ConsoleDialog({
 
             <div className="form-text mt-2">
               Anything typed here runs inside the container as the user its image runs as. The shell
-              ends when this dialog is closed, and after fifteen minutes with nothing typed.
+              ends when this dialog is closed, and after fifteen minutes with nothing typed. Press
+              Ctrl+] to leave the terminal without a mouse.
             </div>
           </div>
 

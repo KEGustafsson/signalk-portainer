@@ -10,8 +10,15 @@
 import type { DockerContainer } from '../types';
 import { isSelfRow, type ControlState } from './control';
 
-/** Where the plugin's WebSocket endpoint is registered on the Signal K server. */
-export const CONSOLE_PATH = '/plugins/signalk-portainer/console';
+/**
+ * The absolute URL path the browser opens.
+ *
+ * Deliberately not called CONSOLE_PATH: the server has a constant of that name
+ * holding `/console`, the plugin-relative path it registers under, and two
+ * constants with one name and different values is a trap for whoever greps
+ * next.
+ */
+export const CONSOLE_URL = '/plugins/signalk-portainer/console';
 
 /**
  * The shells worth offering.
@@ -108,7 +115,7 @@ export function socketUrl(
   location: { protocol: string; host: string } = window.location,
 ): string {
   const scheme = location.protocol === 'https:' ? 'wss:' : 'ws:';
-  return `${scheme}//${location.host}${CONSOLE_PATH}?ticket=${encodeURIComponent(ticket)}`;
+  return `${scheme}//${location.host}${CONSOLE_URL}?ticket=${encodeURIComponent(ticket)}`;
 }
 
 /**

@@ -249,7 +249,7 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
 
   const telemetry = {
     level: telemetryLevel(raw?.telemetry),
-    intervalSeconds: Math.max(5, raw?.telemetry?.intervalSeconds ?? 30),
+    intervalSeconds: pollInterval(raw?.telemetry?.intervalSeconds),
     pathPrefix: (raw?.telemetry?.pathPrefix || 'system.docker').replace(/\.+$/, ''),
   };
 
@@ -286,6 +286,19 @@ function telemetryLevel(raw: RawTelemetry | undefined): TelemetryLevel {
   return 'health';
 }
 
+/**
+ * The poll interval, floored and capped.
+ *
+ * A floor alone is not enough. `Math.max(5, "abc")` is NaN, and `setInterval`
+ * with NaN fires every millisecond; anything past ~24.8 days overflows Node's
+ * 32-bit timer and does the same. Either way the plugin becomes a busy loop on
+ * a Raspberry Pi, and nothing says why.
+ */
+function pollInterval(value: number | undefined): number {
+  if (value === undefined || !Number.isFinite(value)) return 30;
+  return Math.min(3600, Math.max(5, Math.floor(value)));
+}
+
 function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>): InstanceConfig {
   const label = entry.name || `instance ${index + 1}`;
 
@@ -311,8 +324,13 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
   }
 
   const timeoutMs = entry.timeoutMs ?? 10_000;
-  if (!Number.isFinite(timeoutMs) || timeoutMs < 1000) {
-    throw new ConfigError(`Instance "${label}" needs a timeout of at least 1000 ms`);
+  // A ceiling as well as a floor. `AbortSignal.timeout` is bounded by the same
+  // 32-bit timer everything else in Node is, and a value past it aborts almost
+  // immediately — so an operator typing a very large number would get a plugin
+  // where every request fails at once, reported as a timeout, which is true
+  // and utterly misleading.
+  if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
+    throw new ConfigError(`Instance "${label}" needs a timeout between 1000 and 120000 ms`);
   }
 
   const basePath = (entry.basePath || '').replace(/\/+$/, '');

@@ -436,6 +436,17 @@ describe('ConsoleDialog', () => {
     expect(onClose).toHaveBeenCalled();
   });
 
+  it('gives the keyboard a way out of the terminal', async () => {
+    // xterm takes Tab as well as Escape, so without a bound key there is no
+    // way back to Close — and the shell nobody can leave is a root one.
+    await connected();
+    expect(terminal.focused).toBe(1);
+
+    await userEvent.keyboard('{Control>}]{/Control}');
+
+    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus();
+  });
+
   it('says what a shell can do before anyone types anything', async () => {
     await connected();
 

@@ -62,10 +62,11 @@ export function ConfirmDialog({
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
-      // Escape is ignored while the request is in flight, for the same reason
-      // Cancel is disabled: closing the dialog would not stop it, it would only
-      // take away the operator's sight of it.
-      if (event.key === 'Escape' && !busy) onCancel();
+      // Escape closes it even mid-request. Closing does not stop what was
+      // already sent, and the dialog says so — but a link that drops rather
+      // than resets can leave a request hanging for minutes, and a dialog with
+      // no way out is worse than one the operator dismissed knowingly.
+      if (event.key === 'Escape') onCancel();
     };
     document.addEventListener('keydown', onKey);
     return () => document.removeEventListener('keydown', onKey);
@@ -126,14 +127,8 @@ export function ConfirmDialog({
             ) : null}
           </div>
           <div className="modal-footer">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={onCancel}
-              disabled={busy}
-              ref={cancelRef}
-            >
-              Cancel
+            <button type="button" className="btn btn-secondary" onClick={onCancel} ref={cancelRef}>
+              {busy ? 'Close' : 'Cancel'}
             </button>
             <button
               type="button"

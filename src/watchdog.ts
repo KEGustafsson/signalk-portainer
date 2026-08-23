@@ -48,6 +48,13 @@ function matches(container: DockerContainer, key: string, wanted: string): boole
   return id.length >= 6 && container.Id.toLowerCase().startsWith(id);
 }
 
+/**
+ * How many consecutive failed polls before an instance is called unreachable.
+ * Two, so a single dropped packet is not an alarm but a real outage still is,
+ * one interval later.
+ */
+const UNREACHABLE_POLLS = 2;
+
 export class Watchdog {
   /** Last state published per path, so an alarm is raised once, not per poll. */
   private readonly states = new Map<string, AlarmState>();
@@ -77,6 +84,9 @@ export class Watchdog {
    * alarm that is already raised does not need raising again every 30 seconds,
    * and Signal K keeps the last value for clients that connect later.
    */
+  /** Consecutive failed polls per instance, so a blip does not alarm. */
+  private readonly misses = new Map<string, number>();
+
   evaluate(instance: string, snapshot: InstanceSnapshot): Notification[] {
     const watched = this.entries.filter((entry) => entry.instance === instance);
     const notifications: Notification[] = [];
@@ -87,6 +97,15 @@ export class Watchdog {
       // on it. Alarming on each one would turn a network blip into a screen
       // full of alarms about containers that are probably running fine; the
       // instance alarm says the one true thing.
+      //
+      // And not on the first failure. A shore Portainer over a marina or LTE
+      // link fails a poll now and then; alarming on one dropped packet would
+      // sound the chartplotter through the night, and an operator who is woken
+      // by a false alarm learns to ignore the channel that raised it.
+      const misses = (this.misses.get(instance) ?? 0) + 1;
+      this.misses.set(instance, misses);
+      if (misses < UNREACHABLE_POLLS) return notifications;
+
       this.push(
         notifications,
         statusPath,
@@ -96,6 +115,9 @@ export class Watchdog {
       return notifications;
     }
 
+    // One good poll clears it: coming back is not something to be cautious
+    // about.
+    this.misses.delete(instance);
     this.push(notifications, statusPath, 'normal', `Portainer instance ${instance} is reachable`);
     if (watched.length === 0) return notifications;
 

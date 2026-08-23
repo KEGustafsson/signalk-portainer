@@ -329,7 +329,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 730 unit tests, no network required, 80% coverage enforced
+npm test           # 739 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 
@@ -400,7 +400,7 @@ every container being down.
 Worth being explicit about, because the milestone plan is now complete and it
 would be easy to read that as "finished".
 
-**Verified.** 730 unit tests, no network required, covering every module in
+**Verified.** 739 unit tests, no network required, covering every module in
 `src/`. Portainer and Docker are answered by an intercepting HTTP agent, and the
 tests assert what the plugin _sent_ as well as what it did with the reply, so
 the request shapes match Portainer's documented API. The Signal K plugin

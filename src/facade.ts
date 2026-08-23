@@ -439,7 +439,11 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
           available: deps.execTickets !== undefined,
           ...(deps.execTickets
             ? {}
-            : { reason: 'this Signal K server cannot serve a plugin WebSocket' }),
+            : {
+                reason: control?.allowPutControl
+                  ? 'this Signal K server cannot serve a plugin WebSocket'
+                  : 'container control is disabled in the plugin configuration',
+              }),
         },
         self: {
           inContainer: self.inContainer,

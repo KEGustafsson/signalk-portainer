@@ -192,9 +192,20 @@ describe('Watchdog', () => {
   });
 
   describe('when the instance is unreachable', () => {
-    it('alarms on the instance and says nothing about its containers', () => {
+    it('says nothing on the first failed poll', () => {
+      // A shore Portainer over a marina link drops a poll now and then.
+      // Alarming on one would sound the chartplotter through the night, and an
+      // operator woken by a false alarm learns to ignore the channel.
       const watchdog = watching();
       watchdog.evaluate('boat', up());
+
+      expect(watchdog.evaluate('boat', down())).toEqual([]);
+    });
+
+    it('alarms on the instance once it stays unreachable, and says nothing about its containers', () => {
+      const watchdog = watching();
+      watchdog.evaluate('boat', up());
+      watchdog.evaluate('boat', down());
 
       const notifications = watchdog.evaluate('boat', down());
 
@@ -205,8 +216,18 @@ describe('Watchdog', () => {
       });
     });
 
+    it('forgets the failures as soon as it comes back', () => {
+      const watchdog = watching();
+      watchdog.evaluate('boat', down());
+      watchdog.evaluate('boat', up());
+
+      // One good poll resets the count, so the next blip starts over.
+      expect(watchdog.evaluate('boat', down())).toEqual([]);
+    });
+
     it('carries the reason, so the alarm is actionable', () => {
       const watchdog = watching();
+      watchdog.evaluate('boat', down('certificate has expired'));
       const [alarm] = watchdog.evaluate('boat', down('certificate has expired'));
 
       expect(alarm?.value.message).toContain('certificate has expired');
