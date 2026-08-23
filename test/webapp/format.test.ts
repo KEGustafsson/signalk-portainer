@@ -1,8 +1,11 @@
+import type { DockerDiskUsage } from '../../src/types';
 import {
   containerName,
   formatAge,
   formatBytes,
   healthColour,
+  imageUsers,
+  reclaimableImageBytes,
   shortId,
   stateColour,
 } from '../../src/webapp/format';
@@ -104,5 +107,81 @@ describe('shortId', () => {
     expect(shortId('sha256:abcdef0123456789')).toBe('abcdef012345');
     expect(shortId('abcdef0123456789', 4)).toBe('abcd');
     expect(shortId(undefined)).toBe('—');
+  });
+});
+
+describe('reclaimableImageBytes', () => {
+  /**
+   * Two images off one base: 100 MB each on their own, 400 MB of base shared
+   * between them. Docker reports 600 MB of layers in total.
+   */
+  const shared: DockerDiskUsage = {
+    LayersSize: 600,
+    Images: [
+      { Id: 'sha256:a', Created: 1, Size: 500, SharedSize: 400, Containers: 1 },
+      { Id: 'sha256:b', Created: 1, Size: 500, SharedSize: 400, Containers: 0 },
+    ],
+  };
+
+  it('does not double-count the layers two images share', () => {
+    // Naively summing the unused image gives 500 — most of which is the base
+    // the running one still needs, and none of which a prune would free.
+    expect(reclaimableImageBytes(shared)).toBe(500);
+  });
+
+  it('counts everything as reclaimable when no container holds anything', () => {
+    expect(
+      reclaimableImageBytes({
+        LayersSize: 600,
+        Images: [{ Id: 'sha256:a', Created: 1, Size: 500, SharedSize: 0, Containers: 0 }],
+      }),
+    ).toBe(600);
+  });
+
+  it('leaves an image Docker did not measure out of the subtraction', () => {
+    // Understating what is reclaimable is the safe direction: the other way
+    // promises space that is in use.
+    expect(
+      reclaimableImageBytes({
+        LayersSize: 600,
+        Images: [{ Id: 'sha256:a', Created: 1, Size: 500, SharedSize: -1, Containers: 2 }],
+      }),
+    ).toBe(600);
+  });
+
+  it('never reports a negative figure', () => {
+    expect(
+      reclaimableImageBytes({
+        LayersSize: 100,
+        Images: [{ Id: 'sha256:a', Created: 1, Size: 500, SharedSize: 0, Containers: 1 }],
+      }),
+    ).toBe(0);
+  });
+
+  it('says nothing at all when Docker has not answered', () => {
+    expect(reclaimableImageBytes(undefined)).toBeUndefined();
+    expect(reclaimableImageBytes({})).toBeUndefined();
+  });
+});
+
+describe('imageUsers', () => {
+  const usage: DockerDiskUsage = {
+    LayersSize: 1,
+    Images: [
+      { Id: 'sha256:a', Created: 1, Size: 1, Containers: 2 },
+      // -1 is Docker declining to count, which is what the image list sends
+      // for every row — it must not read as "nothing is using it".
+      { Id: 'sha256:b', Created: 1, Size: 1, Containers: -1 },
+    ],
+  };
+
+  it('reports the count Docker gave', () => {
+    expect(imageUsers(usage, 'sha256:a')).toBe(2);
+  });
+
+  it('says nothing for an uncounted or unknown image', () => {
+    expect(imageUsers(usage, 'sha256:b')).toBeUndefined();
+    expect(imageUsers(usage, 'sha256:missing')).toBeUndefined();
+    expect(imageUsers(undefined, 'sha256:a')).toBeUndefined();
   });
 });

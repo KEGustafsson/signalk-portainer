@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import type {
   Capabilities,
   DockerContainer,
+  DockerDiskUsage,
   DockerImage,
   DockerNetwork,
   DockerNode,
@@ -13,6 +14,8 @@ import type {
 import { ApiError, apiGet, apiSend } from './api';
 import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
 import { ConsoleDialog } from './ConsoleDialog';
+import { ImageDeleteDialog } from './ImageDeleteDialog';
+import { ImagePruneDialog } from './ImagePruneDialog';
 import { PanelBoundary } from './PanelBoundary';
 import { LogViewer } from './LogViewer';
 import { StackConfirmDialog, type ConfirmableStackAction } from './StackConfirmDialog';
@@ -22,13 +25,16 @@ import { STACK_CONTROL_DISABLED, normalizeStacks, type StackAction } from './sta
 import {
   actionLabel,
   actionRequest,
+  imageActionLabel,
+  imageActionState,
+  imageRequest,
   needsConfirmation,
   normalizeControl,
   type ContainerAction,
   type ControlState,
   type RemoveOptions,
 } from './control';
-import { containerName } from './format';
+import { containerName, formatBytes, imageUsers, reclaimableImageBytes, shortId } from './format';
 import {
   ContainersTable,
   EnvironmentsTable,
@@ -42,10 +48,20 @@ import {
   type ContainerActionsProps,
   type EnvironmentActionsProps,
   type EnvironmentRow,
+  type ImageActionsProps,
   type StackActionsProps,
 } from './tables';
 
 const POLL_INTERVAL_MS = 10_000;
+
+/**
+ * What `busyId` holds while a prune is in flight.
+ *
+ * A prune has no row to be busy on, and every other id in that slot is a
+ * container or an image id — hex, or `sha256:` and hex. Nothing Docker names
+ * can collide with this.
+ */
+const PRUNE_BUSY_KEY = 'images:prune';
 
 interface InstanceSummary {
   name: string;
@@ -159,6 +175,12 @@ function Panel(): ReactElement {
     { ok: true; message: string } | { ok: false; error: ApiError } | undefined
   >(undefined);
   const [busyId, setBusyId] = useState<string | undefined>(undefined);
+  // Docker's account of what the images cost, read only while the Images tab
+  // is open. The image that is about to be deleted, and whether a prune is
+  // being confirmed, live beside it.
+  const [usage, setUsage] = useState<DockerDiskUsage | undefined>(undefined);
+  const [deletingImage, setDeletingImage] = useState<DockerImage | undefined>(undefined);
+  const [pruning, setPruning] = useState(false);
   // Kept apart from `error`: the poll clears that one on its next success, and
   // a refused action is exactly what the operator still needs to read.
   const [actionResult, setActionResult] = useState<
@@ -340,6 +362,43 @@ function Panel(): ReactElement {
     }
   }, [activeTab.id, activeTab.path, instance]);
 
+  /**
+   * Docker's own figures for the images: what the layers cost, and which of
+   * them a container is holding.
+   *
+   * Read on its own rather than with the tab payload, and deliberately not on
+   * the ten-second poll: /system/df walks the layer store, which on the SD
+   * card of a Raspberry Pi is seconds of work every time. Once when the tab is
+   * opened and again after a prune are the two moments the number is being
+   * read, so they are the two times it is asked for.
+   */
+  const loadUsage = useCallback(
+    async (signal?: AbortSignal): Promise<void> => {
+      try {
+        const body = await apiGet<{ df?: DockerDiskUsage }>('/df', instance, signal);
+        setUsage(body.df);
+      } catch {
+        // Deliberately silent. Nothing is offered on the strength of this read
+        // — without it the summary says so and the rows carry no badge — and
+        // the tab's own read is what reports a Portainer that is really down.
+      }
+    },
+    [instance],
+  );
+
+  useEffect(() => {
+    if (tab !== 'images' || instances.length === 0) return;
+    // Same gate the tab read is under: /system/df goes through the environment,
+    // so it has nothing to answer while the choice is still open.
+    if (environment === undefined || needsEnvironment) return;
+    const controller = new AbortController();
+    // Cleared first: a figure from the instance or environment just left would
+    // otherwise sit under the new one's rows until this read lands.
+    setUsage(undefined);
+    void loadUsage(controller.signal);
+    return () => controller.abort();
+  }, [tab, instances.length, environment, needsEnvironment, loadUsage]);
+
   useEffect(() => {
     if (instances.length === 0) return;
     // Every other tab read is scoped to an environment, so polling while the
@@ -415,6 +474,80 @@ function Panel(): ReactElement {
       void runAction(container, action, { force: false, removeVolumes: false });
     },
     [runAction],
+  );
+
+  /**
+   * Runs an image mutation, then re-reads the list and the disk usage.
+   *
+   * Guarded on the instance for the reason a container action is: an answer
+   * that arrives after the operator has switched Portainer belongs to the one
+   * they left, and running `load` for it would abort the new instance's
+   * request and paint its table with the old one's rows.
+   */
+  const runImage = useCallback(
+    async (busyKey: string, run: () => Promise<unknown>, done: (body: unknown) => string) => {
+      setBusyId(busyKey);
+      setActionResult(undefined);
+      const startedOn = instance;
+      try {
+        const body = await run();
+        setActionResult({ ok: true, message: done(body) });
+        if (selected.current === startedOn) {
+          await load();
+          // After the list, not with it: the summary is the answer to what the
+          // prune just did, and reading it first would report the state before.
+          await loadUsage();
+        }
+        return { ok: true };
+      } catch (cause) {
+        setActionResult({ ok: false, error: asApiError(cause) });
+        return { ok: false };
+      } finally {
+        setBusyId(undefined);
+      }
+    },
+    [instance, load, loadUsage],
+  );
+
+  const removeImage = useCallback(
+    (image: DockerImage): void => {
+      const label = image.RepoTags?.[0] ?? shortId(image.Id);
+      // By id rather than by tag: an id names exactly the layers on the row
+      // that was pressed, where a tag is a pointer that another tag may share.
+      // Docker refuses an id carrying several tags, which the dialog says.
+      const { method, path } = imageRequest('remove', image.Id);
+      void runImage(
+        image.Id,
+        () => apiSend(method, path, instance),
+        () => `${label}: deleted`,
+      ).then((outcome) => {
+        if (outcome.ok) setDeletingImage(undefined);
+      });
+    },
+    [instance, runImage],
+  );
+
+  const pruneImages = useCallback(
+    (options: { all: boolean }): void => {
+      const { method, path } = imageRequest('prune', options);
+      void runImage(
+        PRUNE_BUSY_KEY,
+        () => apiSend(method, path, instance),
+        (body) => {
+          const result = (body ?? {}) as { deleted?: number; reclaimed?: number };
+          const deleted = typeof result.deleted === 'number' ? result.deleted : 0;
+          // Docker's own figure for what it freed, not the panel's estimate of
+          // what it might: those two disagreeing is worth seeing.
+          const freed = typeof result.reclaimed === 'number' ? formatBytes(result.reclaimed) : '—';
+          return deleted === 0
+            ? 'Nothing to reclaim: no unused images were found'
+            : `${deleted} image${deleted === 1 ? '' : 's'} removed, ${freed} freed`;
+        },
+      ).then((outcome) => {
+        if (outcome.ok) setPruning(false);
+      });
+    },
+    [instance, runImage],
   );
 
   const runStack = useCallback(
@@ -536,6 +669,11 @@ function Panel(): ReactElement {
     setDeleting(undefined);
     setConfirmingStack(undefined);
     setStackResult(undefined);
+    // An image id belongs to its Docker host as much as a container id does,
+    // and the prune dialog quotes a figure that is about to stop being true.
+    setDeletingImage(undefined);
+    setPruning(false);
+    setUsage(undefined);
   }, []);
 
   /**
@@ -833,6 +971,19 @@ function Panel(): ReactElement {
               ...(control?.console.available ? { onConsole: setShelling } : {}),
             }}
             stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
+            imageActions={{
+              control,
+              busyId,
+              onRemove: (image) => {
+                setActionResult(undefined);
+                setDeletingImage(image);
+              },
+              usage,
+            }}
+            onPrune={() => {
+              setActionResult(undefined);
+              setPruning(true);
+            }}
             onNewStack={() => {
               setStackResult(undefined);
               setEditing({ kind: 'new' });
@@ -901,6 +1052,25 @@ function Panel(): ReactElement {
         />
       ) : null}
 
+      {deletingImage ? (
+        <ImageDeleteDialog
+          image={deletingImage}
+          users={imageUsers(usage, deletingImage.Id)}
+          busy={busyId === deletingImage.Id}
+          onCancel={() => setDeletingImage(undefined)}
+          onConfirm={() => removeImage(deletingImage)}
+        />
+      ) : null}
+
+      {pruning ? (
+        <ImagePruneDialog
+          reclaimable={reclaimableImageBytes(usage)}
+          busy={busyId === PRUNE_BUSY_KEY}
+          onCancel={() => setPruning(false)}
+          onConfirm={pruneImages}
+        />
+      ) : null}
+
       {confirming ? (
         <ConfirmDialog
           request={confirming}
@@ -920,6 +1090,8 @@ function TabBody({
   environmentActions,
   actions,
   stackActions,
+  imageActions,
+  onPrune,
   onNewStack,
 }: {
   tab: TabId;
@@ -930,6 +1102,8 @@ function TabBody({
   environmentActions: EnvironmentActionsProps;
   actions: ContainerActionsProps;
   stackActions: StackActionsProps;
+  imageActions: ImageActionsProps;
+  onPrune: () => void;
   onNewStack: () => void;
 }): ReactElement {
   switch (tab) {
@@ -952,7 +1126,7 @@ function TabBody({
         </div>
       );
     case 'images':
-      return <ImagesTable rows={rowsOf(payload.images)} />;
+      return <ImagesTab rows={rowsOf(payload.images)} actions={imageActions} onPrune={onPrune} />;
     case 'volumes':
       return <VolumesTable rows={rowsOf(payload.volumes)} />;
     case 'networks':
@@ -965,6 +1139,48 @@ function TabBody({
     default:
       return <ContainersTable rows={rowsOf(payload.containers)} actions={actions} />;
   }
+}
+
+/**
+ * The images, with what they cost above them.
+ *
+ * The summary is the reason this tab is worth a header at all: an operator
+ * opens it because something is filling the disk, and the per-row sizes do not
+ * add up to an answer — layers shared between images are counted in both. The
+ * two figures beside the count come from Docker's own accounting, and are
+ * absent rather than estimated when that read has not landed.
+ */
+function ImagesTab({
+  rows,
+  actions,
+  onPrune,
+}: {
+  rows: DockerImage[];
+  actions: ImageActionsProps;
+  onPrune: () => void;
+}): ReactElement {
+  const total = actions.usage?.LayersSize;
+  const reclaimable = reclaimableImageBytes(actions.usage);
+  const gate = imageActionState(actions.control);
+
+  return (
+    <div>
+      <div className="d-flex justify-content-between align-items-center mb-2">
+        <span className="small text-muted">
+          {rows.length} image{rows.length === 1 ? '' : 's'}
+          {typeof total === 'number' ? ` · ${formatBytes(total)} on disk` : ''}
+          {reclaimable === undefined ? '' : ` · ${formatBytes(reclaimable)} reclaimable`}
+        </span>
+        <GatedButton
+          className="btn btn-sm btn-outline-danger"
+          label={imageActionLabel('prune')}
+          {...(gate.enabled ? {} : { reason: gate.reason })}
+          onPress={onPrune}
+        />
+      </div>
+      <ImagesTable rows={rows} actions={actions} />
+    </div>
+  );
 }
 
 /**

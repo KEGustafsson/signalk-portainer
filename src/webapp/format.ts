@@ -1,5 +1,7 @@
 /** Presentation helpers. Kept separate so they can be tested without a DOM. */
 
+import type { DockerDiskUsage } from '../types';
+
 const UNITS = ['B', 'kB', 'MB', 'GB', 'TB'] as const;
 
 /**
@@ -83,4 +85,53 @@ export function healthColour(health: string): string {
 export function shortId(id: string | undefined, length = 12): string {
   if (!id) return '—';
   return id.replace(/^sha256:/, '').slice(0, length);
+}
+
+/**
+ * What a prune could free, by the arithmetic `docker system df` uses.
+ *
+ * Not the sum of the unused images: two images built from the same base share
+ * those layers on disk, and adding both sizes counts the shared bytes twice —
+ * on a Pi that reads as gigabytes about to come back, and then a prune frees a
+ * few hundred megabytes and looks broken.
+ *
+ * So it is done the other way round, as the Docker CLI does: total layer bytes
+ * less the bytes the images in use are holding on their own. An image whose
+ * shared size Docker declined to compute is left out of the subtraction, which
+ * understates what is reclaimable rather than promising space that is in use.
+ */
+export function reclaimableImageBytes(usage: DockerDiskUsage | undefined): number | undefined {
+  const total = usage?.LayersSize;
+  if (typeof total !== 'number' || !Number.isFinite(total)) return undefined;
+
+  let used = 0;
+  for (const image of usage?.Images ?? []) {
+    // -1 is Docker saying it has not counted, not saying zero.
+    if (!image || typeof image.Containers !== 'number' || image.Containers <= 0) continue;
+    const size = image.Size;
+    const shared = image.SharedSize;
+    if (typeof size !== 'number' || !Number.isFinite(size)) continue;
+    if (typeof shared !== 'number' || !Number.isFinite(shared) || shared < 0) continue;
+    used += size - shared;
+  }
+
+  // Clamped: the two numbers come from separate walks of the layer store, and
+  // a daemon busy pulling between them can report a used total above the whole.
+  return Math.max(0, total - used);
+}
+
+/**
+ * How many containers reference an image, when Docker has said.
+ *
+ * The image list answers -1 for every row — Docker only counts them for
+ * /system/df — so this reads the disk-usage answer instead, and says nothing
+ * at all until that has arrived.
+ */
+export function imageUsers(
+  usage: DockerDiskUsage | undefined,
+  imageId: string,
+): number | undefined {
+  const match = (usage?.Images ?? []).find((image) => image?.Id === imageId);
+  if (!match || typeof match.Containers !== 'number' || match.Containers < 0) return undefined;
+  return match.Containers;
 }

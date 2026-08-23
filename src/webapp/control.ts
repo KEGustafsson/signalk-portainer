@@ -204,6 +204,84 @@ export function actionVariant(action: ContainerAction): string {
   }
 }
 
+export const IMAGE_ACTIONS = ['remove', 'prune'] as const;
+export type ImageAction = (typeof IMAGE_ACTIONS)[number];
+
+const IMAGE_LABELS: Record<ImageAction, string> = {
+  remove: 'Delete',
+  prune: 'Reclaim space',
+};
+
+export function imageActionLabel(action: ImageAction): string {
+  return IMAGE_LABELS[action];
+}
+
+/**
+ * Whether the panel may offer to change the images, and why not when it may
+ * not.
+ *
+ * One rule for both actions, because both are the same act at different
+ * widths: something the daemon is holding stops being there. Neither depends
+ * on which image it is — self-protection has nothing to say here, since Docker
+ * itself refuses to remove an image a container is using, the Signal K one
+ * included.
+ */
+export function imageActionState(control: ControlState | undefined): ActionState {
+  if (!control) {
+    return { enabled: false, reason: 'Waiting for the plugin to report what is allowed' };
+  }
+  if (!control.allowPutControl) {
+    return {
+      enabled: false,
+      reason:
+        'Container control is disabled — enable "Allow Signal K PUT control" in the plugin configuration',
+    };
+  }
+  if (!control.allowDestructive) {
+    return {
+      enabled: false,
+      reason:
+        'Destructive operations are disabled — enable "Allow destructive operations" in the plugin configuration',
+    };
+  }
+  return { enabled: true };
+}
+
+/** What a prune should reach for: untagged layers, or every unused image. */
+export interface PruneOptions {
+  all: boolean;
+}
+
+/**
+ * The facade call behind an image action.
+ *
+ * The reference is encoded whole rather than by segment: a tag carries slashes
+ * and a colon — `ghcr.io/owner/name:1.2` — and every one of them has to reach
+ * the route as part of one path parameter rather than as more path.
+ */
+export function imageRequest(
+  action: 'remove',
+  reference: string,
+): { method: 'DELETE'; path: string };
+export function imageRequest(
+  action: 'prune',
+  options: PruneOptions,
+): { method: 'POST'; path: string };
+export function imageRequest(
+  action: ImageAction,
+  subject: string | PruneOptions,
+): { method: 'POST' | 'DELETE'; path: string } {
+  if (action === 'remove' && typeof subject === 'string') {
+    return { method: 'DELETE', path: `/images/${encodeURIComponent(subject)}` };
+  }
+  // `all` is read rather than assumed even here: the wide prune is the one
+  // that can take away an image a rollback needed, and defaulting to it
+  // because an argument arrived in an unexpected shape is not a default worth
+  // having.
+  const all = typeof subject === 'object' && subject.all === true;
+  return { method: 'POST', path: `/images/prune?all=${all ? 'true' : 'false'}` };
+}
+
 export interface RemoveOptions {
   force: boolean;
   removeVolumes: boolean;

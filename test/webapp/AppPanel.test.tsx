@@ -1,7 +1,7 @@
 /**
  * @jest-environment jsdom
  */
-import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import AppPanel from '../../src/webapp/AppPanel';
 import { asResponse, type FetchMock, jsonBody } from './mocks';
@@ -1455,6 +1455,194 @@ describe('AppPanel container actions', () => {
       expect(screen.getByRole('button', { name: 'New stack' })).toHaveAttribute(
         'aria-disabled',
         'true',
+      );
+    });
+  });
+
+  /**
+   * The one inventory the panel will change.
+   *
+   * These cover the two decisions that are not obvious from the code: that the
+   * disk-usage read is deliberately kept off the ten-second poll, and that the
+   * wide prune is never sent unless the operator asked for it.
+   */
+  describe('images', () => {
+    const held = 'sha256:aaaa1111bbbb2222';
+    const loose = 'sha256:cccc3333dddd4444';
+
+    const images = [
+      { Id: held, RepoTags: ['influxdb:2.7'], Created: 1_755_000_000, Size: 412_000_000 },
+      { Id: loose, RepoTags: [], Created: 1_754_000_000, Size: 90_000_000 },
+    ];
+
+    /**
+     * What `docker system df` says about those two: one held by a container,
+     * one held by nothing, and 502 MB of layers between them.
+     */
+    const df = {
+      LayersSize: 502_000_000,
+      Images: [
+        { Id: held, Created: 1, Size: 412_000_000, SharedSize: 0, Containers: 1 },
+        { Id: loose, Created: 1, Size: 90_000_000, SharedSize: 0, Containers: 0 },
+      ],
+    };
+
+    const imageFetch = (overrides: Record<string, unknown> = {}) =>
+      routeFetch({
+        '/images': { images },
+        '/df': { df },
+        '/control': { ...control, allowDestructive: true },
+        ...overrides,
+      });
+
+    const openImages = async (user: ReturnType<typeof userEvent.setup>): Promise<void> => {
+      render(<AppPanel />);
+      await user.click(await screen.findByRole('tab', { name: 'Images' }));
+      await screen.findByText('influxdb:2.7');
+    };
+
+    it('reports what the images cost, using Docker’s arithmetic rather than a sum of the rows', async () => {
+      global.fetch = imageFetch() as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+
+      // 90 MB, not the 502 MB the two row sizes add up to: the held image's
+      // layers are not going anywhere.
+      expect(
+        await screen.findByText(/2 images · 502 MB on disk · 90 MB reclaimable/),
+      ).toBeInTheDocument();
+    });
+
+    it('keeps the disk-usage read off the ten-second poll', async () => {
+      jest.useFakeTimers({ advanceTimers: true });
+      const fetchMock = imageFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+      await openImages(user);
+
+      // Inside act: the poll this releases sets state as it lands, and left
+      // outside it those updates arrive after the test has finished.
+      await act(async () => {
+        jest.advanceTimersByTime(30_000);
+        // The interval fires synchronously; its fetch settles as a microtask,
+        // and flushing here is what puts the state updates inside this act.
+        await Promise.resolve();
+      });
+
+      await waitFor(() => {
+        expect(
+          requests(fetchMock).filter((entry) => entry.includes('/images')).length,
+        ).toBeGreaterThan(1);
+      });
+      // /system/df walks the layer store, which on the SD card of a Pi is
+      // seconds of work. Once when the tab opened is the whole of it.
+      expect(requests(fetchMock).filter((entry) => entry.includes('/df')).length).toBe(1);
+    });
+
+    it('deletes by id, then re-reads both the list and the usage', async () => {
+      const fetchMock = imageFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(
+        within(screen.getByRole('group', { name: 'Actions for influxdb:2.7' })).getByRole(
+          'button',
+          { name: 'Delete' },
+        ),
+      );
+
+      const dialog = await screen.findByRole('dialog');
+      // It names the image rather than asking "are you sure?": the mistake
+      // worth catching is acting on the wrong row.
+      expect(within(dialog).getByText(/Delete influxdb:2.7\?/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Delete' }));
+
+      await waitFor(() => {
+        expect(requests(fetchMock)).toContain(
+          `DELETE /plugins/signalk-portainer/api/images/${encodeURIComponent(held)}?instance=boat`,
+        );
+      });
+      // The summary is the answer to what the delete did, so it is re-read too.
+      await waitFor(() =>
+        expect(requests(fetchMock).filter((entry) => entry.includes('/df')).length).toBe(2),
+      );
+    });
+
+    it('says a container is holding the image rather than hiding the button', async () => {
+      global.fetch = imageFetch() as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(
+        within(screen.getByRole('group', { name: 'Actions for influxdb:2.7' })).getByRole(
+          'button',
+          { name: 'Delete' },
+        ),
+      );
+
+      // Docker decides at the moment of the request; this reading is from when
+      // the tab opened, so it explains rather than refuses.
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/1 container is using it/)).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeEnabled();
+    });
+
+    it('prunes untagged layers unless the operator widens it', async () => {
+      const fetchMock = imageFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Reclaim space' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/90 MB reclaimable/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Delete untagged layers' }));
+
+      await waitFor(() => {
+        expect(requests(fetchMock)).toContain(
+          'POST /plugins/signalk-portainer/api/images/prune?all=false&instance=boat',
+        );
+      });
+    });
+
+    it('widens the prune only when the box is ticked', async () => {
+      const fetchMock = imageFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Reclaim space' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/tagged images no container is using/));
+      // The warning about needing a connection to get one back appears with it.
+      expect(within(dialog).getByText(/needs a working connection/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Delete unused images' }));
+
+      await waitFor(() => {
+        expect(requests(fetchMock)).toContain(
+          'POST /plugins/signalk-portainer/api/images/prune?all=true&instance=boat',
+        );
+      });
+    });
+
+    it('offers neither action until destructive operations are enabled', async () => {
+      global.fetch = imageFetch({ '/control': control }) as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+
+      expect(screen.getByRole('button', { name: 'Reclaim space' })).toHaveAttribute(
+        'aria-disabled',
+        'true',
+      );
+      const row = within(screen.getByRole('group', { name: 'Actions for influxdb:2.7' }));
+      expect(row.getByRole('button', { name: 'Delete' })).toHaveAccessibleDescription(
+        /Destructive operations are disabled/,
       );
     });
   });

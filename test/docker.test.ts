@@ -186,6 +186,97 @@ describe('PortainerClient docker read surface', () => {
     await expect(client.docker.listNodes()).resolves.toHaveLength(1);
   });
 
+  it('removes an image by tag, sending the reference as one path segment', async () => {
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      // The slashes and the colon of a registry tag reach Docker as part of
+      // the image name, not as more path.
+      .intercept({
+        path: '/api/endpoints/1/docker/images/ghcr.io%2Fowner%2Fapp%3A1.2',
+        method: 'DELETE',
+      })
+      .reply(200, [{ Untagged: 'ghcr.io/owner/app:1.2' }, { Deleted: 'sha256:aaa' }]);
+
+    const client = createClient(agent);
+
+    await expect(client.docker.removeImage('ghcr.io/owner/app:1.2')).resolves.toEqual([
+      { Untagged: 'ghcr.io/owner/app:1.2' },
+      { Deleted: 'sha256:aaa' },
+    ]);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('never forces an image removal, so Docker still refuses one in use', async () => {
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .reply(409, { message: 'conflict: unable to delete sha256:aaa (cannot be forced)' });
+
+    const client = createClient(agent);
+    const error = await client.docker.removeImage('sha256:aaa').catch((e: unknown) => e);
+
+    // That refusal is the guard: it is what keeps the image Signal K runs from
+    // out of reach without the plugin having to know which one that is.
+    expect(error).toBeInstanceOf(PortainerError);
+    expect((error as PortainerError).status).toBe(409);
+  });
+
+  it('prunes untagged layers by default and every unused image only on request', async () => {
+    withEnvironment();
+    const pool = agent.get(BASE_URL);
+    const filter = (dangling: string) =>
+      `/api/endpoints/1/docker/images/prune?filters=${encodeURIComponent(
+        JSON.stringify({ dangling: [dangling] }),
+      )}`;
+    // The filter is always sent: leaving it to Docker's default is how a
+    // change of mind upstream turns a tidy-up into a loss.
+    pool
+      .intercept({ path: filter('true'), method: 'POST' })
+      .reply(200, { ImagesDeleted: [{ Deleted: 'sha256:old' }], SpaceReclaimed: 4096 });
+    pool
+      .intercept({ path: filter('false'), method: 'POST' })
+      .reply(200, { ImagesDeleted: null, SpaceReclaimed: 0 });
+
+    const client = createClient(agent);
+
+    await expect(client.docker.pruneImages()).resolves.toMatchObject({ SpaceReclaimed: 4096 });
+    await expect(client.docker.pruneImages({ all: true })).resolves.toMatchObject({
+      ImagesDeleted: null,
+    });
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('drops the cached image list and disk usage after a prune', async () => {
+    withEnvironment();
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/images/json', method: 'GET' })
+      .reply(200, fixtures.images)
+      .times(2);
+    pool
+      .intercept({
+        path: `/api/endpoints/1/docker/images/prune?filters=${encodeURIComponent(
+          JSON.stringify({ dangling: ['true'] }),
+        )}`,
+        method: 'POST',
+      })
+      .reply(200, { SpaceReclaimed: 1 });
+
+    const client = createClient(agent);
+
+    await client.docker.listImages();
+    // Served from the cache: a second interceptor would still be pending.
+    await client.docker.listImages();
+    await client.docker.pruneImages();
+    // Re-read rather than served the pre-prune snapshot, which is the whole
+    // point of a table that is meant to confirm what just happened.
+    await client.docker.listImages();
+
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
   it('maps a proxy failure to an actionable PortainerError', async () => {
     withEnvironment();
     agent

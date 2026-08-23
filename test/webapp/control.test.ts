@@ -5,6 +5,9 @@ import {
   actionState,
   actionVariant,
   actionsFor,
+  imageActionLabel,
+  imageActionState,
+  imageRequest,
   isSelfRow,
   needsConfirmation,
   normalizeControl,
@@ -242,5 +245,57 @@ describe('presentation', () => {
 
   it('labels each action', () => {
     expect(actionLabel('restart')).toBe('Restart');
+  });
+});
+
+describe('image actions', () => {
+  it('offers nothing until the plugin has said what is allowed', () => {
+    expect(imageActionState(undefined)).toMatchObject({ enabled: false });
+    expect(imageActionState(undefined).reason).toContain('Waiting for the plugin');
+  });
+
+  it('needs destructive as well as control', () => {
+    expect(imageActionState(control({ allowPutControl: false })).reason).toContain(
+      'Container control is disabled',
+    );
+    // Control alone is not enough: deleting an image costs whatever bandwidth
+    // it takes to fetch again, which offshore is none.
+    expect(imageActionState(control({ allowDestructive: false })).reason).toContain(
+      'Destructive operations are disabled',
+    );
+    expect(imageActionState(control({ allowDestructive: true })).enabled).toBe(true);
+  });
+
+  it('says nothing about self-protection, which Docker enforces here', () => {
+    // The image Signal K runs from is held by a container, and Docker refuses
+    // to remove an image any container holds. Nothing in the panel has to know
+    // which image that is.
+    const allowed = control({ allowDestructive: true, allowSelfManagement: false });
+    expect(imageActionState(allowed).enabled).toBe(true);
+  });
+
+  it('sends a registry tag as one path segment', () => {
+    // Unencoded, the slashes would arrive as more path and the route would
+    // never match; the colon would split the tag off the name.
+    expect(imageRequest('remove', 'ghcr.io/owner/app:1.2')).toEqual({
+      method: 'DELETE',
+      path: `/images/${encodeURIComponent('ghcr.io/owner/app:1.2')}`,
+    });
+  });
+
+  it('never widens a prune by default', () => {
+    // ?all= is spelled out both ways rather than omitted: the facade reads the
+    // narrow prune from the absence of the flag, and a request that means to
+    // say "untagged only" should say it.
+    expect(imageRequest('prune', { all: false })).toEqual({
+      method: 'POST',
+      path: '/images/prune?all=false',
+    });
+    expect(imageRequest('prune', { all: true }).path).toBe('/images/prune?all=true');
+  });
+
+  it('labels both actions in the operator’s words', () => {
+    expect(imageActionLabel('remove')).toBe('Delete');
+    expect(imageActionLabel('prune')).toBe('Reclaim space');
   });
 });
