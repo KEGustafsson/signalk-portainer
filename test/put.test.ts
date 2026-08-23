@@ -68,18 +68,17 @@ describe('PutHandlers', () => {
       {
         registry: () =>
           opts.noRegistry ? undefined : (opts.registry ?? new InstanceRegistry(instances)),
-        config: () =>
-          ({
-            instances: [],
-            problems: [],
-            telemetry: {
-              level: 'health' as const,
-              intervalSeconds: 30,
+        config: () => ({
+          instances: [],
+          problems: [],
+          telemetry: {
+            level: 'health' as const,
+            intervalSeconds: 30,
 
-              pathPrefix: 'system.docker',
-            },
-            control: opts.control ?? control(),
-          }) as PluginConfig,
+            pathPrefix: 'system.docker',
+          },
+          control: opts.control ?? control(),
+        }),
         self: () => opts.self ?? noSelf,
         log: (message) => logs.push(message),
         register: (_context, path, handler) => registered.push({ path, handler }),

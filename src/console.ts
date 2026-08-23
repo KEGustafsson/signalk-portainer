@@ -248,5 +248,5 @@ async function connectWithWs(target: ConsoleTarget, timeoutMs: number): Promise<
       reject(error);
     });
   });
-  return socket as unknown as RelaySocket;
+  return socket;
 }

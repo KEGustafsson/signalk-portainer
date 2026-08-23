@@ -155,7 +155,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
 
   router.get(
     '/api/instances',
-    handle(deps, async (_req, registry) => ({
+    handle(deps, (_req, registry) => ({
       instances: registry.names.map((name) => ({
         name,
         isDefault: name === registry.defaultName,
@@ -502,7 +502,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
    */
   router.get(
     '/api/control',
-    handle(deps, async () => {
+    handle(deps, () => {
       const control = deps.config()?.control;
       const self = deps.self();
       return {
@@ -1309,11 +1309,12 @@ function withoutHint(cause: PortainerError): string {
     : cause.message;
 }
 
-type RegistryHandler = (
-  req: Request,
-  registry: InstanceRegistry,
-) => Promise<Record<string, unknown>>;
-type ClientHandler = (req: Request, client: PortainerClient) => Promise<Record<string, unknown>>;
+type Payload = Record<string, unknown>;
+// Either kind of handler may answer without awaiting anything — reading the
+// parsed config is not I/O — so a plain payload is as acceptable as a promise
+// for one. `handle` awaits the result either way.
+type RegistryHandler = (req: Request, registry: InstanceRegistry) => Promise<Payload> | Payload;
+type ClientHandler = (req: Request, client: PortainerClient) => Promise<Payload> | Payload;
 
 /** Resolves ?instance= to a client, then runs the handler. */
 function withClient(deps: FacadeDeps, handler: ClientHandler) {
@@ -1325,7 +1326,11 @@ function withClient(deps: FacadeDeps, handler: ClientHandler) {
 }
 
 function handle(deps: FacadeDeps, handler: RegistryHandler) {
-  return async (req: Request, res: Response): Promise<void> => {
+  // Express 4 does nothing with a promise a route handler returns: one that
+  // rejects is an unhandled rejection rather than a reply. So `respond` is not
+  // what the router gets — the synchronous wrapper at the bottom is, and it
+  // starts this and keeps hold of the failure.
+  const respond = async (req: Request, res: Response): Promise<void> => {
     const registry = deps.registry();
     if (!registry) {
       res.status(503).json({ error: 'Plugin is not started' });
@@ -1372,5 +1377,15 @@ function handle(deps: FacadeDeps, handler: RegistryHandler) {
       deps.log(`${req.method} ${req.path}: ${message}`);
       res.status(500).json(redactValue({ error: message }));
     }
+  };
+
+  return (req: Request, res: Response): void => {
+    // `respond` names every failure it can reach and always answers, so this
+    // catch is the response itself having failed — the socket is gone and
+    // there is nowhere left to send a status. The log is all that is left.
+    respond(req, res).catch((cause: unknown) => {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      deps.log(`${req.method} ${req.path}: unanswered — ${message}`);
+    });
   };
 }

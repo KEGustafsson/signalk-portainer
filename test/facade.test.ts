@@ -12,7 +12,7 @@ import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 import * as fixtures from './fixtures';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import { asJson, type JsonBody, createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -44,7 +44,7 @@ const buildApp = (
     registry: () => registry,
     config: () =>
       registry
-        ? ({
+        ? {
             instances: [],
             problems: [],
             telemetry: {
@@ -54,7 +54,7 @@ const buildApp = (
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
-          } as PluginConfig)
+          }
         : undefined,
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
@@ -100,7 +100,7 @@ describe('facade', () => {
   it('answers 503 before the plugin has started', async () => {
     const res = await request(buildApp(undefined)).get('/api/instances');
     expect(res.status).toBe(503);
-    expect(res.body.error).toMatch(/not started/);
+    expect(asJson(res.body).error).toMatch(/not started/);
   });
 
   it('lists instances and marks the default, without leaking tokens', async () => {
@@ -108,10 +108,11 @@ describe('facade', () => {
     const res = await request(buildApp(registry)).get('/api/instances');
 
     expect(res.status).toBe(200);
-    expect(res.body.instances).toHaveLength(2);
-    expect(res.body.instances[0]).toMatchObject({ name: 'boat', isDefault: true });
-    expect(res.body.instances[1]).toMatchObject({ name: 'shore', isDefault: false });
-    expect(JSON.stringify(res.body)).not.toContain('ptr_boat');
+    expect(asJson(res.body).instances).toHaveLength(2);
+    const listed = asJson<{ instances: JsonBody[] }>(res.body).instances;
+    expect(listed[0]).toMatchObject({ name: 'boat', isDefault: true });
+    expect(listed[1]).toMatchObject({ name: 'shore', isDefault: false });
+    expect(JSON.stringify(asJson(res.body))).not.toContain('ptr_boat');
     registry.close();
   });
 
@@ -126,9 +127,11 @@ describe('facade', () => {
     const res = await request(buildApp(registry)).get('/api/health');
 
     expect(res.status).toBe(200);
-    expect(res.body.ok).toBe(false);
-    expect(res.body.instances[0].reachable).toBe(true);
-    expect(res.body.instances[1].reachable).toBe(false);
+    expect(asJson(res.body).ok).toBe(false);
+    expect(asJson<{ instances: JsonBody[] }>(res.body).instances).toMatchObject([
+      { reachable: true },
+      { reachable: false },
+    ]);
     registry.close();
   });
 });
@@ -160,8 +163,8 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/environments');
 
     expect(res.status).toBe(200);
-    expect(res.body.selected).toBe(1);
-    expect(res.body.environments[0]).toMatchObject({
+    expect(asJson(res.body).selected).toBe(1);
+    expect(asJson<{ environments: JsonBody[] }>(res.body).environments[0]).toMatchObject({
       id: 1,
       name: 'local',
       health: 'up',
@@ -172,7 +175,7 @@ describe('facade read routes', () => {
   it('echoes which instance served the request', async () => {
     withEnvironment(2);
     const res = await request(app()).get('/api/environments');
-    expect(res.body.instance).toBe('boat');
+    expect(asJson(res.body).instance).toBe('boat');
   });
 
   it('routes ?instance= to that instance', async () => {
@@ -185,14 +188,14 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/environments?instance=shore');
 
     expect(res.status).toBe(200);
-    expect(res.body.instance).toBe('shore');
+    expect(asJson(res.body).instance).toBe('shore');
   });
 
   it('404s on an unknown ?instance=', async () => {
     const res = await request(app()).get('/api/environments?instance=nope');
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain('nope');
+    expect(asJson(res.body).error).toContain('nope');
   });
 
   /**
@@ -213,10 +216,12 @@ describe('facade read routes', () => {
       const res = await request(app()).get('/api/environments');
 
       expect(res.status).toBe(200);
-      expect(res.body.selected).toBeNull();
-      expect(res.body.environments).toHaveLength(2);
+      expect(asJson(res.body).selected).toBeNull();
+      expect(asJson(res.body).environments).toHaveLength(2);
       expect(
-        res.body.environments.every((entry: { isSelected: boolean }) => !entry.isSelected),
+        asJson<{ environments: { isSelected: boolean }[] }>(res.body).environments.every(
+          (entry) => !entry.isSelected,
+        ),
       ).toBe(true);
     });
 
@@ -241,15 +246,15 @@ describe('facade read routes', () => {
       const res = await request(app()).put('/api/environment').send({ id: 99 });
 
       expect(res.status).toBe(404);
-      expect(res.body.error).toContain('99');
-      expect(res.body.hint).toContain('4:nas');
+      expect(asJson(res.body).error).toContain('99');
+      expect(asJson(res.body).hint).toContain('4:nas');
     });
 
     it('refuses an id that is not a number', async () => {
       const res = await request(app()).put('/api/environment').send({ id: 'primary' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('not a number');
+      expect(asJson(res.body).error).toContain('not a number');
     });
 
     it.each([[true], [null], ['2'], [1.5], [[3]]])(
@@ -261,7 +266,7 @@ describe('facade read routes', () => {
         const res = await request(app()).put('/api/environment').send({ id });
 
         expect(res.status).toBe(400);
-        expect(res.body.error).toContain('not a number');
+        expect(asJson(res.body).error).toContain('not a number');
         // Nothing was asked of Portainer: no environment list was fetched.
         expect(agent.pendingInterceptors()).toHaveLength(0);
       },
@@ -271,14 +276,15 @@ describe('facade read routes', () => {
       twoEnvironments();
       const saved: { instance: string; id: number }[] = [];
       const server = buildApp(new InstanceRegistry(config), {
-        saveEnvironment: async (instance, id) => {
+        saveEnvironment: (instance, id) => {
           saved.push({ instance, id });
+          return Promise.resolve();
         },
       });
 
       const res = await request(server).put('/api/environment').send({ id: 4 });
 
-      expect(res.body.persisted).toBe(true);
+      expect(asJson(res.body).persisted).toBe(true);
       expect(saved).toEqual([{ instance: 'boat', id: 4 }]);
     });
 
@@ -293,9 +299,9 @@ describe('facade read routes', () => {
       const res = await request(server).put('/api/environment').send({ id: 4 });
 
       expect(res.status).toBe(200);
-      expect(res.body.selected).toBe(4);
-      expect(res.body.persisted).toBe(false);
-      expect(res.body.warning).toContain('will not survive a restart');
+      expect(asJson(res.body).selected).toBe(4);
+      expect(asJson(res.body).persisted).toBe(false);
+      expect(asJson(res.body).warning).toContain('will not survive a restart');
     });
 
     it('is refused from another site, like every other mutation', async () => {
@@ -317,7 +323,7 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/containers?all=true');
 
     expect(res.status).toBe(200);
-    expect(res.body.containers).toHaveLength(2);
+    expect(asJson(res.body).containers).toHaveLength(2);
   });
 
   it('inspects a container', async () => {
@@ -329,7 +335,9 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/containers/c1f0e2a3b4c5');
 
     expect(res.status).toBe(200);
-    expect(res.body.container.Name).toBe('/signalk_influxdb');
+    expect(asJson<{ container: { Name: string } }>(res.body).container.Name).toBe(
+      '/signalk_influxdb',
+    );
   });
 
   it('lists stacks scoped to the environment', async () => {
@@ -338,7 +346,10 @@ describe('facade read routes', () => {
 
     const res = await request(app()).get('/api/stacks');
 
-    expect(res.body.stacks.map((s: { Name: string }) => s.Name)).toEqual(['signalk', 'from-git']);
+    expect(asJson<{ stacks: { Name: string }[] }>(res.body).stacks.map((s) => s.Name)).toEqual([
+      'signalk',
+      'from-git',
+    ]);
   });
 
   it('serves a stack file for a stack in this environment', async () => {
@@ -351,7 +362,7 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/stacks/3/file');
 
     expect(res.status).toBe(200);
-    expect(res.body.content).toContain('services');
+    expect(asJson(res.body).content).toContain('services');
   });
 
   it('404s a stack file belonging to another environment', async () => {
@@ -362,7 +373,7 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/stacks/9/file');
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toMatch(/does not belong to this environment/);
+    expect(asJson(res.body).error).toMatch(/does not belong to this environment/);
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -370,7 +381,7 @@ describe('facade read routes', () => {
     const res = await request(app()).get('/api/stacks/abc/file');
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('not a number');
+    expect(asJson(res.body).error).toContain('not a number');
   });
 
   it.each([['0x3'], ['1e1'], ['0'], ['-2'], [' 3'], ['3.0']])(
@@ -382,7 +393,7 @@ describe('facade read routes', () => {
       const res = await request(app()).get(`/api/stacks/${encodeURIComponent(id)}/file`);
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('not a number');
+      expect(asJson(res.body).error).toContain('not a number');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     },
   );
@@ -399,9 +410,9 @@ describe('facade read routes', () => {
       .intercept({ path: '/api/endpoints/1/docker/networks', method: 'GET' })
       .reply(200, fixtures.networks);
 
-    expect((await request(app()).get('/api/images')).body.images).toHaveLength(1);
-    expect((await request(app()).get('/api/volumes')).body.volumes).toHaveLength(1);
-    expect((await request(app()).get('/api/networks')).body.networks).toHaveLength(1);
+    expect(asJson((await request(app()).get('/api/images')).body).images).toHaveLength(1);
+    expect(asJson((await request(app()).get('/api/volumes')).body).volumes).toHaveLength(1);
+    expect(asJson((await request(app()).get('/api/networks')).body).networks).toHaveLength(1);
   });
 });
 
@@ -432,8 +443,8 @@ describe('facade swarm routes', () => {
     const res = await request(buildApp(new InstanceRegistry(config))).get('/api/swarm/services');
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain('not a Swarm');
-    expect(res.body.hint).toContain('not an active swarm member');
+    expect(asJson(res.body).error).toContain('not a Swarm');
+    expect(asJson(res.body).hint).toContain('not an active swarm member');
   });
 
   it('serves services and nodes when the daemon is a swarm member', async () => {
@@ -445,7 +456,7 @@ describe('facade swarm routes', () => {
     const res = await request(buildApp(new InstanceRegistry(config))).get('/api/swarm/services');
 
     expect(res.status).toBe(200);
-    expect(res.body.services).toHaveLength(1);
+    expect(asJson(res.body).services).toHaveLength(1);
   });
 });
 
@@ -490,7 +501,7 @@ describe('facade logs', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.body.lines).toEqual([
+    expect(asJson(res.body).lines).toEqual([
       { stream: 'stdout', text: 'listening' },
       { stream: 'stderr', text: 'warning' },
     ]);
@@ -544,7 +555,7 @@ describe('facade logs', () => {
       '/api/containers/abc123def456/logs',
     );
 
-    expect(res.body.lines).toEqual([
+    expect(asJson(res.body).lines).toEqual([
       { stream: 'stdout', text: 'plain tty output' },
       { stream: 'stdout', text: 'second line' },
     ]);
@@ -641,7 +652,7 @@ describe('facade log streaming', () => {
 
     // The stream never opened, so this can still be an ordinary error response.
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain('failed with 404');
+    expect(asJson(res.body).error).toContain('failed with 404');
   });
 
   it('answers 404 for an instance that is not configured', async () => {
@@ -668,13 +679,16 @@ describe('facade log streaming', () => {
     );
 
     expect(res.status).toBe(429);
-    expect(res.body.hint).toContain('already following this container');
+    expect(asJson(res.body).hint).toContain('already following this container');
     // Nothing was asked of Portainer: the refusal happens before the request.
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
   /** A follow stream that fails, either before or after the first line. */
-  const failingStream = (cause: unknown, opts: { afterALine?: true } = {}) => {
+  const failingStream = (cause: Error, opts: { afterALine?: true } = {}) => {
+    // An async generator is the only shape `AsyncGenerator<LogFrame>` has, and
+    // this one produces its frames from memory — there is nothing to await.
+    // eslint-disable-next-line @typescript-eslint/require-await
     const frames = async function* (): AsyncGenerator<LogFrame> {
       if (opts.afterALine) yield { stream: 'stdout' as const, text: 'listening' };
       throw cause;
@@ -683,7 +697,7 @@ describe('facade log streaming', () => {
       defaultName: 'boat',
       get: () => ({
         docker: {
-          logStream: async () => (opts.afterALine ? frames() : Promise.reject(cause)),
+          logStream: () => (opts.afterALine ? Promise.resolve(frames()) : Promise.reject(cause)),
         },
       }),
     } as unknown as InstanceRegistry;
@@ -697,8 +711,8 @@ describe('facade log streaming', () => {
     const res = await request(buildApp(registry)).get('/api/containers/abc123def456/logs/stream');
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toBe('Refusing to follow that');
-    expect(res.body.hint).toBe('turn it on first');
+    expect(asJson(res.body).error).toBe('Refusing to follow that');
+    expect(asJson(res.body).hint).toBe('turn it on first');
   });
 
   it('redacts a failure that arrives mid-stream, as it redacts the lines', async () => {
@@ -735,7 +749,7 @@ describe('facade log streaming', () => {
     const res = await request(buildApp(registry)).get('/api/containers/abc123def456/logs/stream');
 
     expect(res.status).toBe(502);
-    expect(JSON.stringify(res.body)).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345');
+    expect(JSON.stringify(asJson(res.body))).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345');
   });
 
   it('frees the slot again once the stream has finished', async () => {
@@ -945,6 +959,9 @@ describe('facade log stream lifecycle', () => {
    */
   const chattyStream = (lines: number) => {
     const state = { produced: 0, finished: false };
+    // An async generator is the only shape `AsyncGenerator<LogFrame>` has, and
+    // this one produces its frames from memory — there is nothing to await.
+    // eslint-disable-next-line @typescript-eslint/require-await
     const frames = async function* (): AsyncGenerator<LogFrame> {
       try {
         for (let line = 0; line < lines; line += 1) {
@@ -959,7 +976,7 @@ describe('facade log stream lifecycle', () => {
       state,
       registry: {
         defaultName: 'boat',
-        get: () => ({ docker: { logStream: async () => frames() } }),
+        get: () => ({ docker: { logStream: () => Promise.resolve(frames()) } }),
       } as unknown as InstanceRegistry,
     };
   };
@@ -1056,7 +1073,7 @@ describe('facade container lifecycle', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ action, ok: true });
+    expect(asJson(res.body)).toMatchObject({ action, ok: true });
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -1081,7 +1098,7 @@ describe('facade container lifecycle', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({ action, ok: true });
+    expect(asJson(res.body)).toMatchObject({ action, ok: true });
   });
 
   it('still reports a real Docker refusal as a failure', async () => {
@@ -1108,8 +1125,8 @@ describe('facade container lifecycle', () => {
     );
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('Unknown container action');
-    expect(res.body.hint).toContain('start, stop, restart, kill, pause, unpause');
+    expect(asJson(res.body).error).toContain('Unknown container action');
+    expect(asJson(res.body).hint).toContain('start, stop, restart, kill, pause, unpause');
   });
 
   it('refuses every action on the container running Signal K', async () => {
@@ -1118,7 +1135,7 @@ describe('facade container lifecycle', () => {
     for (const action of ['start', 'stop', 'restart', 'kill']) {
       const res = await request(app).post(`/api/containers/${SELF_ID}/${action}`);
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('running Signal K');
+      expect(asJson(res.body).error).toContain('running Signal K');
     }
     // Nothing was sent to Portainer: no interceptor was registered at all.
     expect(agent.pendingInterceptors()).toHaveLength(0);
@@ -1220,7 +1237,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).post('/api/containers/web/stop');
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('did not say which container');
+    expect(asJson(res.body).error).toContain('did not say which container');
     // Nothing was stopped: no interceptor for the mutation was ever needed.
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
@@ -1235,7 +1252,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).post('/api/containers/signalk-server/stop');
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('running Signal K');
+    expect(asJson(res.body).error).toContain('running Signal K');
     // The inspect was the only call: no stop reached the proxy.
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
@@ -1323,7 +1340,7 @@ describe('facade container lifecycle', () => {
     const remove = await request(app).delete('/api/containers/abc123def456');
 
     expect(stop.status).toBe(403);
-    expect(stop.body.error).toContain('Container control is disabled');
+    expect(asJson(stop.body).error).toContain('Container control is disabled');
     expect(remove.status).toBe(403);
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
@@ -1333,7 +1350,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).delete('/api/containers/abc123def456');
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('Destructive operations are disabled');
+    expect(asJson(res.body).error).toContain('Destructive operations are disabled');
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -1352,7 +1369,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).delete('/api/containers/abc123def456');
 
     expect(res.status).toBe(200);
-    expect(res.body.removeVolumes).toBe(false);
+    expect(asJson(res.body).removeVolumes).toBe(false);
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -1373,7 +1390,7 @@ describe('facade container lifecycle', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(res.body.removeVolumes).toBe(true);
+    expect(asJson(res.body).removeVolumes).toBe(true);
   });
 
   it('still refuses to remove the Signal K container even when destructive is on', async () => {
@@ -1385,7 +1402,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).delete(`/api/containers/${SELF_ID}`);
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('running Signal K');
+    expect(asJson(res.body).error).toContain('running Signal K');
   });
 });
 
@@ -1418,13 +1435,13 @@ describe('facade control surface', () => {
     ).get('/api/control');
 
     expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
+    expect(asJson(res.body)).toMatchObject({
       allowPutControl: true,
       allowDestructive: false,
       allowSelfManagement: false,
     });
-    expect(res.body.self.protectionActive).toBe(true);
-    expect(res.body.self.warning).toBeUndefined();
+    expect(asJson<{ self: JsonBody }>(res.body).self.protectionActive).toBe(true);
+    expect(asJson<{ self: JsonBody }>(res.body).self.warning).toBeUndefined();
   });
 
   it('warns when it is containerised but cannot identify itself', async () => {
@@ -1434,8 +1451,8 @@ describe('facade control surface', () => {
       }),
     ).get('/api/control');
 
-    expect(res.body.self.protectionActive).toBe(false);
-    expect(res.body.self.warning).toContain('unable to identify');
+    expect(asJson<{ self: JsonBody }>(res.body).self.protectionActive).toBe(false);
+    expect(asJson<{ self: JsonBody }>(res.body).self.warning).toContain('unable to identify');
   });
 
   it('reports protection inactive when self-management is enabled', async () => {
@@ -1452,7 +1469,7 @@ describe('facade control surface', () => {
       }),
     ).get('/api/control');
 
-    expect(res.body.self.protectionActive).toBe(false);
+    expect(asJson<{ self: JsonBody }>(res.body).self.protectionActive).toBe(false);
   });
 });
 
@@ -1482,7 +1499,7 @@ describe('facade error mapping', () => {
     const res = await request(buildApp(registry)).get('/api/instances');
 
     expect(res.status).toBe(404);
-    expect(res.body.error).toContain('nope');
+    expect(asJson(res.body).error).toContain('nope');
   });
 
   it('maps a Portainer failure to its facade status, with the hint', async () => {
@@ -1498,8 +1515,8 @@ describe('facade error mapping', () => {
     const res = await request(buildApp(registry)).get('/api/instances');
 
     expect(res.status).toBe(404);
-    expect(res.body.portainerStatus).toBe(404);
-    expect(res.body.hint).toContain('creation-order');
+    expect(asJson(res.body).portainerStatus).toBe(404);
+    expect(asJson(res.body).hint).toContain('creation-order');
   });
 
   it('says the hint once, rather than in the error as well', async () => {
@@ -1517,8 +1534,8 @@ describe('facade error mapping', () => {
     );
     const res = await request(buildApp(registry)).get('/api/instances');
 
-    expect(res.body.error).toBe('not found');
-    expect(res.body.hint).toBe('ids are creation-order');
+    expect(asJson(res.body).error).toBe('not found');
+    expect(asJson(res.body).hint).toBe('ids are creation-order');
   });
 
   it('passes on what Portainer itself said about the failure', async () => {
@@ -1538,7 +1555,7 @@ describe('facade error mapping', () => {
       '/api/instances',
     );
 
-    expect(res.body.detail).toContain('services must be a mapping');
+    expect(asJson(res.body).detail).toContain('services must be a mapping');
     // And in the log line, which is where an operator looks next.
     expect(lines.join('\n')).toContain('services must be a mapping');
   });
@@ -1556,20 +1573,22 @@ describe('facade error mapping', () => {
     const res = await request(buildApp(registry)).get('/api/instances');
 
     expect(res.status).toBe(403);
-    expect(JSON.stringify(res.body)).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345678901');
+    expect(JSON.stringify(asJson(res.body))).not.toContain(
+      'ptr_abcdefghijklmnopqrstuvwxyz012345678901',
+    );
   });
 
   it('maps an unexpected failure to 500', async () => {
     const res = await request(buildApp(failingRegistry(new Error('kaboom')))).get('/api/instances');
 
     expect(res.status).toBe(500);
-    expect(res.body.error).toBe('kaboom');
+    expect(asJson(res.body).error).toBe('kaboom');
   });
 
   it('handles a thrown non-Error', async () => {
     const res = await request(buildApp(failingRegistry('odd'))).get('/api/instances');
     expect(res.status).toBe(500);
-    expect(res.body.error).toBe('odd');
+    expect(asJson(res.body).error).toBe('odd');
   });
 });
 

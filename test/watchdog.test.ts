@@ -2,16 +2,15 @@ import type { InstanceSnapshot } from '../src/deltas';
 import type { DockerContainer } from '../src/types';
 import { Watchdog } from '../src/watchdog';
 
-const container = (overrides: Partial<DockerContainer> = {}): DockerContainer =>
-  ({
-    Id: 'c1f0e2a3b4c5d6e7f8a9b0c1d2e3f4a5',
-    Names: ['/ais-logger'],
-    Image: 'ghcr.io/example/ais-logger:1.4',
-    Created: 0,
-    State: 'running',
-    Status: 'Up 3 days',
-    ...overrides,
-  }) as DockerContainer;
+const container = (overrides: Partial<DockerContainer> = {}): DockerContainer => ({
+  Id: 'c1f0e2a3b4c5d6e7f8a9b0c1d2e3f4a5',
+  Names: ['/ais-logger'],
+  Image: 'ghcr.io/example/ais-logger:1.4',
+  Created: 0,
+  State: 'running',
+  Status: 'Up 3 days',
+  ...overrides,
+});
 
 const up = (containers: DockerContainer[] = [container()]): InstanceSnapshot => ({
   reachable: true,

@@ -4,6 +4,7 @@
 import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
 import AppPanel from '../../src/webapp/AppPanel';
+import { asResponse, type FetchMock, jsonBody } from './mocks';
 
 // The console dialog fetches a terminal emulator in its own chunk. Standing in
 // for it here keeps these tests about the panel: the terminal itself, and every
@@ -57,7 +58,7 @@ const control = {
 };
 
 /** Routes each facade path to a canned response. */
-function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
+function routeFetch(overrides: Record<string, unknown> = {}, swarm = false): FetchMock {
   return jest.fn((input: string, init?: RequestInit) => {
     void init;
     const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
@@ -77,7 +78,9 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
       ...overrides,
     };
     const body = table[path] ?? {};
-    return Promise.resolve({ ok: true, status: 200, json: async () => body });
+    return Promise.resolve(
+      asResponse({ ok: true, status: 200, json: () => Promise.resolve(body) }),
+    );
   });
 }
 
@@ -154,28 +157,33 @@ describe('AppPanel', () => {
       await screen.findByText('Choose an environment to continue');
 
       // Answering switches the panel over to the normal view.
-      fetchMock.mockImplementation(((input: string, init?: RequestInit) => {
+      fetchMock.mockImplementation((input: string, init?: RequestInit) => {
         void init;
         const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
         if (path === '/environment') {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({ selected: 27, name: 'lenovo', persisted: true }),
-          });
+          return Promise.resolve(
+            asResponse({
+              ok: true,
+              status: 200,
+              json: () => Promise.resolve({ selected: 27, name: 'lenovo', persisted: true }),
+            }),
+          );
         }
         if (path === '/environments') {
-          return Promise.resolve({
-            ok: true,
-            status: 200,
-            json: async () => ({
-              selected: 27,
-              environments: [
-                { id: 1, name: 'primary', type: 1, health: 'up', isSelected: false },
-                { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: true },
-              ],
+          return Promise.resolve(
+            asResponse({
+              ok: true,
+              status: 200,
+              json: () =>
+                Promise.resolve({
+                  selected: 27,
+                  environments: [
+                    { id: 1, name: 'primary', type: 1, health: 'up', isSelected: false },
+                    { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: true },
+                  ],
+                }),
             }),
-          });
+          );
         }
         const table: Record<string, unknown> = {
           '/instances': { instances: [{ name: 'boat', isDefault: true }] },
@@ -183,8 +191,14 @@ describe('AppPanel', () => {
           '/control': control,
           '/containers': { containers },
         };
-        return Promise.resolve({ ok: true, status: 200, json: async () => table[path] ?? {} });
-      }) as unknown as typeof fetch);
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve(table[path] ?? {}),
+          }),
+        );
+      });
 
       // Waited for: the panel says "Loading…" until the tab read answers, and
       // deliberately does not draw a table before it has one.
@@ -199,9 +213,7 @@ describe('AppPanel', () => {
 
       // Saved server-side rather than kept in the tab: the delta poller works
       // against the same client and would otherwise publish nothing.
-      const sent = fetchMock.mock.calls.map(
-        (call) => `${(call[1] as RequestInit | undefined)?.method ?? 'GET'} ${call[0] as string}`,
-      );
+      const sent = fetchMock.mock.calls.map((call) => `${call[1]?.method ?? 'GET'} ${call[0]}`);
       expect(sent.some((entry) => entry.startsWith('PUT') && entry.includes('/environment'))).toBe(
         true,
       );
@@ -214,20 +226,23 @@ describe('AppPanel', () => {
       // nothing left to say the switch had not worked.
       jest.useFakeTimers({ advanceTimers: true });
       const fetchMock = unchosen();
-      fetchMock.mockImplementation(((input: string, init?: RequestInit) => {
+      fetchMock.mockImplementation((input: string, init?: RequestInit) => {
         const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
         if (init?.method === 'PUT' && path === '/environment') {
-          return Promise.resolve({
-            ok: false,
-            status: 403,
-            json: async () => ({
-              error: 'Portainer refused the environment change',
-              hint: 'the access token may not reach that environment',
+          return Promise.resolve(
+            asResponse({
+              ok: false,
+              status: 403,
+              json: () =>
+                Promise.resolve({
+                  error: 'Portainer refused the environment change',
+                  hint: 'the access token may not reach that environment',
+                }),
             }),
-          });
+          );
         }
         return unchosen()(input, init);
-      }) as unknown as typeof fetch);
+      });
       global.fetch = fetchMock as unknown as typeof fetch;
       const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
 
@@ -271,18 +286,14 @@ describe('AppPanel', () => {
       await user.click(await screen.findByText('lenovo'));
 
       await waitFor(() => {
-        const sent = fetchMock.mock.calls.map(
-          (call) => `${(call[1] as RequestInit | undefined)?.method ?? 'GET'} ${call[0] as string}`,
-        );
+        const sent = fetchMock.mock.calls.map((call) => `${call[1]?.method ?? 'GET'} ${call[0]}`);
         expect(
           sent.some((entry) => entry.startsWith('PUT') && entry.includes('/environment')),
         ).toBe(true);
       });
       // Once, not twice: the button sits inside the row that would otherwise
       // answer the same press.
-      const puts = fetchMock.mock.calls.filter(
-        (call) => (call[1] as RequestInit | undefined)?.method === 'PUT',
-      );
+      const puts = fetchMock.mock.calls.filter((call) => call[1]?.method === 'PUT');
       expect(puts).toHaveLength(1);
     });
 
@@ -331,7 +342,7 @@ describe('AppPanel', () => {
     await showContainers();
     await screen.findByText('signalk_influxdb');
 
-    const paths = fetchMock.mock.calls.map((call) => call[0] as string);
+    const paths = fetchMock.mock.calls.map((call) => call[0]);
     expect(paths.some((path) => path.includes('/containers?all=true'))).toBe(true);
   });
 
@@ -393,7 +404,7 @@ describe('AppPanel', () => {
     await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
 
     await waitFor(() => {
-      const paths = fetchMock.mock.calls.map((call) => call[0] as string);
+      const paths = fetchMock.mock.calls.map((call) => call[0]);
       // Asserted exactly, not with includes(): a malformed
       // '?all=true?instance=shore' also "includes" the instance, and the facade
       // would quietly serve the default instance instead.
@@ -407,7 +418,11 @@ describe('AppPanel', () => {
     // offering the wrong instance\u2019s ids \u2014 pressing one sends that id to the
     // instance it does not belong to.
     const release: (() => void)[] = [];
-    const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const answer = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(body),
+    });
     const environmentsFor = (host: string) => ({
       selected: 1,
       environments: [
@@ -461,7 +476,11 @@ describe('AppPanel', () => {
   it('stops offering what the last Portainer allowed the moment the instance changes', async () => {
     // Server-side enforcement means the worst case is a 403, but a button that
     // is offered and then refused is exactly what the panel exists to avoid.
-    const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const answer = (body: unknown) => ({
+      ok: true,
+      status: 200,
+      json: () => Promise.resolve(body),
+    });
     global.fetch = jest.fn((input: string) => {
       const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
       const onShore = input.includes('instance=shore');
@@ -553,20 +572,24 @@ describe('AppPanel', () => {
       // said rather than assumed.
       if (init?.signal && input.includes('/containers')) signals.push(init.signal);
       if (input.includes('/instances')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
-        });
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
+          }),
+        );
       }
       // Answered rather than stalled: the tab read is the one under test, and
       // it does not start until the environment is known.
       if (input.includes('/environments')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ selected: 1, environments: [] }),
-        });
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ selected: 1, environments: [] }),
+          }),
+        );
       }
       // Never settles: stands in for a facade that has stalled.
       return new Promise(() => {});
@@ -586,11 +609,13 @@ describe('AppPanel', () => {
   it('does not surface an aborted request as an error', async () => {
     global.fetch = jest.fn((input: string, init?: RequestInit) => {
       if (input.includes('/instances')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
-        });
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
+          }),
+        );
       }
       return new Promise((_resolve, reject) => {
         init?.signal?.addEventListener('abort', () => {
@@ -612,20 +637,25 @@ describe('AppPanel', () => {
   it('shows the facade error and its hint instead of an empty table', async () => {
     global.fetch = jest.fn((input: string) => {
       if (input.includes('/instances')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
-        });
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
+          }),
+        );
       }
-      return Promise.resolve({
-        ok: false,
-        status: 502,
-        json: async () => ({
-          error: 'Portainer GET /api/endpoints could not be reached',
-          hint: 'check host, port and protocol',
+      return Promise.resolve(
+        asResponse({
+          ok: false,
+          status: 502,
+          json: () =>
+            Promise.resolve({
+              error: 'Portainer GET /api/endpoints could not be reached',
+              hint: 'check host, port and protocol',
+            }),
         }),
-      });
+      );
     }) as unknown as typeof fetch;
 
     await showContainers();
@@ -649,11 +679,13 @@ describe('AppPanel', () => {
     // of them is worth acting on.
     global.fetch = jest.fn((input: string) => {
       if (input.includes('/instances')) {
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
-        });
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
+          }),
+        );
       }
       return new Promise(() => {});
     }) as unknown as typeof fetch;
@@ -699,10 +731,8 @@ describe('AppPanel container actions', () => {
   const actionsFor = (name: string) =>
     within(screen.getByRole('group', { name: `Actions for ${name}` }));
 
-  const requests = (mock: jest.Mock) =>
-    mock.mock.calls.map(
-      (call) => `${(call[1] as RequestInit | undefined)?.method ?? 'GET'} ${call[0] as string}`,
-    );
+  const requests = (mock: FetchMock) =>
+    mock.mock.calls.map((call) => `${call[1]?.method ?? 'GET'} ${call[0]}`);
 
   it('starts a stopped container without asking, since nothing is interrupted', async () => {
     const fetchMock = routeFetch();
@@ -841,14 +871,17 @@ describe('AppPanel container actions', () => {
     const fetchMock = routeFetch();
     fetchMock.mockImplementation((input: string, init?: RequestInit) => {
       if (init?.method === 'POST') {
-        return Promise.resolve({
-          ok: false,
-          status: 403,
-          json: async () => ({
-            error: 'Refusing to stop the container running Signal K',
-            hint: 'enable "Allow managing the Signal K container itself" if you really mean to',
+        return Promise.resolve(
+          asResponse({
+            ok: false,
+            status: 403,
+            json: () =>
+              Promise.resolve({
+                error: 'Refusing to stop the container running Signal K',
+                hint: 'enable "Allow managing the Signal K container itself" if you really mean to',
+              }),
           }),
-        });
+        );
       }
       return routeFetch()(input);
     });
@@ -931,12 +964,13 @@ describe('AppPanel container actions', () => {
       },
     ];
     const ok = (body: unknown) =>
-      Promise.resolve({ ok: true, status: 200, json: async () => body });
+      Promise.resolve(asResponse({ ok: true, status: 200, json: () => Promise.resolve(body) }));
 
     global.fetch = jest.fn((input: string, init?: RequestInit) => {
       if (init?.method === 'POST') {
         return new Promise((resolve) => {
-          releasePost = () => resolve({ ok: true, status: 200, json: async () => ({ ok: true }) });
+          releasePost = () =>
+            resolve({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) });
         });
       }
       const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
@@ -1365,7 +1399,7 @@ describe('AppPanel container actions', () => {
       await waitFor(() => {
         const put = fetchMock.mock.calls.find((call) => call[1]?.method === 'PUT');
         expect(String(put?.[0])).toContain('/stacks/3?instance=boat');
-        expect(JSON.parse(String(put?.[1]?.body)).content).toContain('web:');
+        expect(jsonBody<{ content: string }>(put).content).toContain('web:');
       });
     });
 
@@ -1384,7 +1418,7 @@ describe('AppPanel container actions', () => {
         const post = fetchMock.mock.calls.find(
           (call) => call[1]?.method === 'POST' && String(call[0]).includes('/api/stacks?'),
         );
-        expect(JSON.parse(String(post?.[1]?.body)).name).toBe('weather');
+        expect(jsonBody<{ name: string }>(post).name).toBe('weather');
       });
     });
 

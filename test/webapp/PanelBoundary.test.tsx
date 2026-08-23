@@ -7,7 +7,7 @@ import { useEffect, type ReactElement } from 'react';
 import { PanelBoundary } from '../../src/webapp/PanelBoundary';
 
 describe('PanelBoundary', () => {
-  let consoleError: jest.SpyInstance;
+  let consoleError: jest.SpyInstance<void, [message?: unknown, ...rest: unknown[]]>;
 
   beforeEach(() => {
     // React logs the caught error itself; silencing keeps the run readable.

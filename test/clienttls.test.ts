@@ -13,7 +13,9 @@
 const agents: { connect?: Record<string, unknown> }[] = [];
 
 jest.mock('undici', () => {
-  const actual = jest.requireActual('undici');
+  // Typed rather than left as `any`: everything spread below inherits it,
+  // and the mock's own shape stops being checked against the real module.
+  const actual = jest.requireActual<typeof import('undici')>('undici');
   return {
     ...actual,
     Agent: class {

@@ -1,11 +1,10 @@
 import express from 'express';
 import request from 'supertest';
 import { normalizeConfig } from '../src/config';
-import type { PluginConfig } from '../src/config';
 import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import { asJson, createMockAgent, restoreGlobalDispatcher } from './support';
 import type { MockAgent } from 'undici';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
@@ -15,19 +14,18 @@ const buildApp = (registry: InstanceRegistry | undefined) => {
   const router = express.Router();
   registerRoutes(router, {
     registry: () => registry,
-    config: () =>
-      ({
-        instances: [],
-        problems: [],
-        telemetry: { level: 'off' as const, intervalSeconds: 30, pathPrefix: 'x' },
-        control: {
-          allowPutControl: true,
-          allowDestructive: true,
-          allowSelfManagement: false,
-          putContainers: [],
-          watchdog: [],
-        },
-      }) as PluginConfig,
+    config: () => ({
+      instances: [],
+      problems: [],
+      telemetry: { level: 'off' as const, intervalSeconds: 30, pathPrefix: 'x' },
+      control: {
+        allowPutControl: true,
+        allowDestructive: true,
+        allowSelfManagement: false,
+        putContainers: [],
+        watchdog: [],
+      },
+    }),
     self: () => noSelf,
     log: () => {},
   });
@@ -62,7 +60,7 @@ describe('requests from another site', () => {
       .set('Origin', 'https://not-the-boat.example');
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('another site');
+    expect(asJson(res.body).error).toContain('another site');
     // Nothing was asked of Portainer: no interceptor was ever registered.
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });

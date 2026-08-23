@@ -80,12 +80,9 @@ class FakeEndpoint implements ConsoleEndpoint {
 
   on(event: 'connection' | 'error', listener: never): this {
     if (event === 'connection') {
-      this.connection = listener as unknown as (
-        socket: RelaySocket,
-        request: { url?: string },
-      ) => void;
+      this.connection = listener;
     } else {
-      this.errorListener = listener as unknown as (error: Error) => void;
+      this.errorListener = listener;
     }
     return this;
   }
@@ -131,11 +128,12 @@ describe('openConsole', () => {
     const registry = {
       defaultName: 'boat',
       get: () => ({
-        execSocket: async () => ({
-          url: 'wss://boat.test:9443/api/websocket/exec?endpointId=1&id=exec-1',
-          headers: { 'x-api-key': 'ptr_secret' },
-          tls: { ca: 'a private CA', rejectUnauthorized: false },
-        }),
+        execSocket: () =>
+          Promise.resolve({
+            url: 'wss://boat.test:9443/api/websocket/exec?endpointId=1&id=exec-1',
+            headers: { 'x-api-key': 'ptr_secret' },
+            tls: { ca: 'a private CA', rejectUnauthorized: false },
+          }),
       }),
     } as unknown as InstanceRegistry;
 
@@ -334,10 +332,11 @@ describe('openConsole', () => {
     const registry = {
       defaultName: 'boat',
       get: () => ({
-        execSocket: async () => ({
-          url: 'ws://boat.test:9000/api/websocket/exec?endpointId=1&id=exec-1',
-          headers: { 'x-api-key': 'ptr_secret' },
-        }),
+        execSocket: () =>
+          Promise.resolve({
+            url: 'ws://boat.test:9000/api/websocket/exec?endpointId=1&id=exec-1',
+            headers: { 'x-api-key': 'ptr_secret' },
+          }),
       }),
     } as unknown as InstanceRegistry;
     const { tickets, connect } = setup({ realConnect: true, registry: () => registry });

@@ -7,7 +7,7 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import { asJson, createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -39,7 +39,7 @@ const buildApp = (
     registry: () => registry,
     config: () =>
       registry
-        ? ({
+        ? {
             instances: [],
             problems: [],
             telemetry: {
@@ -49,7 +49,7 @@ const buildApp = (
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
-          } as PluginConfig)
+          }
         : undefined,
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
@@ -119,7 +119,7 @@ describe('facade stack writes', () => {
         .send({ name: 'signalk', content: 'services: {}' });
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('compose project');
+      expect(asJson(res.body).error).toContain('compose project');
     });
 
     it('matches the project name however it was cased', async () => {
@@ -181,7 +181,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).post('/api/stacks/3/redeploy?prune=true');
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('Destructive');
+      expect(asJson(res.body).error).toContain('Destructive');
     });
 
     it('refuses a prune on update without it either', async () => {
@@ -217,7 +217,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).post('/api/stacks/3/start');
 
       expect(res.status).toBe(200);
-      expect(res.body).toMatchObject({ id: 3, action: 'start', ok: true });
+      expect(asJson(res.body)).toMatchObject({ id: 3, action: 'start', ok: true });
     });
 
     it('stops a stack', async () => {
@@ -236,7 +236,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).post('/api/stacks/3/destroy');
 
       expect(res.status).toBe(400);
-      expect(res.body.hint).toContain('start, stop, redeploy');
+      expect(asJson(res.body).hint).toContain('start, stop, redeploy');
       // Nothing was asked of Portainer.
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
@@ -245,7 +245,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).post('/api/stacks/latest/stop');
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('not a number');
+      expect(asJson(res.body).error).toContain('not a number');
     });
 
     it('passes prune and pull through to a redeploy', async () => {
@@ -300,7 +300,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).put('/api/stacks/3').send({ env: [] });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('content is required');
+      expect(asJson(res.body).error).toContain('content is required');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
@@ -310,7 +310,7 @@ describe('facade stack writes', () => {
         .send({ content: 'services:\n', env: [{ value: 'orphan' }] });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('needs a name');
+      expect(asJson(res.body).error).toContain('needs a name');
     });
 
     it('refuses an env that is not a list', async () => {
@@ -319,7 +319,7 @@ describe('facade stack writes', () => {
         .send({ content: 'services:\n', env: 'TZ=UTC' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('must be a list');
+      expect(asJson(res.body).error).toContain('must be a list');
     });
   });
 
@@ -341,7 +341,7 @@ describe('facade stack writes', () => {
         .send({ name: 'weather', content: 'services:\n  wx:\n' });
 
       expect(res.status).toBe(200);
-      expect(res.body.stack).toMatchObject({ Id: 11, Name: 'weather' });
+      expect(asJson(res.body).stack).toMatchObject({ Id: 11, Name: 'weather' });
       // Including the version probe, which is served at /api/system/status.
       // Registered at /api/status, it never matched: the probe threw on every
       // create and the client swallowed it, so these tests were exercising the
@@ -456,7 +456,7 @@ describe('facade stack writes', () => {
         .send({ name: '../etc', content: 'services:\n' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('name is required');
+      expect(asJson(res.body).error).toContain('name is required');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
@@ -464,7 +464,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).post('/api/stacks').send({ name: 'weather' });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('either a compose file or a repository');
+      expect(asJson(res.body).error).toContain('either a compose file or a repository');
     });
 
     it('refuses a create that names both', async () => {
@@ -474,7 +474,7 @@ describe('facade stack writes', () => {
         .send({ name: 'weather', content: 'services:\n', repositoryUrl: 'https://example.test/x' });
 
       expect(res.status).toBe(400);
-      expect(res.body.hint).toContain('not both');
+      expect(asJson(res.body).hint).toContain('not both');
     });
   });
 
@@ -483,7 +483,7 @@ describe('facade stack writes', () => {
       const res = await request(app()).delete('/api/stacks/3');
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('Destructive operations are disabled');
+      expect(asJson(res.body).error).toContain('Destructive operations are disabled');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
@@ -512,7 +512,7 @@ describe('facade stack writes', () => {
       expect(res.status).toBe(200);
       expect(asked).not.toContain('removeVolumes');
       // And the answer does not claim a removal that did not happen.
-      expect(res.body.removeVolumes).toBeUndefined();
+      expect(asJson(res.body).removeVolumes).toBeUndefined();
     });
 
     it('answers malformed JSON in the same shape as everything else', async () => {
@@ -523,8 +523,8 @@ describe('facade stack writes', () => {
         .send('{ not json');
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('not valid JSON');
-      expect(res.body.hint).toBeTruthy();
+      expect(asJson(res.body).error).toContain('not valid JSON');
+      expect(asJson(res.body).hint).toBeTruthy();
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
@@ -535,7 +535,7 @@ describe('facade stack writes', () => {
         .send(JSON.stringify({ content: 'x'.repeat(600 * 1024) }));
 
       expect(res.status).toBe(413);
-      expect(res.body.error).toContain('larger than 512kb');
+      expect(asJson(res.body).error).toContain('larger than 512kb');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
   });
@@ -565,7 +565,7 @@ describe('facade stack writes', () => {
         .send({ content: 'services:\n  web:\n' });
 
       expect(res.status).toBe(400);
-      expect(res.body.hint).toContain('detach it from git');
+      expect(asJson(res.body).hint).toContain('detach it from git');
     });
 
     it('is redeployed instead', async () => {
@@ -606,7 +606,7 @@ describe('facade stack writes', () => {
       const res = await request(app({ self: selfContainer })).post('/api/stacks/3/stop');
 
       expect(res.status).toBe(403);
-      expect(res.body.error).toContain('contains the container running Signal K');
+      expect(asJson(res.body).error).toContain('contains the container running Signal K');
     });
 
     it('refuses to update or delete that stack too', async () => {
@@ -628,7 +628,7 @@ describe('facade stack writes', () => {
       ]) {
         const res = await send();
         expect(res.status).toBe(403);
-        expect(res.body.error).toContain('running Signal K');
+        expect(asJson(res.body).error).toContain('running Signal K');
       }
     });
 

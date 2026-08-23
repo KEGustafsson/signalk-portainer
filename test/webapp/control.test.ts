@@ -12,16 +12,15 @@ import {
   type ControlState,
 } from '../../src/webapp/control';
 
-const container = (overrides: Partial<DockerContainer> = {}): DockerContainer =>
-  ({
-    Id: 'c1f0e2a3b4c5d6e7',
-    Names: ['/influx'],
-    Image: 'influxdb:2.7',
-    State: 'running',
-    Status: 'Up 1 hour',
-    Created: 0,
-    ...overrides,
-  }) as DockerContainer;
+const container = (overrides: Partial<DockerContainer> = {}): DockerContainer => ({
+  Id: 'c1f0e2a3b4c5d6e7',
+  Names: ['/influx'],
+  Image: 'influxdb:2.7',
+  State: 'running',
+  Status: 'Up 1 hour',
+  Created: 0,
+  ...overrides,
+});
 
 const control = (overrides: Partial<ControlState> = {}): ControlState => ({
   allowPutControl: true,

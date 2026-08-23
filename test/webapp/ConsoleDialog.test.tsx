@@ -7,6 +7,7 @@ import type { DockerContainer } from '../../src/types';
 import { ConsoleDialog } from '../../src/webapp/ConsoleDialog';
 import type { ConsoleSocket, ConsoleSocketHandlers } from '../../src/webapp/consolesocket';
 import type { Terminal, TerminalSize } from '../../src/webapp/terminal';
+import { type FetchMock, jsonBody } from './mocks';
 
 const container: DockerContainer = {
   Id: 'c1f0e2a3b4c5d6e7f8a9b0c1',
@@ -15,7 +16,7 @@ const container: DockerContainer = {
   State: 'running',
   Status: 'Up 2 hours',
   Created: 0,
-} as DockerContainer;
+};
 
 /** The terminal the dialog would have loaded, driven by the test. */
 class FakeTerminal implements Terminal {
@@ -92,7 +93,7 @@ class FakeSocket implements ConsoleSocket {
 }
 
 describe('ConsoleDialog', () => {
-  let fetchMock: jest.Mock;
+  let fetchMock: FetchMock;
   let terminal: FakeTerminal;
   let sockets: FakeSocket[];
   let terminalRequests: number;
@@ -103,18 +104,18 @@ describe('ConsoleDialog', () => {
     ({
       ok: status >= 200 && status < 300,
       status,
-      json: async () => body,
+      json: () => Promise.resolve(body),
     }) as Response;
 
   beforeEach(() => {
     terminal = new FakeTerminal();
     sockets = [];
     terminalRequests = 0;
-    fetchMock = jest.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      if (url.includes('/console/resize')) return answer({ cols: 120, rows: 40 });
-      return answer(ticketBody);
-    }) as unknown as jest.Mock;
+    fetchMock = jest.fn((input: string) => {
+      const url = input;
+      if (url.includes('/console/resize')) return Promise.resolve(answer({ cols: 120, rows: 40 }));
+      return Promise.resolve(answer(ticketBody));
+    });
     (globalThis as { fetch: unknown }).fetch = fetchMock;
     Object.defineProperty(window, 'location', {
       value: { protocol: 'http:', host: 'boat.local:3000' },
@@ -128,10 +129,10 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="boat"
         onClose={props.onClose ?? (() => {})}
-        terminal={async (element) => {
+        terminal={(element) => {
           terminalRequests += 1;
           terminal.attach(element);
-          return terminal;
+          return Promise.resolve(terminal);
         }}
         openSocket={(url, handlers) => {
           const socket = new FakeSocket(url, handlers);
@@ -146,7 +147,7 @@ describe('ConsoleDialog', () => {
   const connected = async () => {
     const view = show();
     await waitFor(() => expect(sockets).toHaveLength(1));
-    await act(async () => sockets[0]!.handlers.onOpen());
+    await act(() => Promise.resolve(sockets[0]!.handlers.onOpen()));
     return view;
   };
 
@@ -157,7 +158,7 @@ describe('ConsoleDialog', () => {
     expect(url).toContain('/containers/c1f0e2a3b4c5d6e7f8a9b0c1/exec');
     expect(url).toContain('instance=boat');
     expect(init.method).toBe('POST');
-    expect(JSON.parse(String(init.body))).toEqual({ command: ['/bin/sh'] });
+    expect(jsonBody(fetchMock.mock.calls[0])).toEqual({ command: ['/bin/sh'] });
     // Same origin as the page, and the ticket is the whole authorisation.
     expect(sockets[0]?.url).toBe(
       'ws://boat.local:3000/plugins/signalk-portainer/console?ticket=tkt-1',
@@ -191,7 +192,7 @@ describe('ConsoleDialog', () => {
         String(call[0]).includes('/console/resize'),
       );
       expect(resize).toBeDefined();
-      expect(JSON.parse(String((resize?.[1] as RequestInit).body))).toEqual({
+      expect(jsonBody(resize)).toEqual({
         session: 'ses-1',
         cols: 120,
         rows: 40,
@@ -203,13 +204,13 @@ describe('ConsoleDialog', () => {
     await connected();
     fetchMock.mockClear();
 
-    await act(async () => terminal.resize({ cols: 80, rows: 24 }));
+    await act(() => Promise.resolve(terminal.resize({ cols: 80, rows: 24 })));
 
     await waitFor(() => {
       const resize = fetchMock.mock.calls.find((call) =>
         String(call[0]).includes('/console/resize'),
       );
-      expect(JSON.parse(String((resize?.[1] as RequestInit).body))).toMatchObject({
+      expect(jsonBody(resize)).toMatchObject({
         cols: 80,
         rows: 24,
       });
@@ -220,9 +221,11 @@ describe('ConsoleDialog', () => {
     // A terminal of the wrong shape is visible on its own; an error banner
     // over a working shell helps nobody.
     await connected();
-    fetchMock.mockImplementation(async () => answer({ error: 'That console is not open' }, 404));
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(answer({ error: 'That console is not open' }, 404)),
+    );
 
-    await act(async () => terminal.resize({ cols: 80, rows: 24 }));
+    await act(() => Promise.resolve(terminal.resize({ cols: 80, rows: 24 })));
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('Connected')).toBeInTheDocument();
@@ -247,13 +250,15 @@ describe('ConsoleDialog', () => {
   });
 
   it('shows what the plugin refused, with its hint', async () => {
-    fetchMock.mockImplementation(async () =>
-      answer(
-        {
-          error: 'Refusing to open a shell in the container running Signal K',
-          hint: 'enable "Allow managing the Signal K container itself"',
-        },
-        403,
+    fetchMock.mockImplementation(() =>
+      Promise.resolve(
+        answer(
+          {
+            error: 'Refusing to open a shell in the container running Signal K',
+            hint: 'enable "Allow managing the Signal K container itself"',
+          },
+          403,
+        ),
       ),
     );
 
@@ -267,7 +272,7 @@ describe('ConsoleDialog', () => {
   it('refuses to open a socket for an answer with no ticket in it', async () => {
     // A proxy or a login page answering with a 200 must not become a socket
     // opened with `undefined` in the query.
-    fetchMock.mockImplementation(async () => answer({ id: container.Id }));
+    fetchMock.mockImplementation(() => Promise.resolve(answer({ id: container.Id })));
 
     show();
 
@@ -276,7 +281,9 @@ describe('ConsoleDialog', () => {
   });
 
   it('retries after a failure', async () => {
-    fetchMock.mockImplementationOnce(async () => answer({ error: 'Portainer unreachable' }, 502));
+    fetchMock.mockImplementationOnce(() =>
+      Promise.resolve(answer({ error: 'Portainer unreachable' }, 502)),
+    );
     show();
     await screen.findByRole('alert');
 
@@ -294,7 +301,7 @@ describe('ConsoleDialog', () => {
 
     await waitFor(() => {
       const asked = fetchMock.mock.calls.filter((call) => String(call[0]).includes('/exec'));
-      expect(JSON.parse(String((asked.at(-1)?.[1] as RequestInit).body))).toEqual({
+      expect(jsonBody(asked.at(-1))).toEqual({
         command: ['/bin/bash'],
       });
     });
@@ -340,7 +347,7 @@ describe('ConsoleDialog', () => {
     const view = show();
 
     view.unmount();
-    await act(async () => arrive(ticketBody));
+    await act(() => Promise.resolve(arrive(ticketBody)));
 
     expect(sockets).toHaveLength(0);
   });
@@ -363,7 +370,7 @@ describe('ConsoleDialog', () => {
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
     view.unmount();
-    await act(async () => arrive(terminal));
+    await act(() => Promise.resolve(arrive(terminal)));
 
     expect(terminal.disposed).toBe(true);
     expect(sockets).toHaveLength(0);
@@ -379,10 +386,10 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="shore"
         onClose={() => {}}
-        terminal={async (element) => {
+        terminal={(element) => {
           terminalRequests += 1;
           terminal.attach(element);
-          return terminal;
+          return Promise.resolve(terminal);
         }}
         openSocket={(url, handlers) => {
           const socket = new FakeSocket(url, handlers);
@@ -411,10 +418,10 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="boat"
         onClose={() => {}}
-        terminal={async (element) => {
+        terminal={(element) => {
           terminalRequests += 1;
           terminal.attach(element);
-          return terminal;
+          return Promise.resolve(terminal);
         }}
         openSocket={(url, handlers) => {
           const socket = new FakeSocket(url, handlers);
@@ -443,7 +450,7 @@ describe('ConsoleDialog', () => {
     const onClose = jest.fn();
     show({ onClose });
     await waitFor(() => expect(sockets).toHaveLength(1));
-    await act(async () => sockets[0]!.handlers.onOpen());
+    await act(() => Promise.resolve(sockets[0]!.handlers.onOpen()));
 
     await userEvent.keyboard('{Escape}');
     expect(onClose).not.toHaveBeenCalled();

@@ -1,14 +1,16 @@
 import { ApiError, apiGet, apiSend } from '../../src/webapp/api';
+import { asResponse, createFetchMock } from './mocks';
 
 describe('apiGet', () => {
-  const fetchMock = jest.fn();
+  const fetchMock = createFetchMock();
 
   beforeEach(() => {
     fetchMock.mockReset();
     global.fetch = fetchMock as unknown as typeof fetch;
   });
 
-  const ok = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+  const ok = (body: unknown) =>
+    asResponse({ ok: true, status: 200, json: () => Promise.resolve(body) });
 
   it('calls the plugin facade and carries the Signal K session cookie', async () => {
     fetchMock.mockResolvedValue(ok({ containers: [] }));
@@ -78,13 +80,13 @@ describe('apiGet', () => {
   });
 
   it('rejects a successful response that is not JSON', async () => {
-    fetchMock.mockResolvedValue({
-      ok: true,
-      status: 200,
-      json: async () => {
-        throw new SyntaxError('Unexpected token < in JSON');
-      },
-    });
+    fetchMock.mockResolvedValue(
+      asResponse({
+        ok: true,
+        status: 200,
+        json: () => Promise.reject(new SyntaxError('Unexpected token < in JSON')),
+      }),
+    );
 
     const error = (await apiGet('/containers').catch((cause: unknown) => cause)) as ApiError;
 
@@ -96,11 +98,13 @@ describe('apiGet', () => {
   });
 
   it('surfaces the facade error and hint', async () => {
-    fetchMock.mockResolvedValue({
-      ok: false,
-      status: 404,
-      json: async () => ({ error: 'not a Swarm', hint: 'no services here' }),
-    });
+    fetchMock.mockResolvedValue(
+      asResponse({
+        ok: false,
+        status: 404,
+        json: () => Promise.resolve({ error: 'not a Swarm', hint: 'no services here' }),
+      }),
+    );
 
     const error = await apiGet('/swarm/services').catch((cause: unknown) => cause);
 
@@ -111,13 +115,13 @@ describe('apiGet', () => {
   });
 
   it('still reports a status when the body is not JSON', async () => {
-    fetchMock.mockResolvedValue({
-      ok: false,
-      status: 502,
-      json: async () => {
-        throw new Error('not json');
-      },
-    });
+    fetchMock.mockResolvedValue(
+      asResponse({
+        ok: false,
+        status: 502,
+        json: () => Promise.reject(new Error('not json')),
+      }),
+    );
 
     const error = (await apiGet('/health').catch((cause: unknown) => cause)) as ApiError;
 
@@ -127,7 +131,7 @@ describe('apiGet', () => {
 });
 
 describe('apiSend', () => {
-  const fetchMock = jest.fn();
+  const fetchMock = createFetchMock();
 
   beforeEach(() => {
     fetchMock.mockReset();
@@ -135,7 +139,9 @@ describe('apiSend', () => {
   });
 
   it('sends the method it was given, with the session cookie', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    fetchMock.mockResolvedValue(
+      asResponse({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }),
+    );
 
     await apiSend('POST', '/containers/abc/stop', 'boat');
 
@@ -146,7 +152,9 @@ describe('apiSend', () => {
   });
 
   it('joins the instance onto a path that already has a query', async () => {
-    fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) });
+    fetchMock.mockResolvedValue(
+      asResponse({ ok: true, status: 200, json: () => Promise.resolve({}) }),
+    );
 
     await apiSend('DELETE', '/containers/abc?force=false&removeVolumes=true', 'shore');
 
@@ -193,16 +201,18 @@ describe('apiSend', () => {
     jest.useFakeTimers();
     try {
       fetchMock.mockImplementation((_url: string, init?: RequestInit) =>
-        Promise.resolve({
-          ok: true,
-          status: 200,
-          json: () =>
-            new Promise((_resolve, reject) => {
-              init?.signal?.addEventListener('abort', () =>
-                reject(new DOMException('The user aborted a request.', 'AbortError')),
-              );
-            }),
-        }),
+        Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () =>
+              new Promise((_resolve, reject) => {
+                init?.signal?.addEventListener('abort', () =>
+                  reject(new DOMException('The user aborted a request.', 'AbortError')),
+                );
+              }),
+          }),
+        ),
       );
 
       const pending = apiSend('POST', '/containers/abc/stop').catch((cause: unknown) => cause);
@@ -222,7 +232,9 @@ describe('apiSend', () => {
     // request would keep the tab busy long after the panel was done with it.
     jest.useFakeTimers();
     try {
-      fetchMock.mockResolvedValue({ ok: true, status: 200, json: async () => ({ ok: true }) });
+      fetchMock.mockResolvedValue(
+        asResponse({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }),
+      );
 
       await apiSend('POST', '/containers/abc/start');
 
@@ -233,11 +245,13 @@ describe('apiSend', () => {
   });
 
   it('surfaces a policy refusal with its hint', async () => {
-    fetchMock.mockResolvedValue({
-      ok: false,
-      status: 403,
-      json: async () => ({ error: 'Container control is disabled', hint: 'enable it' }),
-    });
+    fetchMock.mockResolvedValue(
+      asResponse({
+        ok: false,
+        status: 403,
+        json: () => Promise.resolve({ error: 'Container control is disabled', hint: 'enable it' }),
+      }),
+    );
 
     const error = await apiSend('POST', '/containers/abc/stop').catch((cause: unknown) => cause);
 

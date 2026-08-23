@@ -31,7 +31,7 @@ export type SocketFactory = (url: string, handlers: ConsoleSocketHandlers) => Co
 export function decodeFrame(data: unknown, decoder: TextDecoder): string {
   if (typeof data === 'string') return data;
   if (ArrayBuffer.isView(data)) {
-    return decoder.decode(data as unknown as ArrayBufferView, { stream: true });
+    return decoder.decode(data, { stream: true });
   }
   // `instanceof` rather than only that: a buffer built in another realm — an
   // iframe, or the test environment — is an ArrayBuffer that fails the

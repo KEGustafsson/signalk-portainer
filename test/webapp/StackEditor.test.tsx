@@ -6,6 +6,7 @@ import userEvent from '@testing-library/user-event';
 import { ApiError } from '../../src/webapp/api';
 import { StackEditor, type StackDeployment } from '../../src/webapp/StackEditor';
 import type { Stack } from '../../src/types';
+import type { FetchMock } from './mocks';
 
 const fileStack: Stack = {
   Id: 3,
@@ -24,15 +25,17 @@ const gitStack: Stack = {
 };
 
 const withFile = (content = 'services:\n  influxdb:\n') =>
-  jest.fn(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ content }) }));
+  jest.fn(() =>
+    Promise.resolve({ ok: true, status: 200, json: () => Promise.resolve({ content }) }),
+  );
 
 const renderEditor = (
   props: Partial<React.ComponentProps<typeof StackEditor>> & { fetch?: typeof global.fetch } = {},
-): { onDeploy: jest.Mock; onClose: jest.Mock } => {
+): { onDeploy: jest.Mock<void, [StackDeployment]>; onClose: jest.Mock<void, []> } => {
   const { fetch: fetchOverride, ...rest } = props;
   if (fetchOverride) global.fetch = fetchOverride;
-  const onDeploy = jest.fn();
-  const onClose = jest.fn();
+  const onDeploy = jest.fn<void, [StackDeployment]>();
+  const onClose = jest.fn<void, []>();
   render(
     <StackEditor
       target={{ kind: 'existing', stack: fileStack }}
@@ -63,7 +66,7 @@ describe('StackEditor', () => {
   });
 
   it('asks the selected instance for the file', async () => {
-    const fetchMock = global.fetch as unknown as jest.Mock;
+    const fetchMock = global.fetch as unknown as FetchMock;
     renderEditor();
 
     await waitFor(() => expect(fetchMock).toHaveBeenCalled());
@@ -145,7 +148,7 @@ describe('StackEditor', () => {
       Promise.resolve({
         ok: false,
         status: 404,
-        json: async () => ({ error: 'Stack 3 does not belong to this environment' }),
+        json: () => Promise.resolve({ error: 'Stack 3 does not belong to this environment' }),
       }),
     ) as unknown as typeof fetch;
 
@@ -160,7 +163,7 @@ describe('StackEditor', () => {
         Promise.resolve({
           ok: false,
           status: 502,
-          json: async () => ({ error: 'Portainer could not be reached' }),
+          json: () => Promise.resolve({ error: 'Portainer could not be reached' }),
         }),
       ) as unknown as typeof fetch;
 

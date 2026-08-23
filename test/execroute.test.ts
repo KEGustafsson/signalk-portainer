@@ -9,7 +9,7 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import { asJson, type JsonBody, createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -47,7 +47,7 @@ const buildApp = (
     registry: () => registry,
     config: () =>
       registry
-        ? ({
+        ? {
             instances: [],
             problems: [],
             telemetry: {
@@ -57,7 +57,7 @@ const buildApp = (
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
-          } as PluginConfig)
+          }
         : undefined,
     self: () => opts.self ?? noSelf,
     log: opts.log ?? (() => {}),
@@ -116,11 +116,11 @@ describe('facade console', () => {
     const res = await request(app()).post(`/api/containers/${CONTAINER}/exec`).send({});
 
     expect(res.status).toBe(200);
-    expect(res.body.ticket).toMatch(/^[0-9a-f]{64}$/);
+    expect(asJson(res.body).ticket).toMatch(/^[0-9a-f]{64}$/);
     // A second handle, for resizing. Distinct from the ticket, because the
     // ticket is spent by the upgrade and travels in a URL query.
-    expect(res.body.session).toMatch(/^[0-9a-f]{32}$/);
-    expect(res.body.session).not.toBe(res.body.ticket);
+    expect(asJson(res.body).session).toMatch(/^[0-9a-f]{32}$/);
+    expect(asJson(res.body).session).not.toBe(asJson(res.body).ticket);
     // A TTY, and every stream attached: this is a terminal, not a batch run.
     expect(sent).toMatchObject({ Tty: true, AttachStdin: true, Cmd: ['/bin/sh'] });
   });
@@ -143,7 +143,7 @@ describe('facade console', () => {
     for (const command of ['rm -rf /', [], ['ok', 42], ['']]) {
       const res = await request(app()).post(`/api/containers/${CONTAINER}/exec`).send({ command });
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('non-empty list of strings');
+      expect(asJson(res.body).error).toContain('non-empty list of strings');
     }
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
@@ -154,7 +154,7 @@ describe('facade console', () => {
     const res = await request(app()).post(`/api/containers/${CONTAINER}/exec`).send({ command });
 
     expect(res.status).toBe(400);
-    expect(res.body.error).toContain('at most 32');
+    expect(asJson(res.body).error).toContain('at most 32');
   });
 
   it('is refused while control is disabled', async () => {
@@ -163,7 +163,7 @@ describe('facade console', () => {
       .send({});
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('Container control is disabled');
+    expect(asJson(res.body).error).toContain('Container control is disabled');
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -180,12 +180,14 @@ describe('facade console', () => {
     const res = await request(surface).post(`/api/containers/${CONTAINER}/exec`).send({});
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('Container control is disabled');
-    expect(res.body.error).not.toContain('Signal K server');
+    expect(asJson(res.body).error).toContain('Container control is disabled');
+    expect(asJson(res.body).error).not.toContain('Signal K server');
 
     // And the control surface says the same thing about the same switch.
     const control_ = await request(surface).get('/api/control');
-    expect(control_.body.console.reason).toContain('disabled in the plugin configuration');
+    expect(asJson<{ console: JsonBody }>(control_.body).console.reason).toContain(
+      'disabled in the plugin configuration',
+    );
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -197,7 +199,7 @@ describe('facade console', () => {
       .send({});
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('running Signal K');
+    expect(asJson(res.body).error).toContain('running Signal K');
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -209,17 +211,18 @@ describe('facade console', () => {
       .send({});
 
     expect(res.status).toBe(403);
-    expect(res.body.error).toContain('not available');
+    expect(asJson(res.body).error).toContain('not available');
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
   it('reports the console in the control surface', async () => {
     const withConsole = await request(app()).get('/api/control');
-    expect(withConsole.body.console).toEqual({ available: true });
+    expect(asJson(withConsole.body).console).toEqual({ available: true });
 
     const without = await request(buildApp(new InstanceRegistry(config))).get('/api/control');
-    expect(without.body.console.available).toBe(false);
-    expect(without.body.console.reason).toContain('WebSocket');
+    const { console: gate } = asJson<{ console: JsonBody }>(without.body);
+    expect(gate.available).toBe(false);
+    expect(gate.reason).toContain('WebSocket');
   });
 
   it('logs the console being opened, with the command', async () => {
@@ -255,7 +258,7 @@ describe('facade console', () => {
       .send({});
 
     expect(res.status).toBe(429);
-    expect(res.body.hint).toContain('wait a moment');
+    expect(asJson(res.body).hint).toContain('wait a moment');
     expect(created).toBe(false);
   });
 
@@ -320,7 +323,7 @@ describe('facade console', () => {
         .send({ session: 'session-gone', cols: 80, rows: 24 });
 
       expect(res.status).toBe(404);
-      expect(res.body.hint).toContain('open a new one');
+      expect(asJson(res.body).hint).toContain('open a new one');
     });
 
     it('refuses a session id nobody was given', async () => {
@@ -353,7 +356,7 @@ describe('facade console', () => {
         .send({ session: 'session-1', cols: 100000, rows: 24 });
 
       expect(res.status).toBe(400);
-      expect(res.body.error).toContain('at most');
+      expect(asJson(res.body).error).toContain('at most');
     });
 
     it('is refused while control is disabled', async () => {
@@ -386,6 +389,6 @@ describe('facade console', () => {
     const res = await request(app()).post(`/api/containers/${CONTAINER}/exec`).send({});
 
     expect(res.status).toBe(409);
-    expect(res.body.ticket).toBeUndefined();
+    expect(asJson(res.body).ticket).toBeUndefined();
   });
 });
