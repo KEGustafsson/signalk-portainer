@@ -61,7 +61,10 @@ before installing this anywhere you would mind losing a container.
   with create, redeploy and delete.
 - A terminal, opened from a container row: `/bin/sh`, `/bin/bash` or
   `/bin/ash`. xterm.js is fetched in its own chunk the first time a shell is
-  opened, so a panel that never opens one never downloads it.
+  opened, so a panel that never opens one never downloads it. `Ctrl+]` leaves
+  the terminal for the Close button; Tab and Escape both remain available to
+  the shell, so without it a shell reached by keyboard could not be left by
+  one.
 
 #### Signal K integration
 
