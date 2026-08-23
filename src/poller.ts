@@ -31,9 +31,22 @@ export interface PollerDeps {
    * registered for paths that only become known when a container appears.
    */
   onKeys?: (instance: string, keys: string[], containers: KeyedContainer[]) => void;
+  /**
+   * Reachability, every poll. The plugin status is otherwise a snapshot of
+   * start(): a Portainer that comes up a minute later reads as down forever,
+   * and one that dies at 02:00 still reads as connected at 03:00.
+   */
+  onHealth?: (instances: InstanceHealth[]) => void;
 }
 
 /** One container as the poller saw it, paired with the key it publishes under. */
+/** What one instance looked like on the last poll. */
+export interface InstanceHealth {
+  name: string;
+  reachable: boolean;
+  error?: string;
+}
+
 export interface KeyedContainer {
   key: string;
   id: string;
@@ -115,6 +128,13 @@ export class DeltaPoller {
 
       if (values.length > 0 || meta.length > 0) this.deps.publish(values, meta);
       if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
+      this.deps.onHealth?.(
+        snapshots.map(({ name, snapshot }) => ({
+          name,
+          reachable: snapshot.reachable,
+          ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+        })),
+      );
     } catch (cause) {
       // A poll must never be worse than a poll that reports "unreachable".
       // `snapshot()` already contains network failures; this catches everything

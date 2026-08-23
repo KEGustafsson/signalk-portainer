@@ -43,7 +43,7 @@ const buildApp = (
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
-              emitStats: false,
+
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
@@ -102,6 +102,105 @@ describe('facade stack writes', () => {
 
   const app = (opts: Parameters<typeof buildApp>[1] = {}) =>
     buildApp(new InstanceRegistry(config), opts);
+
+  describe('creating a stack', () => {
+    it('refuses a name that is the compose project Signal K runs under', async () => {
+      // There is no stack id yet, so the id-based guard cannot help. Docker
+      // keys a compose project by name: deploying this file would let Docker
+      // recreate the project without Signal K in it.
+      withEnvironment();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+
+      const res = await request(app({ self: selfContainer }))
+        .post('/api/stacks')
+        .send({ name: 'signalk', content: 'services: {}' });
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('compose project');
+    });
+
+    it('matches the project name however it was cased', async () => {
+      withEnvironment();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+
+      const res = await request(app({ self: selfContainer }))
+        .post('/api/stacks')
+        .send({ name: 'SignalK', content: 'services: {}' });
+
+      expect(res.status).toBe(403);
+    });
+
+    const withCreate = (name: string) => {
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
+        .reply(200, { Id: 11, Name: name, Type: 2, EndpointId: 1 });
+    };
+
+    it('allows an unrelated name', async () => {
+      withEnvironment();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+      withCreate('weather');
+
+      const res = await request(app({ self: selfContainer }))
+        .post('/api/stacks')
+        .send({ name: 'weather', content: 'services: {}' });
+
+      expect(res.status).toBe(200);
+    });
+
+    it('allows it once self-management is on', async () => {
+      withEnvironment();
+      withCreate('signalk');
+
+      const res = await request(
+        app({ self: selfContainer, control: control({ allowSelfManagement: true }) }),
+      )
+        .post('/api/stacks')
+        .send({ name: 'signalk', content: 'services: {}' });
+
+      expect(res.status).toBe(200);
+    });
+  });
+
+  describe('pruning', () => {
+    it('refuses a prune on redeploy without the destructive setting', async () => {
+      // A prune removes the services the new file no longer names. That is
+      // destruction, and the setting that guards destruction should guard it.
+      withStacks();
+      withContainers();
+
+      const res = await request(app()).post('/api/stacks/3/redeploy?prune=true');
+
+      expect(res.status).toBe(403);
+      expect(res.body.error).toContain('Destructive');
+    });
+
+    it('refuses a prune on update without it either', async () => {
+      withStacks();
+      withContainers();
+
+      const res = await request(app())
+        .put('/api/stacks/3')
+        .send({ content: 'services: {}', prune: true });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('lets a redeploy that prunes nothing past the gate', async () => {
+      // The guard must not block an ordinary redeploy: this one is refused
+      // later, for having no repository, which is a different answer.
+      withStacks();
+      withContainers();
+
+      const res = await request(app()).post('/api/stacks/3/redeploy');
+
+      expect(res.status).not.toBe(403);
+    });
+  });
 
   describe('lifecycle', () => {
     it('starts a stack', async () => {

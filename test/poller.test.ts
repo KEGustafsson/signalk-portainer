@@ -125,6 +125,46 @@ describe('DeltaPoller', () => {
     });
   });
 
+  it('reports reachability on every poll, not just at startup', async () => {
+    // Without this the plugin status is a snapshot of start(): a Portainer
+    // that comes up a minute later reads as unreachable forever, and one that
+    // dies overnight still reads as connected in the morning.
+    interceptOk('https://boat.test:9443');
+    const health: { name: string; reachable: boolean }[][] = [];
+    const poller = new DeltaPoller({
+      registry: () => new InstanceRegistry(boatOnly),
+      publish: (values, meta) => published.push({ values, meta }),
+      log: (message) => logs.push(message),
+      intervalMs: 60_000,
+      pathPrefix: 'system.docker',
+      level: 'full',
+      onHealth: (instances) => health.push(instances),
+    });
+
+    await poller.poll();
+
+    expect(health).toHaveLength(1);
+    expect(health[0]).toEqual([{ name: 'boat', reachable: true }]);
+  });
+
+  it('reports an instance that has gone away, with the reason', async () => {
+    const health: { name: string; reachable: boolean; error?: string }[][] = [];
+    const poller = new DeltaPoller({
+      registry: () => new InstanceRegistry(boatOnly),
+      publish: (values, meta) => published.push({ values, meta }),
+      log: (message) => logs.push(message),
+      intervalMs: 60_000,
+      pathPrefix: 'system.docker',
+      level: 'full',
+      onHealth: (instances) => health.push(instances),
+    });
+
+    await poller.poll();
+
+    expect(health[0]?.[0]?.reachable).toBe(false);
+    expect(health[0]?.[0]?.error).toBeTruthy();
+  });
+
   it('publishes a delta for each configured instance in one message', async () => {
     interceptOk('https://boat.test:9443');
     interceptOk('https://shore.test:9443');

@@ -32,7 +32,6 @@ export interface PluginConfig {
   telemetry: {
     level: TelemetryLevel;
     intervalSeconds: number;
-    emitStats: boolean;
     pathPrefix: string;
   };
   control: {
@@ -145,12 +144,6 @@ export const PLUGIN_SCHEMA = {
           default: 'health',
         },
         intervalSeconds: { type: 'number', title: 'Poll interval (s)', default: 30 },
-        emitStats: {
-          type: 'boolean',
-          title: 'Publish CPU and memory',
-          default: false,
-          description: 'Costs one API call per container per poll.',
-        },
         pathPrefix: { type: 'string', title: 'Path prefix', default: 'system.docker' },
       },
     },
@@ -170,6 +163,30 @@ export const PLUGIN_SCHEMA = {
           title: 'Allow managing the Signal K container itself',
           default: false,
           description: 'Stopping it stops this plugin. Off unless you mean it.',
+        },
+        watchdog: {
+          type: 'array',
+          title: 'Watchdog',
+          description:
+            'Containers whose absence raises a Signal K alarm. Nothing is published unless something is listed here.',
+          items: {
+            type: 'object',
+            required: ['container'],
+            properties: {
+              container: {
+                type: 'string',
+                title: 'Container',
+                default: '',
+                description: 'Its name, or the key it publishes under.',
+              },
+              instance: {
+                type: 'string',
+                title: 'Instance',
+                default: '',
+                description: 'Leave empty for the first enabled instance.',
+              },
+            },
+          },
         },
       },
     },
@@ -213,7 +230,6 @@ interface RawTelemetry {
   /** @deprecated superseded by `level`; still read so old options keep working. */
   enabled?: boolean;
   intervalSeconds?: number;
-  emitStats?: boolean;
   pathPrefix?: string;
 }
 
@@ -234,7 +250,6 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
   const telemetry = {
     level: telemetryLevel(raw?.telemetry),
     intervalSeconds: Math.max(5, raw?.telemetry?.intervalSeconds ?? 30),
-    emitStats: raw?.telemetry?.emitStats ?? false,
     pathPrefix: (raw?.telemetry?.pathPrefix || 'system.docker').replace(/\.+$/, ''),
   };
 

@@ -51,7 +51,7 @@ const buildApp = (
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
-              emitStats: false,
+
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),

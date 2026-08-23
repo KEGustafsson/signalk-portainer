@@ -68,7 +68,7 @@ before installing this anywhere you would mind losing a container.
 - Container state published as deltas under `system.docker.<instance>.*`, with
   Signal K metadata so dashboards render labelled values.
 - Three publishing levels — off, health, or full — rather than a single
-  switch, plus an optional per-container CPU and memory sample.
+  switch.
 - Watchdog notifications raising a Signal K alarm when a container that should
   be running is not.
 - PUT handlers, so any Signal K client can start or stop a container.
@@ -89,11 +89,21 @@ before installing this anywhere you would mind losing a container.
   exec instance and returns a single-use ticket, valid for 30 seconds and
   bound to that one shell. A socket arriving without one is closed knowing
   nothing else. Commands are argv, never a string to be split.
+- **Same-origin only for anything that changes something.** A mutating route
+  with no body is a CORS "simple request", so a page on another site could
+  otherwise make the browser send one with the session cookie attached and
+  simply not read the answer. Reads are unaffected, and a non-browser caller —
+  already authenticated by Signal K — is left alone.
 - **Bounded concurrency.** At most 8 log streams overall and 3 per container;
   at most 3 shells overall and 2 per container; at most 32 unredeemed console
   tickets. A shell left idle for 15 minutes is closed.
 
 ### Known limitations
+
+- Portainer CE cannot remove a stack's volumes when the stack is deleted: its
+  teardown runs `compose down` with no down-options, and there is no API
+  parameter for it. The dialog says so rather than offering a checkbox that
+  would report a removal that never happened.
 
 - Requires a Signal K server new enough to let a plugin serve a WebSocket. On
   an older one the console is absent, and `GET /control` says why, rather than

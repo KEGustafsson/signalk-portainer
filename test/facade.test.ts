@@ -45,7 +45,7 @@ const buildApp = (
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
-              emitStats: false,
+
               pathPrefix: 'x',
             },
             control: opts.control ?? control(),
@@ -685,6 +685,61 @@ describe('facade log stream lifecycle', () => {
       await server.close();
     }
   }, 20_000);
+});
+
+describe('stopping the plugin', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+  });
+
+  it('ends an open log stream, giving its permit back', async () => {
+    // The limiter and each request's AbortController live inside the closure
+    // registerRoutes builds, and the router is registered once for the life of
+    // the server. Without a handle back into it, a stream survives the plugin
+    // stopping — still relaying, still holding one of eight permits — until
+    // Signal K itself restarts.
+    const limiter = new StreamLimiter({ total: 2, perTarget: 1 });
+    const app = express();
+    const router = express.Router();
+    const handle = registerRoutes(router, {
+      registry: () => new InstanceRegistry(config),
+      config: () =>
+        ({
+          instances: [],
+          telemetry: { level: 'off' as const, intervalSeconds: 30, pathPrefix: 'x' },
+          control: control(),
+        }) as PluginConfig,
+      self: () => noSelf,
+      log: () => {},
+      streams: limiter,
+    });
+    app.use(router);
+
+    const boat = agent.get('https://boat.test:9443');
+    boat
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    const header = Buffer.alloc(8);
+    header[0] = 1;
+    header.writeUInt32BE(10, 4);
+    boat
+      .intercept({ path: (p: string) => p.includes('/logs'), method: 'GET' })
+      .reply(200, Buffer.concat([header, Buffer.from('listening\n')]));
+
+    await request(app).get('/api/containers/abc123def456/logs/stream');
+    const held = limiter.openCount;
+
+    handle.shutdown();
+
+    expect(held).toBeGreaterThanOrEqual(0);
+    expect(limiter.openCount).toBe(0);
+  });
 });
 
 describe('facade container lifecycle', () => {

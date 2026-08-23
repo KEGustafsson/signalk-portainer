@@ -66,7 +66,7 @@ describe('PutHandlers', () => {
             telemetry: {
               level: 'health' as const,
               intervalSeconds: 30,
-              emitStats: false,
+
               pathPrefix: 'system.docker',
             },
             control: opts.control ?? control(),

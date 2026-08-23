@@ -10,8 +10,8 @@ import type { MetaValue, PathValue } from './deltas';
 import { ExecTickets } from './exectickets';
 import { openConsole, type ConsoleServer } from './console';
 import { ConsoleSessions } from './consolesessions';
-import { registerRoutes } from './facade';
-import { DeltaPoller, type KeyedContainer } from './poller';
+import { registerRoutes, type FacadeHandle } from './facade';
+import { DeltaPoller, type InstanceHealth, type KeyedContainer } from './poller';
 import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
@@ -32,6 +32,9 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    * absent when the server is too old to let a plugin serve a WebSocket, and
    * the console is then not offered rather than half-offered.
    */
+  // The router is registered once, for the life of the server. This is how a
+  // stop() reaches what it left running.
+  let facade: FacadeHandle | undefined;
   let tickets: ExecTickets | undefined;
   let sessions: ConsoleSessions | undefined;
   let consoleServer: ConsoleServer | undefined;
@@ -81,6 +84,37 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     const safe = redactText(message);
     app.setPluginError(safe);
     app.error(safe);
+  };
+
+  /**
+   * The status line, kept current by the poller.
+   *
+   * `reportHealth` below runs once, at start(). On its own that makes the
+   * status a snapshot of the plugin's first two seconds: a Portainer that
+   * comes up a minute later reads as unreachable forever, and one that dies
+   * overnight still reads as connected in the morning. The poller already
+   * learns this every interval, so it says so.
+   *
+   * Only on a change, though. An unreachable instance re-reported every 30
+   * seconds would fill the server log with the same line, and an operator
+   * learns to ignore a channel that repeats itself.
+   */
+  let lastHealth: string | undefined;
+  const reportPolledHealth = (instances: InstanceHealth[]): void => {
+    const down = instances.filter((instance) => !instance.reachable);
+    const summary = down.length === 0 ? 'up' : down.map((i) => `${i.name}:${i.error}`).join(';');
+    if (summary === lastHealth) return;
+    lastHealth = summary;
+
+    if (down.length === 0) {
+      // Back to a full description, which needs versions the poll does not
+      // carry; the probe is cheap and only runs on a change.
+      void reportHealth();
+      return;
+    }
+    const detail = down.map((i) => `${i.name}: ${i.error ?? 'unreachable'}`).join('; ');
+    if (down.length === instances.length) setError(`No Portainer instance reachable — ${detail}`);
+    else setError(`${instances.length - down.length}/${instances.length} reachable — ${detail}`);
   };
 
   /**
@@ -205,6 +239,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
               seen = replaceKnownContainers(seen, instance, containers);
               puts?.register(instance, keys, prefix);
             },
+            onHealth: reportPolledHealth,
           });
           poller.start();
         }
@@ -226,6 +261,8 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       seen = new Map();
       // Every open shell ends with the plugin, and every unredeemed ticket
       // stops being one.
+      // Before the registry closes: an open stream holds a client from it.
+      facade?.shutdown();
       consoleServer?.close();
       consoleServer = undefined;
       tickets?.clear();
@@ -239,7 +276,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     },
 
     registerWithRouter(router: IRouter): void {
-      registerRoutes(router, {
+      facade = registerRoutes(router, {
         registry: () => registry,
         config: () => config,
         self: () => self,
