@@ -161,8 +161,14 @@ POST   /api/stacks/{id}/start?endpointId=N
 POST   /api/stacks/{id}/stop?endpointId=N
 POST   /api/stacks/{id}/migrate?endpointId=N    EndpointID
 POST   /api/stacks/webhooks/{webhookUUID}       # unauthenticated redeploy trigger
-DELETE /api/stacks/{id}?endpointId=N&removeVolumes=true&external=true
+DELETE /api/stacks/{id}?endpointId=N&external=true
 ```
+
+`removeVolumes` is **not** a parameter of stack delete on Portainer CE 2.x —
+this document used to claim it was, and the plugin sent it. Go ignores an
+unknown query parameter, so the request succeeded, the volumes stayed, and the
+caller was told they had been removed. Container delete is the one that takes
+it (`DELETE /api/endpoints/{id}/docker/containers/{id}?v=true`).
 
 Edge stacks: `/api/edge_stacks/create/{string|file|repository}` with `EdgeGroups`
 and `DeploymentType` (0 = compose, 1 = kubernetes), plus GET/PUT/DELETE by id.
