@@ -13,7 +13,7 @@ import { openConsole, type ConsoleServer } from './console';
 import { ConsoleSessions } from './consolesessions';
 import { registerRoutes, type FacadeHandle } from './facade';
 import { DeltaPoller, type InstanceHealth, type KeyedContainer } from './poller';
-import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
+import { PutHandlers, replaceKnownContainers } from './put';
 import { InstanceRegistry } from './registry';
 import { redactText } from './redact';
 import { detectSelfContainer, type SelfContainer } from './self';
@@ -257,8 +257,8 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         // nothing at all.
         lastHealth = undefined;
         configProblems = [];
-        rawOptions = options as RawConfig | undefined;
-        config = normalizeConfig(options as RawConfig | undefined);
+        rawOptions = options;
+        config = normalizeConfig(options);
         // Reported through every status line from here on: an instance that
         // was dropped is invisible otherwise, and the operator's second
         // Portainer would simply never appear.
@@ -316,7 +316,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
                   self: () => self,
                   log,
                   register: (context, path, handler) =>
-                    app.registerPutHandler?.(context, path, handler as ActionHandler),
+                    app.registerPutHandler?.(context, path, handler),
                 },
                 (instance, key) => seen.get(`${instance}/${key}`),
               )

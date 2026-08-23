@@ -62,7 +62,12 @@ export function redactValue<T>(value: T, seen: WeakSet<object> = new WeakSet()):
 
   if (Array.isArray(value)) {
     seen.add(object);
-    const items = value.map((item) => redactValue(item, seen)) as unknown as T;
+    // Read back as `unknown[]` rather than the `any[]` that `Array.isArray`
+    // narrows a generic to: every element is about to be walked, and `any`
+    // would make the walk's own return type unchecked.
+    const items = (value as unknown[]).map((item: unknown) =>
+      redactValue(item, seen),
+    ) as unknown as T;
     // Dropped again on the way out: `seen` is the path from the root, not every
     // object ever visited. Left in, it detects repetition rather than cycles,
     // and one object referenced twice — the same container listed under two
