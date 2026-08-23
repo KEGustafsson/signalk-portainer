@@ -5,14 +5,14 @@ import request from 'supertest';
 import type { MockAgent } from 'undici';
 import { normalizeConfig } from '../src/config';
 import type { PluginConfig } from '../src/config';
-import { PortainerError } from '../src/errors';
+import { PolicyError, PortainerError } from '../src/errors';
 import type { SelfContainer } from '../src/self';
 import { registerRoutes, instanceParam, type FacadeHandle } from '../src/facade';
 import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -20,6 +20,7 @@ const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  putContainers: [],
   watchdog: [],
   ...overrides,
 });
@@ -45,6 +46,7 @@ const buildApp = (
       registry
         ? ({
             instances: [],
+            problems: [],
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
@@ -81,6 +83,7 @@ describe('facade', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptReachable = (origin: string): void => {
@@ -139,6 +142,7 @@ describe('facade read routes', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const boat = () => agent.get('https://boat.test:9443');
@@ -248,6 +252,21 @@ describe('facade read routes', () => {
       expect(res.body.error).toContain('not a number');
     });
 
+    it.each([[true], [null], ['2'], [1.5], [[3]]])(
+      'refuses %p rather than coercing it into an environment',
+      async (id) => {
+        // `Number()` accepted all of these: true selected environment 1, null
+        // selected 0, and "2" selected a real Docker host the caller never
+        // named.
+        const res = await request(app()).put('/api/environment').send({ id });
+
+        expect(res.status).toBe(400);
+        expect(res.body.error).toContain('not a number');
+        // Nothing was asked of Portainer: no environment list was fetched.
+        expect(agent.pendingInterceptors()).toHaveLength(0);
+      },
+    );
+
     it('saves the choice, so it outlives the process', async () => {
       twoEnvironments();
       const saved: { instance: string; id: number }[] = [];
@@ -354,6 +373,20 @@ describe('facade read routes', () => {
     expect(res.body.error).toContain('not a number');
   });
 
+  it.each([['0x3'], ['1e1'], ['0'], ['-2'], [' 3'], ['3.0']])(
+    'rejects the stack id %p rather than reading a number out of it',
+    async (id) => {
+      // `Number()` reads "0x3" as 3 and "1e1" as 10, so a request naming one
+      // stack acted on a different one. This route also used to accept 0 and
+      // negative ids, which every other stack route refuses.
+      const res = await request(app()).get(`/api/stacks/${encodeURIComponent(id)}/file`);
+
+      expect(res.status).toBe(400);
+      expect(res.body.error).toContain('not a number');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    },
+  );
+
   it('serves images, volumes and networks', async () => {
     withEnvironment(3);
     boat()
@@ -381,6 +414,7 @@ describe('facade swarm routes', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const probe = (info: object) => {
@@ -424,6 +458,7 @@ describe('facade logs', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   /** One Docker log frame: 8-byte header then payload. */
@@ -541,6 +576,7 @@ describe('facade log streaming', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const frame = (stream: 1 | 2, text: string): Buffer => {
@@ -635,6 +671,71 @@ describe('facade log streaming', () => {
     expect(res.body.hint).toContain('already following this container');
     // Nothing was asked of Portainer: the refusal happens before the request.
     expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  /** A follow stream that fails, either before or after the first line. */
+  const failingStream = (cause: unknown, opts: { afterALine?: true } = {}) => {
+    const frames = async function* (): AsyncGenerator<LogFrame> {
+      if (opts.afterALine) yield { stream: 'stdout' as const, text: 'listening' };
+      throw cause;
+    };
+    return {
+      defaultName: 'boat',
+      get: () => ({
+        docker: {
+          logStream: async () => (opts.afterALine ? frames() : Promise.reject(cause)),
+        },
+      }),
+    } as unknown as InstanceRegistry;
+  };
+
+  it('answers a policy refusal with its own status rather than a 500', async () => {
+    // No guard refuses a log stream today; this route's 403 would fall through
+    // to 500 the moment one is added.
+    const registry = failingStream(new PolicyError('Refusing to follow that', 'turn it on first'));
+
+    const res = await request(buildApp(registry)).get('/api/containers/abc123def456/logs/stream');
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Refusing to follow that');
+    expect(res.body.hint).toBe('turn it on first');
+  });
+
+  it('redacts a failure that arrives mid-stream, as it redacts the lines', async () => {
+    // The data lines are redacted deliberately; the failure beside them
+    // travelled verbatim, and these messages carry what Portainer said.
+    const registry = failingStream(
+      new PortainerError({
+        status: 500,
+        method: 'GET',
+        path: '/logs',
+        message: 'Portainer refused ptr_abcdefghijklmnopqrstuvwxyz012345',
+      }),
+      { afterALine: true },
+    );
+
+    const res = await request(buildApp(registry)).get('/api/containers/abc123def456/logs/stream');
+
+    expect(res.status).toBe(200);
+    expect(res.text).toContain('event: error');
+    expect(res.text).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345');
+    expect(res.text).toContain('[redacted]');
+  });
+
+  it('redacts a failure reported as a status too', async () => {
+    const registry = failingStream(
+      new PortainerError({
+        status: 502,
+        method: 'GET',
+        path: '/logs',
+        message: 'Portainer refused ptr_abcdefghijklmnopqrstuvwxyz012345',
+      }),
+    );
+
+    const res = await request(buildApp(registry)).get('/api/containers/abc123def456/logs/stream');
+
+    expect(res.status).toBe(502);
+    expect(JSON.stringify(res.body)).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345');
   });
 
   it('frees the slot again once the stream has finished', async () => {
@@ -743,14 +844,20 @@ describe('facade log stream lifecycle', () => {
     try {
       const req = open(server.port);
       await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+      // Genuinely holding the only permit there is before the browser leaves —
+      // otherwise the assertions below hold just as well against a stream that
+      // never started.
+      expect(limiter.openCount).toBe(1);
       req.destroy();
 
       await waitFor('the upstream stream to be abandoned', () => held.signal()?.aborted === true);
+      expect(held.signal()?.aborted).toBe(true);
       // Portainer answers a moment later, to nobody. Without the abort the
       // follow stream would stay open and its slot with it, and eight of those
       // refuse every log stream until Signal K restarts.
       held.answer();
       await waitFor('the stream slot to be freed', () => limiter.openCount === 0);
+      expect(limiter.openCount).toBe(0);
     } finally {
       await server.close();
     }
@@ -774,14 +881,17 @@ describe('facade log stream lifecycle', () => {
 
       // A container can say nothing for hours; the connection still has to look
       // alive to whatever proxy or NAT table sits in front of it.
-      await waitFor(
-        'keepalive frames',
-        () =>
-          received
-            .join('')
-            .split('\n\n')
-            .filter((block) => block === ':').length >= 2,
-      );
+      const comments = (): number =>
+        received
+          .join('')
+          .split('\n\n')
+          .filter((block) => block === ':').length;
+      await waitFor('keepalive frames', () => comments() >= 2);
+
+      expect(comments()).toBeGreaterThanOrEqual(2);
+      // And they are comment frames, which EventSource ignores, rather than
+      // events the browser would try to render.
+      expect(received.join('')).toContain('event: open');
 
       req.destroy();
     } finally {
@@ -825,6 +935,68 @@ describe('facade log stream lifecycle', () => {
       await server.close();
     }
   }, 20_000);
+
+  /**
+   * A chatty container over a slow link. `res.write()` returning false is the
+   * only signal that the socket cannot take more, and discarding it queued the
+   * whole difference in the Node heap — unbounded, because the stream ceiling
+   * counts streams and not the bytes each one holds. On a Raspberry Pi that is
+   * what OOM-kills Signal K.
+   */
+  const chattyStream = (lines: number) => {
+    const state = { produced: 0, finished: false };
+    const frames = async function* (): AsyncGenerator<LogFrame> {
+      try {
+        for (let line = 0; line < lines; line += 1) {
+          state.produced += 1;
+          yield { stream: 'stdout' as const, text: 'x'.repeat(16_000) };
+        }
+      } finally {
+        state.finished = true;
+      }
+    };
+    return {
+      state,
+      registry: {
+        defaultName: 'boat',
+        get: () => ({ docker: { logStream: async () => frames() } }),
+      } as unknown as InstanceRegistry,
+    };
+  };
+
+  it('stops reading the container while the browser is not reading', async () => {
+    const limiter = new StreamLimiter({ total: 1, perTarget: 1 });
+    const chatty = chattyStream(4_000);
+    const server = await serve(buildApp(chatty.registry, { streams: limiter }));
+
+    try {
+      const req = open(server.port);
+      const response = await new Promise<http.IncomingMessage>((resolve) => {
+        req.on('response', resolve);
+      });
+      // A browser that has stopped reading: the socket fills, and nothing
+      // drains it.
+      response.pause();
+
+      await waitFor('the stream to fill the socket', () => chatty.state.produced > 0);
+      await new Promise((resolve) => setTimeout(resolve, 300));
+
+      // Held to what the socket and the client's own buffer can hold — a few
+      // hundred of these lines — instead of racing through all four thousand
+      // and keeping the difference in the heap.
+      expect(chatty.state.finished).toBe(false);
+      expect(chatty.state.produced).toBeLessThan(1_000);
+
+      // And a client that leaves mid-write ends the loop promptly rather than
+      // leaving it waiting for a drain that will never come.
+      req.destroy();
+      await waitFor('the log stream to end', () => chatty.state.finished);
+      await waitFor('the permit to come back', () => limiter.openCount === 0);
+      expect(limiter.openCount).toBe(0);
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
 });
 
 describe('facade container lifecycle', () => {
@@ -836,6 +1008,7 @@ describe('facade container lifecycle', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const SELF_ID = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
@@ -976,16 +1149,79 @@ describe('facade container lifecycle', () => {
   });
 
   it('leaves other containers alone when self-protection is active', async () => {
+    const canonical = 'ffffffffffff0000000000000000000000000000000000000000000000000000';
     withEnvironment();
-    withInspect('ffffffffffff', 'ffffffffffff0000000000000000000000000000000000000000000000000000');
+    withInspect('ffffffffffff', canonical);
+    // The mutation goes to the id the guard resolved, not to the short
+    // reference the request used: only one interceptor is registered, so a
+    // second resolution by Docker would fail this test.
     boat()
-      .intercept({ path: '/api/endpoints/1/docker/containers/ffffffffffff/stop', method: 'POST' })
+      .intercept({ path: `/api/endpoints/1/docker/containers/${canonical}/stop`, method: 'POST' })
       .reply(204, '');
 
     const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
     const res = await request(app).post('/api/containers/ffffffffffff/stop');
 
     expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('acts on the id it resolved, not on the name it was given', async () => {
+    // Self-protection inspects the reference to find out what it means, and
+    // then used to hand Docker the raw reference anyway — a second resolution,
+    // at a later moment. A container recreated under the same name in between
+    // is a different container from the one the guard cleared.
+    const canonical = 'ffffffffffff0000000000000000000000000000000000000000000000000000';
+    withEnvironment();
+    withInspect('web', canonical);
+    boat()
+      .intercept({ path: `/api/endpoints/1/docker/containers/${canonical}/kill`, method: 'POST' })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const res = await request(app).post('/api/containers/web/kill');
+
+    expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('removes the container it resolved, not the reference it was given', async () => {
+    const canonical = 'ffffffffffff0000000000000000000000000000000000000000000000000000';
+    withEnvironment();
+    withInspect('web', canonical);
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/${canonical}?force=false&v=false`,
+        method: 'DELETE',
+      })
+      .reply(204, '');
+
+    const app = buildApp(new InstanceRegistry(config), {
+      self: selfContainer,
+      control: control({ allowDestructive: true }),
+    });
+    const res = await request(app).delete('/api/containers/web');
+
+    expect(res.status).toBe(200);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('refuses a mutation when the inspect says nothing about which container it is', async () => {
+    // Self-protection cannot tell a `200 {}` from "this is not Signal K", and
+    // guessing is the one outcome this guard exists to prevent — so it refuses
+    // rather than failing open against any proxy or agent that answers like
+    // that.
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/web/json', method: 'GET' })
+      .reply(200, {});
+
+    const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const res = await request(app).post('/api/containers/web/stop');
+
+    expect(res.status).toBe(403);
+    expect(res.body.error).toContain('did not say which container');
+    // Nothing was stopped: no interceptor for the mutation was ever needed.
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
@@ -1048,10 +1284,11 @@ describe('facade container lifecycle', () => {
   });
 
   it('logs each accepted mutation with what the reference resolved to', async () => {
+    const canonical = 'ffffffffffff0000000000000000000000000000000000000000000000000000';
     withEnvironment();
-    withInspect('web', 'ffffffffffff0000000000000000000000000000000000000000000000000000');
+    withInspect('web', canonical);
     boat()
-      .intercept({ path: '/api/endpoints/1/docker/containers/web/stop', method: 'POST' })
+      .intercept({ path: `/api/endpoints/1/docker/containers/${canonical}/stop`, method: 'POST' })
       .reply(204, '');
 
     const lines: string[] = [];
@@ -1153,6 +1390,20 @@ describe('facade container lifecycle', () => {
 });
 
 describe('facade control surface', () => {
+  // Its own agent: these routes ask nothing of Portainer, but building an
+  // InstanceRegistry without one leaves them on whatever dispatcher the run
+  // last installed — a closed one in file order, and real DNS in isolation.
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+    restoreGlobalDispatcher();
+  });
+
   it('reports what the UI may offer, and that protection is active', async () => {
     const res = await request(
       buildApp(new InstanceRegistry(config), {
@@ -1206,6 +1457,19 @@ describe('facade control surface', () => {
 });
 
 describe('facade error mapping', () => {
+  // Same reason as the describe above: no request leaves the process here, and
+  // nothing should be left able to.
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+    restoreGlobalDispatcher();
+  });
+
   const failingRegistry = (cause: unknown): InstanceRegistry =>
     ({
       get names(): string[] {
@@ -1236,6 +1500,63 @@ describe('facade error mapping', () => {
     expect(res.status).toBe(404);
     expect(res.body.portainerStatus).toBe(404);
     expect(res.body.hint).toContain('creation-order');
+  });
+
+  it('says the hint once, rather than in the error as well', async () => {
+    // PortainerError folds the hint into its message so one log line carries
+    // both; sending that message beside the hint made every error the panel
+    // shows say the same thing twice.
+    const registry = failingRegistry(
+      new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: '/api/endpoints',
+        message: 'not found',
+        hint: 'ids are creation-order',
+      }),
+    );
+    const res = await request(buildApp(registry)).get('/api/instances');
+
+    expect(res.body.error).toBe('not found');
+    expect(res.body.hint).toBe('ids are creation-order');
+  });
+
+  it('passes on what Portainer itself said about the failure', async () => {
+    // Without it the panel can only ever show this plugin's paraphrase —
+    // "failed with 400" — of something Portainer explained in words.
+    const lines: string[] = [];
+    const registry = failingRegistry(
+      new PortainerError({
+        status: 400,
+        method: 'POST',
+        path: '/api/stacks',
+        message: 'Portainer POST /api/stacks failed with 400',
+        body: '{"message":"invalid compose file: services must be a mapping"}',
+      }),
+    );
+    const res = await request(buildApp(registry, { log: (message) => lines.push(message) })).get(
+      '/api/instances',
+    );
+
+    expect(res.body.detail).toContain('services must be a mapping');
+    // And in the log line, which is where an operator looks next.
+    expect(lines.join('\n')).toContain('services must be a mapping');
+  });
+
+  it('redacts a refusal the way it redacts every other answer', async () => {
+    // These messages interpolate upstream data — a stack name, a container
+    // reference — and a refusal was the one answer that reached the browser
+    // unmasked.
+    const registry = failingRegistry(
+      new PolicyError(
+        'Refusing to delete stack ptr_abcdefghijklmnopqrstuvwxyz012345678901',
+        'enable "Allow destructive operations" for ptr_abcdefghijklmnopqrstuvwxyz012345678901',
+      ),
+    );
+    const res = await request(buildApp(registry)).get('/api/instances');
+
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).not.toContain('ptr_abcdefghijklmnopqrstuvwxyz012345678901');
   });
 
   it('maps an unexpected failure to 500', async () => {

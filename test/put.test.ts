@@ -5,12 +5,13 @@ import {
   replaceKnownContainers,
   type ActionHandler,
   type ActionResult,
+  type ContainerLookup,
   type KnownContainer,
 } from '../src/put';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const SELF_ID = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
@@ -30,6 +31,7 @@ const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  putContainers: [],
   watchdog: [],
   ...overrides,
 });
@@ -47,6 +49,7 @@ describe('PutHandlers', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const build = (
@@ -54,15 +57,21 @@ describe('PutHandlers', () => {
       control?: PluginConfig['control'];
       self?: SelfContainer;
       registry?: InstanceRegistry;
+      /** Stands in for the plugin having stopped between the guard and the call. */
+      noRegistry?: true;
       containers?: Record<string, { id: string; name?: string }>;
+      /** A lookup that can change between calls, as a poll makes it change. */
+      lookup?: ContainerLookup;
     } = {},
   ) =>
     new PutHandlers(
       {
-        registry: () => opts.registry ?? new InstanceRegistry(instances),
+        registry: () =>
+          opts.noRegistry ? undefined : (opts.registry ?? new InstanceRegistry(instances)),
         config: () =>
           ({
             instances: [],
+            problems: [],
             telemetry: {
               level: 'health' as const,
               intervalSeconds: 30,
@@ -75,10 +84,11 @@ describe('PutHandlers', () => {
         log: (message) => logs.push(message),
         register: (_context, path, handler) => registered.push({ path, handler }),
       },
-      (instance, key) =>
-        (opts.containers ?? { 'boat/influx': { id: 'c1f0e2a3b4c5', name: 'influx' } })[
-          `${instance}/${key}`
-        ],
+      opts.lookup ??
+        ((instance, key) =>
+          (opts.containers ?? { 'boat/influx': { id: 'c1f0e2a3b4c5', name: 'influx' } })[
+            `${instance}/${key}`
+          ]),
     );
 
   /** Drives one handler and resolves with its final result. */
@@ -98,6 +108,42 @@ describe('PutHandlers', () => {
       .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
       .reply(200, [fixtures.localEnvironment]);
 
+  describe('the PUT allowlist at write time', () => {
+    it('refuses a container dropped from the allowlist after its handler was given out', async () => {
+      // Registration is the real gate, but Signal K offers no way to withdraw
+      // a handler it has already been given, so a list narrowed afterwards has
+      // to hold at write time too. `live` is read on every call, which is how
+      // the plugin sees a saved configuration change.
+      const live = control();
+      const puts = build({ control: live });
+      puts.register('boat', ['influx'], 'system.docker');
+      expect(registered).toHaveLength(1);
+
+      live.putContainers = [{ instance: 'boat', container: 'mosquitto' }];
+
+      const result = await put(registered[0]!.handler, 'stopped');
+      expect(result.state).toBe('FAILED');
+      expect(result.statusCode).toBe(403);
+      expect(result.message).toContain('not in the list');
+    });
+
+    it('still writes when the allowlist names the container', async () => {
+      interceptEnvironment();
+      agent
+        .get('https://boat.test:9443')
+        .intercept({ path: '/api/endpoints/1/docker/containers/c1f0e2a3b4c5/stop', method: 'POST' })
+        .reply(204, '');
+
+      const puts = build({
+        control: control({ putContainers: [{ instance: 'boat', container: 'influx' }] }),
+      });
+      puts.register('boat', ['influx'], 'system.docker');
+
+      const result = await put(registered[0]!.handler, 'stopped');
+      expect(result.state).toBe('COMPLETED');
+    });
+  });
+
   describe('registration', () => {
     it('registers one handler per container key, on the state path', () => {
       build().register('boat', ['influx', 'ais_logger'], 'system.docker');
@@ -114,6 +160,48 @@ describe('PutHandlers', () => {
       puts.register('boat', ['influx'], 'system.docker');
 
       expect(registered).toHaveLength(1);
+    });
+
+    it('registers only the containers the allowlist names', () => {
+      build({
+        control: control({ putContainers: [{ instance: 'boat', container: 'influx' }] }),
+        containers: {
+          'boat/influx': { id: 'c1f0e2a3b4c5', name: 'influx' },
+          'boat/mosquitto': { id: 'd2e1f0a9b8c7', name: 'mosquitto' },
+        },
+      }).register('boat', ['influx', 'mosquitto'], 'system.docker');
+
+      expect(registered.map((entry) => entry.path)).toEqual([
+        'system.docker.boat.containers.influx.state',
+      ]);
+    });
+
+    it('registers every container when the allowlist is empty', () => {
+      build({
+        containers: {
+          'boat/influx': { id: 'c1f0e2a3b4c5', name: 'influx' },
+          'boat/mosquitto': { id: 'd2e1f0a9b8c7', name: 'mosquitto' },
+        },
+      }).register('boat', ['influx', 'mosquitto'], 'system.docker');
+
+      expect(registered).toHaveLength(2);
+    });
+
+    it('accepts a name or an id prefix in the allowlist, not just the key', () => {
+      build({
+        control: control({ putContainers: [{ instance: 'boat', container: 'c1f0e2' }] }),
+        containers: { 'boat/influx': { id: 'c1f0e2a3b4c5', name: 'influx' } },
+      }).register('boat', ['influx'], 'system.docker');
+
+      expect(registered).toHaveLength(1);
+    });
+
+    it('does not let an allowlist entry for one instance open another', () => {
+      build({
+        control: control({ putContainers: [{ instance: 'shore', container: 'influx' }] }),
+      }).register('boat', ['influx'], 'system.docker');
+
+      expect(registered).toEqual([]);
     });
 
     it('registers nothing when control is disabled', () => {
@@ -255,6 +343,33 @@ describe('PutHandlers', () => {
       const result = await put(handlerFor({ containers: {} }), 'stopped');
 
       expect(result).toMatchObject({ state: 'FAILED', statusCode: 404 });
+    });
+
+    it('reports a container that went away between the guard and the call', async () => {
+      // A poll refreshes the lookup table while a PUT is on its way, and the
+      // two lookups used to collapse into "The plugin is not running" — a
+      // statement about the plugin, for a plugin running perfectly well.
+      let lookups = 0;
+      const handler = handlerFor({
+        lookup: () => {
+          lookups += 1;
+          return lookups === 1 ? { id: 'c1f0e2a3b4c5', name: 'influx' } : undefined;
+        },
+      });
+
+      const result = await put(handler, 'stopped');
+
+      expect(result).toMatchObject({ state: 'FAILED', statusCode: 404 });
+      expect(result.message).toContain('No container is currently known for influx on boat');
+      expect(result.message).not.toContain('not running');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('says the plugin is not running only when it really is not', async () => {
+      const result = await put(handlerFor({ noRegistry: true }), 'stopped');
+
+      expect(result).toMatchObject({ state: 'FAILED', statusCode: 502 });
+      expect(result.message).toBe('The plugin is not running');
     });
 
     it('reports a Portainer failure rather than claiming success', async () => {

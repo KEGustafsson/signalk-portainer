@@ -2,6 +2,8 @@
  * @jest-environment jsdom
  */
 import { render, screen } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
+import { useEffect, type ReactElement } from 'react';
 import { PanelBoundary } from '../../src/webapp/PanelBoundary';
 
 describe('PanelBoundary', () => {
@@ -54,6 +56,38 @@ describe('PanelBoundary', () => {
 
     expect(screen.getByText('rows.map is not a function')).toBeInTheDocument();
     expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+  });
+
+  it('mounts the panel afresh when Try again is pressed', async () => {
+    // "Try again" has to be a new subtree — new state, and every read run
+    // again — rather than another render of the thing that threw. Keyed on the
+    // attempt, React is made to build one.
+    const user = userEvent.setup();
+    let mounts = 0;
+    let broken = true;
+    const Fragile = (): ReactElement => {
+      useEffect(() => {
+        mounts += 1;
+      }, []);
+      if (broken) throw new Error('rows.map is not a function');
+      return <p>the panel</p>;
+    };
+
+    render(
+      <PanelBoundary>
+        <Fragile />
+      </PanelBoundary>,
+    );
+    // The render that threw never committed, so nothing was ever mounted.
+    expect(mounts).toBe(0);
+    expect(screen.getByRole('button', { name: 'Try again' })).toBeInTheDocument();
+
+    broken = false;
+    await user.click(screen.getByRole('button', { name: 'Try again' }));
+
+    expect(mounts).toBe(1);
+    expect(screen.getByText('the panel')).toBeInTheDocument();
+    expect(screen.queryByText('The Portainer panel stopped')).toBeNull();
   });
 
   it('reports the failure where someone debugging would look', () => {

@@ -1,14 +1,17 @@
-import { LogDemuxer, looksMultiplexed, toLines } from '../src/logframes';
+import { LogDemuxer, looksMultiplexed, toLines, type LogFrame } from '../src/logframes';
 
-/** Builds one Docker log frame: 8-byte header then payload. */
-const frame = (stream: 1 | 2, text: string): Uint8Array => {
-  const payload = new TextEncoder().encode(text);
+/** One Docker log frame around arbitrary payload bytes: 8-byte header, then them. */
+const byteFrame = (stream: 1 | 2, payload: ArrayLike<number>): Uint8Array => {
   const bytes = new Uint8Array(8 + payload.length);
   bytes[0] = stream;
   new DataView(bytes.buffer).setUint32(4, payload.length, false);
   bytes.set(payload, 8);
   return bytes;
 };
+
+/** Builds one Docker log frame around text. */
+const frame = (stream: 1 | 2, text: string): Uint8Array =>
+  byteFrame(stream, new TextEncoder().encode(text));
 
 const raw = (text: string): Uint8Array => new TextEncoder().encode(text);
 
@@ -119,6 +122,66 @@ describe('LogDemuxer', () => {
     expect(frames).toEqual([{ stream: 'stdout', text: 'räksmörgås' }]);
   });
 
+  it('keeps a character that Docker split across two frames', () => {
+    // Docker's log copier cuts a message at its read buffer without regard for
+    // UTF-8 boundaries, so the two bytes of 'ä' arrive in separate frames of
+    // the same stream. Decoding each frame on its own yields two replacement
+    // characters and the operator sees mojibake in an otherwise fine log.
+    const demuxer = new LogDemuxer();
+
+    const first = demuxer.push(byteFrame(1, [0xc3]));
+    const second = demuxer.push(byteFrame(1, [0xa4]));
+
+    expect(first).toEqual([]);
+    expect(second).toEqual([{ stream: 'stdout', text: 'ä' }]);
+  });
+
+  it('keeps stdout and stderr from decoding each other’s half characters', () => {
+    // Interleaved streams: the stderr frame between the two halves of the
+    // stdout character must not consume them.
+    const demuxer = new LogDemuxer();
+
+    const frames = [
+      ...demuxer.push(byteFrame(1, [0xc3])),
+      ...demuxer.push(frame(2, 'warning\n')),
+      ...demuxer.push(byteFrame(1, [0xa4])),
+    ];
+
+    expect(frames).toEqual([
+      { stream: 'stderr', text: 'warning\n' },
+      { stream: 'stdout', text: 'ä' },
+    ]);
+  });
+
+  it('ends the stream rather than buffering a frame length it cannot believe', () => {
+    // Only the first eight bytes are ever checked for framing; after that a
+    // corrupt length is taken on trust, and the demuxer holds every chunk that
+    // follows waiting for a frame that never completes.
+    const demuxer = new LogDemuxer();
+    const corrupt = new Uint8Array([2, 0, 0, 0, 0xff, 0xff, 0xff, 0xff]);
+
+    expect(() => demuxer.push(corrupt)).toThrow(/out of sync/);
+    // And the bytes went with it: nothing is held back for a stream that has
+    // already been declared unreadable.
+    expect(demuxer.flush()).toEqual([]);
+  });
+
+  it('reassembles a large frame delivered in many small reads', () => {
+    // 1 MiB in 16 KiB pieces, which is what a container writing a stack trace
+    // looks like on the wire. Concatenating the whole pending buffer per push
+    // makes this quadratic; the frames themselves must still come out whole.
+    const line = 'x'.repeat(1024 * 1024);
+    const whole = frame(1, line);
+    const demuxer = new LogDemuxer();
+
+    const frames: LogFrame[] = [];
+    for (let at = 0; at < whole.length; at += 16 * 1024) {
+      frames.push(...demuxer.push(whole.subarray(at, at + 16 * 1024)));
+    }
+
+    expect(frames).toEqual([{ stream: 'stdout', text: line }]);
+  });
+
   describe('flush', () => {
     it('emits a truncated frame rather than losing the last line', () => {
       // A container killed mid-write still wrote something.
@@ -153,6 +216,27 @@ describe('LogDemuxer', () => {
 
       // Already emitted on push; nothing is held back for a raw stream.
       expect(demuxer.flush()).toEqual([]);
+    });
+
+    it('emits a TTY log shorter than a frame header', () => {
+      // Mode detection holds the first bytes back until eight arrive, so a
+      // container whose whole log is three bytes is still undecided at the
+      // end. Deciding "multiplexed" there discarded the log as framing and the
+      // panel showed an empty pane for a container that had printed something.
+      const demuxer = new LogDemuxer();
+
+      expect(demuxer.push(raw('hi\n'))).toEqual([]);
+      expect(demuxer.flush()).toEqual([{ stream: 'stdout', text: 'hi\n' }]);
+    });
+
+    it('does not lose the bytes a decoder is still holding', () => {
+      // The stream ended in the middle of a character. The bytes are not text
+      // and never will be, but dropping them silently loses the fact that
+      // something was there.
+      const demuxer = new LogDemuxer();
+      demuxer.push(byteFrame(1, [0xc3]));
+
+      expect(demuxer.flush()).toEqual([{ stream: 'stdout', text: '�' }]);
     });
 
     it('says nothing when there is nothing left', () => {

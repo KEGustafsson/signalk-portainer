@@ -80,16 +80,29 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     );
   };
 
+  /**
+   * Instances that were configured but could not be used.
+   *
+   * Carried into every status line rather than reported once. An instance that
+   * failed validation is dropped so the working ones still start, and the only
+   * thing left that can say a Portainer is missing is the status the operator
+   * reads — a single line at start() would be overwritten by the first health
+   * report a second later.
+   */
+  let configProblems: string[] = [];
+  const withProblems = (message: string): string =>
+    configProblems.length === 0 ? message : `${message} — ${configProblems.join('; ')}`;
+
   // Redaction happens once, here, so no host callback can ever receive a raw
   // message: setPluginStatus/setPluginError persist their text in the server.
   const setStatus = (message: string): void => {
-    const safe = redactText(message);
+    const safe = redactText(withProblems(message));
     app.setPluginStatus(safe);
     app.debug(safe);
   };
 
   const setError = (message: string): void => {
-    const safe = redactText(message);
+    const safe = redactText(withProblems(message));
     app.setPluginError(safe);
     app.error(safe);
   };
@@ -107,6 +120,10 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    * seconds would fill the server log with the same line, and an operator
    * learns to ignore a channel that repeats itself.
    */
+  // Cleared by both start() and stop(): a summary left over from the last run
+  // makes the "only on a change" check above swallow the first poll that
+  // agrees with it, so an error status raised while Portainer was briefly down
+  // would stand for as long as the plugin runs.
   let lastHealth: string | undefined;
   const reportPolledHealth = (instances: InstanceHealth[]): void => {
     const down = instances.filter((instance) => !instance.reachable);
@@ -193,6 +210,37 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     log(`environment for instance "${instance}" saved as ${environmentId}`);
   };
 
+  /**
+   * Undoes everything start() may have set running.
+   *
+   * Shared with start()'s own failure path, which used to clear the variables
+   * without closing the registry — orphaning an undici Agent per TLS-configured
+   * instance — and left the console endpoint, its tickets and its sessions
+   * live whenever something after openConsole() threw, one more registered
+   * WebSocket endpoint per enable/disable cycle.
+   */
+  const shutdown = (): void => {
+    // Before the registry closes: stopping clears the published paths, and
+    // that clearing delta has to go out while the plugin still can send it.
+    poller?.stop();
+    poller = undefined;
+    seen = new Map();
+    // Every open shell ends with the plugin, and every unredeemed ticket
+    // stops being one.
+    // Before the registry closes: an open stream holds a client from it.
+    facade?.shutdown();
+    consoleServer?.close();
+    consoleServer = undefined;
+    tickets?.clear();
+    tickets = undefined;
+    sessions?.clear();
+    sessions = undefined;
+    registry?.close();
+    registry = undefined;
+    config = undefined;
+    lastHealth = undefined;
+  };
+
   return {
     id: PLUGIN_ID,
     name: 'Portainer',
@@ -204,8 +252,17 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
 
     start(options: object, _restart: (newConfiguration: object) => void): void {
       try {
+        // A status from the previous run says nothing about this one, and a
+        // stale summary here is what makes the first healthy poll report
+        // nothing at all.
+        lastHealth = undefined;
+        configProblems = [];
         rawOptions = options as RawConfig | undefined;
         config = normalizeConfig(options as RawConfig | undefined);
+        // Reported through every status line from here on: an instance that
+        // was dropped is invisible otherwise, and the operator's second
+        // Portainer would simply never appear.
+        configProblems = config.problems;
         registry = new InstanceRegistry(config.instances, log);
         if (self.inContainer && !self.identified) {
           log(
@@ -297,34 +354,16 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
           poller.start();
         }
       } catch (cause) {
-        poller?.stop();
-        poller = undefined;
-        registry = undefined;
-        config = undefined;
+        // Symmetric with stop(): a half-started plugin holds the same things a
+        // running one does.
+        shutdown();
         if (cause instanceof ConfigError) setError(cause.message);
         else setError(`Failed to start: ${cause instanceof Error ? cause.message : String(cause)}`);
       }
     },
 
     stop(): void {
-      // Before the registry closes: stopping clears the published paths, and
-      // that clearing delta has to go out while the plugin still can send it.
-      poller?.stop();
-      poller = undefined;
-      seen = new Map();
-      // Every open shell ends with the plugin, and every unredeemed ticket
-      // stops being one.
-      // Before the registry closes: an open stream holds a client from it.
-      facade?.shutdown();
-      consoleServer?.close();
-      consoleServer = undefined;
-      tickets?.clear();
-      tickets = undefined;
-      sessions?.clear();
-      sessions = undefined;
-      registry?.close();
-      registry = undefined;
-      config = undefined;
+      shutdown();
       setStatus('Stopped');
     },
 

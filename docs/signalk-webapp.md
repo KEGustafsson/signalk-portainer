@@ -3,24 +3,24 @@
 Notes gathered while building the M1b panel. Source:
 [`SignalK/signalk-server` `docs/develop/webapps.md`](https://github.com/SignalK/signalk-server/blob/master/docs/develop/webapps.md).
 
-The upstream doc carries its own caveat — *"the documentation regarding embedded
+The upstream doc carries its own caveat — _"the documentation regarding embedded
 WebApps and Components ... is rudimentary and should be considered under
-development as the concept is evolving"* — so treat this as a snapshot and
+development as the concept is evolving"_ — so treat this as a snapshot and
 re-check it against the shared `plugin-ci` workflow, which validates the parts
 that matter.
 
 ## 1. Keywords
 
-| Keyword | Meaning |
-| --- | --- |
-| `signalk-webapp` | standalone webapp, served on its own route |
+| Keyword                     | Meaning                                                       |
+| --------------------------- | ------------------------------------------------------------- |
+| `signalk-webapp`            | standalone webapp, served on its own route                    |
 | `signalk-embeddable-webapp` | a panel embedded in the admin UI — **what this plugin ships** |
 
-A third case looks like a contradiction but is not: a package providing *only*
+A third case looks like a contradiction but is not: a package providing _only_
 embedded components — no webapp of its own — also uses `signalk-webapp`, because
-upstream defines no keyword for that case. Quoting the source: *"There is no
+upstream defines no keyword for that case. Quoting the source: _"There is no
 keyword for a module that provides only embedded components, use
-`signalk-webapp` instead."* Neither applies here: this package is a plugin that
+`signalk-webapp` instead."_ Neither applies here: this package is a plugin that
 ships an embeddable panel, so it uses `signalk-embeddable-webapp`.
 
 ## 2. Mechanism: Module Federation
@@ -29,11 +29,11 @@ Panels are loaded with [Module Federation](https://module-federation.io/) and
 `React.lazy`. The exposed module names are **fixed** — the server looks for
 these exact strings:
 
-| Exposed name | Purpose |
-| --- | --- |
-| `./AppPanel` | embeddable webapp panel — **ours** |
+| Exposed name                 | Purpose                            |
+| ---------------------------- | ---------------------------------- |
+| `./AppPanel`                 | embeddable webapp panel — **ours** |
 | `./PluginConfigurationPanel` | a custom plugin configuration form |
-| `./AddonPanel` | an embedded component |
+| `./AddonPanel`               | an embedded component              |
 
 Each exposed module must `export default` a React component.
 
@@ -68,8 +68,17 @@ React a singleton makes webpack's federation runtime use the host's share scope:
 shared: {
   react: { singleton: true, requiredVersion: '^19' },
   'react-dom': { singleton: true, requiredVersion: '^19' },
+  'react/jsx-runtime': { singleton: true, requiredVersion: '^19' },
 }
 ```
+
+`react/jsx-runtime` is not optional. Module Federation matches share keys by the
+exact request, so sharing `react` does not cover it, and the automatic JSX
+runtime every modern build uses imports it on every file with JSX. Leave it out
+and the panel builds its elements with its own bundled React while its
+components run on the host's — which works only for as long as the two agree on
+the element symbol. React 19 renamed it, so a host on React 18 rejects every
+element the panel produces.
 
 ESM bundlers instead alias `react` to shims re-exporting `window.__SK_REACT__`
 and friends. Not applicable here.

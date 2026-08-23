@@ -99,64 +99,77 @@ export class DeltaPoller {
 
     this.polling = true;
     try {
-      // Instances are polled together: a shore Portainer behind a slow link
-      // must not delay the boat's own containers by its whole timeout.
-      const snapshots = await Promise.all(
-        registry.names.map(async (name) => ({
-          name,
-          snapshot: await this.snapshot(registry, name),
-        })),
-      );
-      if (this.stopped) return;
-
-      // Reported here rather than after publishing. Reachability is the one
-      // thing this poll definitely learned, and everything below it can throw
-      // — so leaving it to the end would let a delta-building failure freeze
-      // the plugin status on a Portainer state that is no longer true. Its own
-      // try, so a listener that throws cannot stop the telemetry either.
-      try {
-        this.deps.onHealth?.(
-          snapshots.map(({ name, snapshot }) => ({
+      // Each instance is published the moment its own snapshot settles, not
+      // when the slowest one does. Waiting for them all meant a shore
+      // Portainer at the 120s timeout ceiling held the boat's own containers
+      // for two minutes on a 30s interval — and the watchdog alarm that
+      // follows them with it, which is exactly what the watchdog exists to
+      // prevent.
+      const health = await Promise.all(
+        registry.names.map(async (name) => {
+          const snapshot = await this.snapshot(registry, name);
+          if (!this.stopped) this.publishInstance(name, snapshot);
+          return {
             name,
             reachable: snapshot.reachable,
             ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
-          })),
-        );
+          };
+        }),
+      );
+      if (this.stopped) return;
+
+      // Reported once the whole poll has settled, because it is a statement
+      // about the instances together: "1/2 reachable" cannot be assembled from
+      // one instance at a time. Its own try, so a listener that throws cannot
+      // stop the next poll either.
+      try {
+        this.deps.onHealth?.(health);
       } catch (cause) {
         this.deps.log(
           `reporting health failed: ${cause instanceof Error ? cause.message : String(cause)}`,
         );
       }
-
-      const values: PathValue[] = [];
-      const meta: MetaValue[] = [];
-      const notifications: Notification[] = [];
-
-      for (const { name, snapshot } of snapshots) {
-        const built = this.builderFor(name).build(snapshot);
-        values.push(...built.values);
-        meta.push(...built.meta);
-
-        if (this.deps.watchdog) {
-          notifications.push(...this.deps.watchdog.evaluate(name, snapshot));
-        }
-        if (this.deps.onKeys && snapshot.reachable) {
-          this.deps.onKeys(name, ...describeKeys(snapshot));
-        }
-      }
-
-      if (values.length > 0 || meta.length > 0) this.deps.publish(values, meta);
-      if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
     } catch (cause) {
       // A poll must never be worse than a poll that reports "unreachable".
-      // `snapshot()` already contains network failures; this catches everything
-      // after it — key assignment, delta building, the watchdog, and the
-      // publish into Signal K itself. Without it a rejection here is unhandled,
-      // and Node ends the whole Signal K process: a container list the plugin
-      // did not expect would take the boat's navigation data down with it.
+      // `snapshot()` already contains network failures and `publishInstance`
+      // its own; this is the backstop for everything else, because an
+      // unhandled rejection here ends the whole Signal K process rather than
+      // the poll.
       this.deps.log(`poll failed: ${cause instanceof Error ? cause.message : String(cause)}`);
     } finally {
       this.polling = false;
+    }
+  }
+
+  /**
+   * One instance's snapshot, turned into deltas, alarms and PUT paths.
+   *
+   * Contained in its own try: a container list one instance answered with
+   * something unexpected must not stop the instance beside it from publishing,
+   * and must not stop the health report at the end of the poll either.
+   */
+  private publishInstance(name: string, snapshot: InstanceSnapshot): void {
+    try {
+      const built = this.builderFor(name).build(snapshot);
+      if (built.values.length > 0 || built.meta.length > 0) {
+        this.deps.publish(built.values, built.meta);
+      }
+
+      if (this.deps.watchdog) {
+        const notifications = this.deps.watchdog.evaluate(name, snapshot);
+        if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
+      }
+      if (this.deps.onKeys && snapshot.reachable) {
+        this.deps.onKeys(name, ...describeKeys(snapshot));
+      }
+    } catch (cause) {
+      // Key assignment, delta building, the watchdog and the publish into
+      // Signal K itself all run here, and any of them can throw on a container
+      // list the plugin did not expect. Contained per instance so that one
+      // instance's surprise cannot silence the instance beside it.
+      this.deps.log(
+        `publishing instance ${name} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
     }
   }
 

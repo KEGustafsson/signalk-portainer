@@ -4,15 +4,21 @@ import type { MockAgent } from 'undici';
 import plugin from '../src/index';
 import type { SignalKApp } from '../src/signalk';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
   const statuses: string[] = [];
   const errors: string[] = [];
+  /**
+   * Only what reached `setPluginError`, which is the red line the operator
+   * sees. `errors` above also collects `app.error`, so every report lands in
+   * it twice and cannot be counted.
+   */
+  const pluginErrors: string[] = [];
   const debug: string[] = [];
   const deltas: unknown[] = [];
   const puts: { context: string; path: string; handler: unknown }[] = [];
-  const sockets: { path: string; close: () => void }[] = [];
+  const sockets: { path: string; closed: boolean }[] = [];
   /** Every options object the plugin asked the server to persist. */
   const saved: object[] = [];
   const debugFn = Object.assign((message: unknown) => debug.push(String(message)), {
@@ -22,7 +28,10 @@ const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
     debug: debugFn,
     error: (message: string) => errors.push(message),
     setPluginStatus: (message: string) => statuses.push(message),
-    setPluginError: (message: string) => errors.push(message),
+    setPluginError: (message: string) => {
+      pluginErrors.push(message);
+      errors.push(message);
+    },
     handleMessage: (_id: string, message: unknown) => {
       deltas.push(message);
     },
@@ -45,16 +54,22 @@ const createApp = (opts: { saveFails?: boolean; canSave?: boolean } = {}) => {
           },
         }),
     registerWebSocket: (path: string) => {
+      // `closed` is recorded because a socket endpoint that outlives the start
+      // which registered it is the leak worth catching: one more of them per
+      // enable/disable cycle, for the life of the server.
+      const record = { path, closed: false };
       const endpoint = {
         on: () => endpoint,
         clients: new Set(),
-        close: () => undefined,
+        close: () => {
+          record.closed = true;
+        },
       };
-      sockets.push({ path, close: endpoint.close });
+      sockets.push(record);
       return endpoint as unknown as ReturnType<NonNullable<SignalKApp['registerWebSocket']>>;
     },
   } as SignalKApp;
-  return { app, statuses, errors, debug, deltas, puts, sockets, saved };
+  return { app, statuses, errors, pluginErrors, debug, deltas, puts, sockets, saved };
 };
 
 const noopRestart = (): void => {};
@@ -74,6 +89,7 @@ describe('plugin lifecycle', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('exposes the Signal K plugin contract', () => {
@@ -364,7 +380,16 @@ describe('plugin lifecycle', () => {
       .reply(200, fixtures.systemStatus)
       .persist();
 
-    const { app, deltas } = createApp();
+    // The container list is served, because the poll does happen: PUT control
+    // defaults to on, and its paths are discovered from the poll. What 'off'
+    // turns off is the publishing.
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, deltas, puts } = createApp();
     const instance = plugin(app);
 
     instance.start({ ...validOptions, telemetry: { level: 'off' } }, noopRestart);
@@ -372,7 +397,9 @@ describe('plugin lifecycle', () => {
     await flush();
     await flush();
 
-    // No container list was even requested: the poller is not constructed.
+    // Polled — the PUT paths are registered from what it found — and not one
+    // value published.
+    expect(puts.length).toBeGreaterThan(0);
     expect(deltas).toHaveLength(0);
     instance.stop();
   });
@@ -516,6 +543,124 @@ describe('plugin lifecycle', () => {
     expect(statuses.at(-1)).toBe('Stopped');
   });
 
+  /**
+   * The status line is the operator's only view of reachability, and a summary
+   * carried over from the previous run is what makes it stop reflecting
+   * reality: the first poll that agrees with it is swallowed, and whatever was
+   * reported in between stands for as long as the plugin runs.
+   */
+  it('reports the first poll of a new run, even when it says what the last one did', async () => {
+    const pool = agent.get('https://boat.test:9443');
+    // Reachable, so the health probe start() fires reports "Connected" on both
+    // runs — and the container list is what fails, identically each time.
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(500, { message: 'docker is not answering' })
+      .persist();
+
+    const { app, pluginErrors } = createApp();
+    const instance = plugin(app);
+
+    instance.start(validOptions, noopRestart);
+    for (let turn = 0; turn < 4; turn += 1) await flush();
+    instance.stop();
+
+    instance.start(validOptions, noopRestart);
+    for (let turn = 0; turn < 4; turn += 1) await flush();
+
+    // Once per run. The second run used to report nothing at all, leaving the
+    // status on the "Connected" its own start probe had just written.
+    const reported = pluginErrors.filter((line) => /No Portainer instance reachable/.test(line));
+    expect(reported).toHaveLength(2);
+    instance.stop();
+  });
+
+  it('says which instance it had to drop, and runs on the rest', async () => {
+    // The admin UI writes the schema's defaults the moment "+" is pressed, so
+    // a half-filled second Portainer is saved beside a working one. That used
+    // to leave the boat with no telemetry, no watchdog and no PUT control at
+    // all.
+    const pool = agent.get('https://boat.test:9443');
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment])
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+      .reply(200, fixtures.standaloneInfo)
+      .persist();
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(200, fixtures.systemStatus)
+      .persist();
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/json?all=true', method: 'GET' })
+      .reply(200, fixtures.containers)
+      .persist();
+
+    const { app, statuses, errors, puts, deltas } = createApp();
+    const instance = plugin(app);
+
+    instance.start(
+      {
+        instances: [
+          { name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' },
+          { name: 'local', enabled: true, url: '' },
+        ],
+        telemetry: { level: 'full' },
+      },
+      noopRestart,
+    );
+    await flush();
+    await flush();
+    await flush();
+
+    expect(puts.length).toBeGreaterThan(0);
+    expect(deltas.length).toBeGreaterThan(0);
+    // And the operator is told, in every status line, which one is missing.
+    expect([...statuses, ...errors].join(' ')).toMatch(/has no address/);
+    instance.stop();
+  });
+
+  it('undoes the whole of a start that failed half way through', async () => {
+    // A start that threw after the console was opened used to clear its
+    // variables and nothing else: the registry was never closed — orphaning an
+    // undici Agent for every TLS-configured instance — and the WebSocket
+    // endpoint stayed registered, one more per enable/disable cycle.
+    const { app, sockets, errors } = createApp();
+    // Stands in for anything that can fail between openConsole() and the end
+    // of start(); the plugin reads this property there.
+    Object.defineProperty(app, 'registerPutHandler', {
+      get(): never {
+        throw new Error('the server refused to hand over its PUT registration');
+      },
+    });
+    const instance = plugin(app);
+
+    instance.start(validOptions, noopRestart);
+    await flush();
+
+    expect(errors.join(' ')).toContain('the server refused');
+    // The console endpoint that opened a moment earlier was closed with it,
+    // rather than left registered for the life of the server.
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.closed).toBe(true);
+    // And stopping afterwards is a no-op rather than a second teardown.
+    expect(() => instance.stop()).not.toThrow();
+  });
+
   it('never writes a credential to the debug log', () => {
     const { app, debug } = createApp();
     const instance = plugin(app);
@@ -527,7 +672,22 @@ describe('plugin lifecycle', () => {
 });
 
 describe('the console endpoint', () => {
-  it('is registered when the server can serve a WebSocket', () => {
+  // Its own agent, even though these tests ask nothing of Portainer: start()
+  // fires a health probe, and without a MockAgent that probe reaches whatever
+  // dispatcher the run left installed — a closed one in file order, and real
+  // DNS in isolation.
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+    restoreGlobalDispatcher();
+  });
+
+  it('is registered when the server can serve a WebSocket, and closed on stop', () => {
     const { app, sockets } = createApp();
     const instance = plugin(app);
 
@@ -535,6 +695,7 @@ describe('the console endpoint', () => {
 
     expect(sockets.map((socket) => socket.path)).toEqual(['/console']);
     instance.stop();
+    expect(sockets[0]?.closed).toBe(true);
   });
 
   it('is absent, with a reason, on a server that cannot', () => {
@@ -576,6 +737,7 @@ describe('saving the environment the panel picked', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const twoEnvironments = (times = 1): void => {

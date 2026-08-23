@@ -22,8 +22,16 @@ export class PortainerError extends Error {
     message: string;
     hint?: string;
     body?: string;
+    /** The transport failure this wraps, kept so `err.code` and its stack survive. */
+    cause?: unknown;
   }) {
-    super(opts.hint ? `${opts.message} — ${opts.hint}` : opts.message);
+    // The cause is passed only when there is one: `{ cause: undefined }` still
+    // creates the property, which makes a constructed error look like a wrapped
+    // one to anything walking the chain.
+    super(
+      opts.hint ? `${opts.message} — ${opts.hint}` : opts.message,
+      opts.cause === undefined ? undefined : { cause: opts.cause },
+    );
     this.name = 'PortainerError';
     this.status = opts.status;
     this.method = opts.method;
@@ -36,6 +44,11 @@ export class PortainerError extends Error {
   get facadeStatus(): number {
     if (this.status === 0) return 502;
     if (this.status === 401 || this.status === 403) return 502;
+    // A 304 must never leave here: the browser treats it as "use your cache"
+    // and drops the body, so a JSON error payload sent with it is invisible.
+    // The lifecycle callers already claim Docker's 304 as success, so one
+    // reaching this point is a bug rather than a state the operator caused.
+    if (this.status === 304) return 500;
     return this.status;
   }
 
@@ -70,11 +83,16 @@ export class PortainerError extends Error {
     } catch {
       body = undefined;
     }
+    // Portainer's own sentence is the only text that says what went wrong — "a
+    // stack with the name nav already exists", "yaml: line 5: did not find
+    // expected key" — so it goes into the message rather than staying in a
+    // field nothing reads.
+    const detail = upstreamDetail(body);
     return new PortainerError({
       status: res.status,
       method,
       path,
-      message: `Portainer ${method} ${path} failed with ${res.status}`,
+      message: `Portainer ${method} ${path} failed with ${res.status}${detail ? `: ${detail}` : ''}`,
       hint: PortainerError.hintFor(res.status, authMode),
       body,
     });
@@ -86,30 +104,146 @@ export class PortainerError extends Error {
     path: string,
     baseUrl: string,
   ): PortainerError {
-    const detail = cause instanceof Error ? cause.message : String(cause);
+    const detail = redactText(cause instanceof Error ? cause.message : String(cause));
+    const code = causeCode(cause);
+    const tls = code ? TLS_HINTS[code] : undefined;
+    const transport = code ? TRANSPORT_HINTS[code] : undefined;
+
+    let hint: string;
+    switch (abortKind(cause)) {
+      case 'deadline':
+        hint = `no response from ${baseUrl} before the configured timeout`;
+        break;
+      case 'abort':
+        // A caller-initiated abort, not a deadline: a closed log stream or a
+        // shutdown. Telling the operator their Portainer is slow would send
+        // them looking for a fault that is not there.
+        hint = `the request to ${baseUrl} was cancelled before it finished`;
+        break;
+      default:
+        hint = tls
+          ? `${tls} (${detail})`
+          : transport
+            ? `${transport} — ${baseUrl} (${detail})`
+            : `check host, port and protocol for ${baseUrl}; for a self-signed certificate supply its CA or clear rejectUnauthorized (${detail})`;
+    }
+
     return new PortainerError({
       status: 0,
       method,
       path,
       message: `Portainer ${method} ${path} could not be reached`,
-      hint: isTimeoutCause(cause)
-        ? `no response from ${baseUrl} before the configured timeout`
-        : `check host, port and protocol for ${baseUrl}; for a self-signed certificate supply its CA or clear rejectUnauthorized (${redactText(detail)})`,
+      hint,
+      cause,
     });
   }
 }
 
+/** How long a quoted upstream sentence may be before it stops being a hint. */
+const MAX_DETAIL = 200;
+
 /**
- * `AbortSignal.timeout()` surfaces as a TimeoutError, but fetch wraps it in a
- * generic "fetch failed" TypeError — so the name has to be read from the cause
- * chain, not from the outermost message, or a timeout gets the TLS hint.
+ * Portainer's explanation, dug out of the error body it answered with.
+ *
+ * Portainer answers `{"message":"…","details":"…"}` and the Docker proxy passes
+ * `{"message":"…"}` through; anything else is left alone. An HTML page comes
+ * from a reverse proxy in front of Portainer rather than from Portainer, and a
+ * body that does not parse was truncated at 500 characters, so neither is
+ * quoted back at the operator as if it were an answer.
  */
-function isTimeoutCause(cause: unknown, depth = 0): boolean {
-  if (depth > 5 || !(cause instanceof Error)) return false;
-  if (cause.name === 'TimeoutError' || cause.name === 'AbortError') return true;
-  const message = cause.message.toLowerCase();
-  if (message.includes('timeout') || message.includes('aborted')) return true;
-  return isTimeoutCause((cause as { cause?: unknown }).cause, depth + 1);
+function upstreamDetail(body: string | undefined): string | undefined {
+  const text = body?.trim();
+  if (!text) return undefined;
+
+  let candidate = text;
+  if (text.startsWith('{')) {
+    let parsed: { message?: unknown; details?: unknown };
+    try {
+      parsed = JSON.parse(text) as { message?: unknown; details?: unknown };
+    } catch {
+      return undefined;
+    }
+    // Portainer repeats the same sentence in both fields as often as not.
+    const fields = [...new Set([parsed.message, parsed.details])].filter(
+      (value): value is string => typeof value === 'string' && value.trim().length > 0,
+    );
+    if (fields.length === 0) return undefined;
+    candidate = fields.map((field) => field.trim()).join(': ');
+  } else if (text.startsWith('<')) {
+    return undefined;
+  }
+
+  return candidate.length > MAX_DETAIL ? `${candidate.slice(0, MAX_DETAIL)}…` : candidate;
+}
+
+/**
+ * Socket-level failures, by the code Node reports, and what each one means for
+ * the operator.
+ *
+ * Split from the certificate failures deliberately: a host name with a typo in
+ * it used to be answered with advice about supplying a CA certificate, which
+ * sends the operator to a setting that has nothing to do with the fault.
+ */
+const TRANSPORT_HINTS: Readonly<Record<string, string>> = {
+  ECONNREFUSED: 'nothing is listening on that port — check the port, and that Portainer is running',
+  ENOTFOUND: 'the host name does not resolve — check it for a typo',
+  EAI_AGAIN: 'the host name could not be resolved right now — the DNS server did not answer',
+  EHOSTUNREACH: 'no route to that host from here',
+  ENETUNREACH: 'no route to that network from here',
+  ECONNRESET:
+    'the connection was closed before an answer arrived — an https URL against a plain-http port does this',
+  EPIPE: 'the connection was closed while the request was still being sent',
+};
+
+/** Where supplying a CA, or a servername, is the fix. */
+const CA_HINT =
+  'the certificate could not be verified — supply its CA, or clear rejectUnauthorized for a self-signed one';
+
+const TLS_HINTS: Readonly<Record<string, string>> = {
+  UNABLE_TO_VERIFY_LEAF_SIGNATURE: CA_HINT,
+  DEPTH_ZERO_SELF_SIGNED_CERT: CA_HINT,
+  SELF_SIGNED_CERT_IN_CHAIN: CA_HINT,
+  UNABLE_TO_GET_ISSUER_CERT_LOCALLY: CA_HINT,
+  CERT_HAS_EXPIRED: 'the certificate has expired — renew it, or check this host’s clock',
+  ERR_TLS_CERT_ALTNAME_INVALID:
+    'the certificate was not issued for that host name — set servername to the name it carries',
+};
+
+/** The first `code` on the cause chain; fetch wraps the real failure twice. */
+function causeCode(cause: unknown, depth = 0): string | undefined {
+  if (depth > 5 || !(cause instanceof Error)) return undefined;
+  const code = (cause as { code?: unknown }).code;
+  if (typeof code === 'string') return code;
+  return causeCode((cause as { cause?: unknown }).cause, depth + 1);
+}
+
+/** Deadline codes undici raises for its own read and connect budgets. */
+const DEADLINE_CODES = new Set([
+  'UND_ERR_HEADERS_TIMEOUT',
+  'UND_ERR_BODY_TIMEOUT',
+  'UND_ERR_CONNECT_TIMEOUT',
+  'ETIMEDOUT',
+]);
+
+/**
+ * Why the request ended, when it ended before an answer.
+ *
+ * `AbortSignal.timeout()` surfaces as a TimeoutError and a caller's abort as an
+ * AbortError, but fetch wraps both in a generic "fetch failed" TypeError — so
+ * the name has to be read from the cause chain, not the outermost message.
+ * Names and codes only: matching the word "timeout" in message text reports
+ * every failure against a host named `timeouts.lan` as a timeout.
+ */
+function abortKind(cause: unknown, depth = 0): 'deadline' | 'abort' | undefined {
+  if (depth > 5 || !(cause instanceof Error)) return undefined;
+  const code = (cause as { code?: unknown }).code;
+  if (cause.name === 'TimeoutError' || (typeof code === 'string' && DEADLINE_CODES.has(code))) {
+    return 'deadline';
+  }
+  if (cause.name === 'AbortError' || code === 'ABORT_ERR' || code === 'UND_ERR_ABORTED') {
+    return 'abort';
+  }
+  return abortKind((cause as { cause?: unknown }).cause, depth + 1);
 }
 
 /**

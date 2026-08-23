@@ -1,4 +1,4 @@
-import { Component, type ErrorInfo, type ReactNode } from 'react';
+import { Component, Fragment, type ErrorInfo, type ReactNode } from 'react';
 
 /**
  * Keeps a failure inside the panel.
@@ -12,11 +12,11 @@ import { Component, type ErrorInfo, type ReactNode } from 'react';
  */
 export class PanelBoundary extends Component<
   { children: ReactNode },
-  { failed: Error | undefined }
+  { failed: Error | undefined; attempt: number }
 > {
   constructor(props: { children: ReactNode }) {
     super(props);
-    this.state = { failed: undefined };
+    this.state = { failed: undefined, attempt: 0 };
   }
 
   static getDerivedStateFromError(error: Error): { failed: Error } {
@@ -29,21 +29,29 @@ export class PanelBoundary extends Component<
   }
 
   override render(): ReactNode {
-    const { failed } = this.state;
-    if (!failed) return this.props.children;
+    const { failed, attempt } = this.state;
+    // Keyed on the attempt so "Try again" actually tries again: clearing the
+    // flag alone re-renders the same component instance holding the same state
+    // that threw, which throws again on the spot and leaves a panel that
+    // cannot be recovered from without reloading the admin UI. A changed key
+    // makes React unmount the subtree and mount a fresh one, which reads from
+    // the facade again from nothing.
+    if (!failed) return <Fragment key={attempt}>{this.props.children}</Fragment>;
 
     return (
       <div className="alert alert-danger m-3" role="alert">
         <h5 className="alert-heading">The Portainer panel stopped</h5>
         <p className="mb-2">
           Something in this panel failed while drawing. The rest of the Signal K admin UI is
-          unaffected — reload the page to try again.
+          unaffected — try again below, or reload the page.
         </p>
         <p className="small mb-2 text-muted">{failed.message}</p>
         <button
           type="button"
           className="btn btn-sm btn-outline-danger"
-          onClick={() => this.setState({ failed: undefined })}
+          onClick={() =>
+            this.setState((current) => ({ failed: undefined, attempt: current.attempt + 1 }))
+          }
         >
           Try again
         </button>

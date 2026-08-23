@@ -27,8 +27,10 @@ const withFile = (content = 'services:\n  influxdb:\n') =>
   jest.fn(() => Promise.resolve({ ok: true, status: 200, json: async () => ({ content }) }));
 
 const renderEditor = (
-  props: Partial<React.ComponentProps<typeof StackEditor>> = {},
+  props: Partial<React.ComponentProps<typeof StackEditor>> & { fetch?: typeof global.fetch } = {},
 ): { onDeploy: jest.Mock; onClose: jest.Mock } => {
+  const { fetch: fetchOverride, ...rest } = props;
+  if (fetchOverride) global.fetch = fetchOverride;
   const onDeploy = jest.fn();
   const onClose = jest.fn();
   render(
@@ -39,7 +41,7 @@ const renderEditor = (
       busy={false}
       onDeploy={onDeploy}
       onClose={onClose}
-      {...props}
+      {...rest}
     />,
   );
   return { onDeploy, onClose };
@@ -150,6 +152,238 @@ describe('StackEditor', () => {
     renderEditor();
 
     expect(await screen.findByText(/does not belong to this environment/)).toBeInTheDocument();
+  });
+
+  describe('when the compose file could not be read', () => {
+    const unreadable = () =>
+      jest.fn(() =>
+        Promise.resolve({
+          ok: false,
+          status: 502,
+          json: async () => ({ error: 'Portainer could not be reached' }),
+        }),
+      ) as unknown as typeof fetch;
+
+    it('will not deploy an empty box over the stack that is running', async () => {
+      // The read failing leaves the editor holding an empty file it never got.
+      // Editable and deployable, the first keystroke counted as a change and
+      // Deploy PUT that fragment over the stack's real compose file —
+      // replacing it, with nothing left to recover it from.
+      const user = userEvent.setup();
+      const { onDeploy } = renderEditor({ fetch: unreadable() });
+      await screen.findByText('Portainer could not be reached');
+
+      const file = screen.getByLabelText('Compose file');
+      expect(file).toHaveAttribute('readonly');
+      await user.type(file, 'services:\n  anything:\n');
+
+      expect(file).toHaveValue('');
+      expect(screen.getByRole('button', { name: 'Deploy' })).toBeDisabled();
+      expect(onDeploy).not.toHaveBeenCalled();
+    });
+
+    it('says why the box is empty, since an empty box says nothing', async () => {
+      renderEditor({ fetch: unreadable() });
+
+      const banner = await screen.findByRole('alert');
+      expect(banner).toHaveTextContent('Portainer could not be reached');
+      expect(banner).toHaveTextContent(/could not be read/);
+      expect(banner).toHaveTextContent(/deploying now would replace the file/i);
+    });
+
+    it('locks the environment rows too, since they deploy with the file', async () => {
+      renderEditor({ fetch: unreadable() });
+      await screen.findByText('Portainer could not be reached');
+
+      expect(screen.getByLabelText('Variable 1 name')).toHaveAttribute('readonly');
+      expect(screen.queryByRole('button', { name: 'Add' })).toBeNull();
+    });
+  });
+
+  describe('environment variables', () => {
+    const twoVars: Stack = {
+      ...fileStack,
+      Env: [
+        { name: 'ALPHA', value: 'one' },
+        { name: 'BETA', value: 'two' },
+      ],
+    };
+
+    it('keeps each row with its own variable when one above it is removed', async () => {
+      // Keyed by position, React reused the node that held ALPHA for BETA:
+      // focus and caret stayed put while the value under them changed, and the
+      // operator carried on typing into a different variable than the one they
+      // meant.
+      const user = userEvent.setup();
+      renderEditor({ target: { kind: 'existing', stack: twoVars } });
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+
+      const beta = screen.getByLabelText('Variable 2 value');
+      await user.click(screen.getByRole('button', { name: 'Remove ALPHA' }));
+
+      // BETA is now the only row, and it is the row it always was: the very
+      // same element, still holding its own value. Identity is the point —
+      // whatever the operator had in that node, caret and focus included,
+      // stays with the variable it belongs to.
+      expect(screen.getByLabelText('Variable 1 name')).toHaveValue('BETA');
+      expect(screen.getByLabelText('Variable 1 value')).toBe(beta);
+      expect(beta).toHaveValue('two');
+    });
+
+    it('names the group rather than leaving a label pointing at nothing', async () => {
+      // A <label> wrapping no control and carrying no htmlFor is invalid HTML,
+      // inert to clicks, and names none of the fields under it.
+      renderEditor();
+      await screen.findByLabelText('Variable 1 name');
+
+      expect(screen.getByRole('group', { name: 'Environment variables' })).toBeInTheDocument();
+    });
+  });
+
+  describe('closing over unsaved work', () => {
+    it('asks before throwing away an edited file', async () => {
+      // The deploy path keeps the editor open when a deploy fails, because
+      // closing would throw away work an error asked the operator to redo.
+      // Close threw the same work away without a word.
+      const user = userEvent.setup();
+      const { onClose } = renderEditor();
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+      await user.type(screen.getByLabelText('Compose file'), '  web:\n');
+
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText(/Close without deploying/)).toBeInTheDocument();
+      // On the answer that keeps the work, so a stray Enter is harmless.
+      expect(screen.getByRole('button', { name: 'Keep editing' })).toHaveFocus();
+
+      await user.click(screen.getByRole('button', { name: 'Discard' }));
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('asks before discarding a new stack whose only edit is an environment row', async () => {
+      // The dirty check for a new stack looked at the compose file and the
+      // repository URL alone, so an operator who had filled in only the
+      // environment rows lost them to Close without being asked.
+      const user = userEvent.setup();
+      const { onClose } = renderEditor({ target: { kind: 'new' } });
+
+      await user.click(screen.getByRole('button', { name: 'Add' }));
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText(/Close without deploying/)).toBeInTheDocument();
+    });
+
+    it('goes back to the file when the operator changes their mind', async () => {
+      const user = userEvent.setup();
+      const { onClose } = renderEditor();
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+      await user.type(screen.getByLabelText('Compose file'), '  web:\n');
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      await user.click(screen.getByRole('button', { name: 'Keep editing' }));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n  web:\n');
+    });
+
+    it('closes without asking when nothing has been touched', async () => {
+      const user = userEvent.setup();
+      const { onClose } = renderEditor();
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(onClose).toHaveBeenCalled();
+    });
+
+    it('does not let Escape be the key that discards the file', async () => {
+      const user = userEvent.setup();
+      const { onClose } = renderEditor();
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+      await user.type(screen.getByLabelText('Compose file'), '  web:\n');
+
+      await user.keyboard('{Escape}');
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText(/Close without deploying/)).toBeInTheDocument();
+
+      // A second Escape backs out of the question rather than answering it.
+      await user.keyboard('{Escape}');
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.queryByText(/Close without deploying/)).toBeNull();
+    });
+  });
+
+  describe('focus', () => {
+    it('gives focus back to whatever opened it', async () => {
+      // Without this, closing drops focus on <body> and the next Tab starts at
+      // the top of the Signal K admin UI rather than at the row the operator
+      // pressed Edit on.
+      const user = userEvent.setup();
+      const opener = document.createElement('button');
+      opener.textContent = 'Edit';
+      document.body.append(opener);
+      opener.focus();
+
+      const { unmount } = render(
+        <StackEditor
+          target={{ kind: 'existing', stack: fileStack }}
+          instance="boat"
+          canDeploy
+          busy={false}
+          onDeploy={jest.fn()}
+          onClose={jest.fn()}
+        />,
+      );
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+      expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus();
+
+      unmount();
+
+      expect(opener).toHaveFocus();
+      opener.remove();
+      void user;
+    });
+
+    it('keeps Tab inside the dialog rather than letting it walk out behind the scrim', async () => {
+      // aria-modal traps nothing on its own, and the admin UI is right there
+      // underneath: without a cycle, Tab leaves the dialog and the operator is
+      // moving through controls they cannot see.
+      const user = userEvent.setup();
+      renderEditor();
+      await waitFor(() =>
+        expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+      );
+
+      const dialog = screen.getByRole('dialog');
+      const focusable = Array.from(
+        dialog.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), input:not([disabled]), textarea:not([disabled])',
+        ),
+      );
+      const last = focusable[focusable.length - 1];
+      last?.focus();
+
+      await user.tab();
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(document.activeElement).toBe(focusable[0]);
+
+      await user.tab({ shift: true });
+      expect(document.activeElement).toBe(last);
+    });
   });
 
   it('keeps a failed deploy on screen without throwing the file away', async () => {

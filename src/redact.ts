@@ -62,7 +62,13 @@ export function redactValue<T>(value: T, seen: WeakSet<object> = new WeakSet()):
 
   if (Array.isArray(value)) {
     seen.add(object);
-    return value.map((item) => redactValue(item, seen)) as unknown as T;
+    const items = value.map((item) => redactValue(item, seen)) as unknown as T;
+    // Dropped again on the way out: `seen` is the path from the root, not every
+    // object ever visited. Left in, it detects repetition rather than cycles,
+    // and one object referenced twice — the same container listed under two
+    // keys, the same row in a list — comes out as "[circular]" the second time.
+    seen.delete(object);
+    return items;
   }
 
   if (!isPlainObject(object)) return value;
@@ -76,5 +82,6 @@ export function redactValue<T>(value: T, seen: WeakSet<object> = new WeakSet()):
         : '[redacted]'
       : redactValue(item, seen);
   }
+  seen.delete(object);
   return out as unknown as T;
 }

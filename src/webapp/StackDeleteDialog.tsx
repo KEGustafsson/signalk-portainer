@@ -1,14 +1,16 @@
 import type { ReactElement } from 'react';
 import { useEffect, useRef } from 'react';
 import type { Stack } from '../types';
+import { useDialogFocus } from './dialogfocus';
 
 /**
  * The step between clicking Delete and deleting a stack.
  *
  * Like the container dialog, it names the thing rather than asking "are you
- * sure?" — the mistake worth catching is acting on the wrong row. Volumes are
- * asked for separately and default to off: a stack's volumes hold its data, and
- * deleting the stack says nothing about wanting the data gone.
+ * sure?" — the mistake worth catching is acting on the wrong row. The dialog
+ * says plainly that volumes are left behind: Portainer CE's stack delete takes
+ * no volume parameter, so removing them is a separate step in Portainer, and a
+ * dialog that offered the choice would be promising something it cannot do.
  */
 export function StackDeleteDialog({
   stack,
@@ -23,10 +25,9 @@ export function StackDeleteDialog({
 }): ReactElement {
   const cancelRef = useRef<HTMLButtonElement>(null);
 
-  // Focus lands on Cancel: a stray Enter should do nothing.
-  useEffect(() => {
-    cancelRef.current?.focus();
-  }, []);
+  // Focus lands on Cancel: a stray Enter should do nothing. The hook also
+  // keeps Tab inside the dialog and hands focus back on the way out.
+  const dialogRef = useDialogFocus(cancelRef);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -44,6 +45,7 @@ export function StackDeleteDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="portainer-stack-delete-title"
+      ref={dialogRef}
       style={{ background: 'rgba(0,0,0,0.5)' }}
     >
       <div className="modal-dialog modal-dialog-centered">

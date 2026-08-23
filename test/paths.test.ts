@@ -75,6 +75,17 @@ describe('containerKey', () => {
     });
   });
 
+  it('keeps a container that is genuinely named "unknown" on its name', () => {
+    // `unknown` is also what an unusable name normalises to. Treating the two
+    // as the same thing sent this container to the short-id fallback, and the
+    // short id changes on every recreate — so its path, and every gauge and
+    // history behind it, moved each time compose touched it.
+    expect(containerKey(container({ Names: ['/unknown'] }))).toEqual({
+      key: 'unknown',
+      source: 'name',
+    });
+  });
+
   it('ignores a label that is present but blank', () => {
     // Compose writes an empty label rather than omitting it in some versions.
     const key = containerKey(
@@ -114,6 +125,39 @@ describe('assignKeys', () => {
 
     expect(forward.get(first.Id)).toEqual(reverse.get(first.Id));
     expect(forward.get(second.Id)).toEqual(reverse.get(second.Id));
+  });
+
+  it('does not resolve a collision onto a key another container already holds', () => {
+    // The disambiguated key of the first two is exactly what the third one
+    // normalises to on its own. Both then publish onto one path, and a PUT
+    // reaches whichever of them Docker happened to list last.
+    const containers = [
+      container({ Id: 'aaaa1111bbbb2222', Names: ['/ais-logger'] }),
+      container({ Id: 'cccc3333dddd4444', Names: ['/ais_logger'] }),
+      container({ Id: 'eeee5555ffff6666', Names: ['/ais-logger-aaaa1111bbbb'] }),
+    ];
+
+    const keys = assignKeys(containers);
+    const assigned = containers.map((entry) => keys.get(entry.Id)?.key);
+
+    expect(new Set(assigned).size).toBe(3);
+    // The one with the plain name keeps it; the pair widens until it is free.
+    expect(assigned[2]).toBe('ais_logger_aaaa1111bbbb');
+  });
+
+  it('resolves that collision the same way whatever order Docker listed them in', () => {
+    const containers = [
+      container({ Id: 'aaaa1111bbbb2222', Names: ['/ais-logger'] }),
+      container({ Id: 'cccc3333dddd4444', Names: ['/ais_logger'] }),
+      container({ Id: 'eeee5555ffff6666', Names: ['/ais-logger-aaaa1111bbbb'] }),
+    ];
+
+    const forward = assignKeys(containers);
+    const reverse = assignKeys([...containers].reverse());
+
+    for (const entry of containers) {
+      expect(forward.get(entry.Id)).toEqual(reverse.get(entry.Id));
+    }
   });
 });
 

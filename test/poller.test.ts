@@ -4,7 +4,7 @@ import type { MetaValue, PathValue } from '../src/deltas';
 import { DeltaPoller } from '../src/poller';
 import { InstanceRegistry } from '../src/registry';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const config = normalizeConfig({
   instances: [
@@ -30,6 +30,7 @@ describe('DeltaPoller', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const build = (registry: InstanceRegistry | undefined, level: 'health' | 'full' = 'full') =>
@@ -165,16 +166,105 @@ describe('DeltaPoller', () => {
     expect(health[0]?.[0]?.error).toBeTruthy();
   });
 
-  it('publishes a delta for each configured instance in one message', async () => {
+  it('publishes each instance as its own snapshot settles', async () => {
     interceptOk('https://boat.test:9443');
     interceptOk('https://shore.test:9443');
 
     await build(new InstanceRegistry(config)).poll();
 
-    expect(published).toHaveLength(1);
-    const values = paths();
+    // One message per instance: waiting to send them together is what let a
+    // slow instance hold a fast one's data.
+    expect(published).toHaveLength(2);
+    const values = Object.assign(paths(0), paths(1));
     expect(values['system.docker.boat.status.reachable']).toBe(true);
     expect(values['system.docker.shore.status.reachable']).toBe(true);
+  });
+
+  it('does not hold one instance behind the timeout of another', async () => {
+    // A shore Portainer may sit at the 120s timeout ceiling on a marina link.
+    // Publishing only once every snapshot had settled meant the boat's own
+    // containers — and the watchdog alarm that follows them — arrived two
+    // minutes late on a 30s interval, which is the failure the watchdog exists
+    // to prevent.
+    let answerShore!: () => void;
+    const shoreAnswered = new Promise<void>((resolve) => {
+      answerShore = resolve;
+    });
+    const registry = {
+      names: ['boat', 'shore'],
+      get: (name: string) => ({
+        capabilities: async () => ({ swarm: false }),
+        docker: {
+          listContainers: async () => {
+            if (name === 'shore') await shoreAnswered;
+            return fixtures.containers;
+          },
+        },
+      }),
+    } as unknown as InstanceRegistry;
+
+    const poller = build(registry);
+    const polled = poller.poll();
+    await new Promise((resolve) => setImmediate(resolve));
+
+    // The boat has published while the shore request is still in flight.
+    expect(paths(0)['system.docker.boat.status.reachable']).toBe(true);
+    expect(published).toHaveLength(1);
+
+    answerShore();
+    await polled;
+    expect(paths(1)['system.docker.shore.status.reachable']).toBe(true);
+  });
+
+  it('reports the health of every instance together, once the poll has settled', async () => {
+    // "1/2 reachable" cannot be assembled one instance at a time, so this stays
+    // a statement about the poll as a whole.
+    interceptOk('https://boat.test:9443');
+    agent
+      .get('https://shore.test:9443')
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(503, { message: 'down' });
+    const health: { name: string; reachable: boolean }[][] = [];
+    const poller = new DeltaPoller({
+      registry: () => new InstanceRegistry(config),
+      publish: (values, meta) => published.push({ values, meta }),
+      log: (message) => logs.push(message),
+      intervalMs: 60_000,
+      pathPrefix: 'system.docker',
+      level: 'full',
+      onHealth: (instances) => health.push(instances),
+    });
+
+    await poller.poll();
+
+    expect(health).toHaveLength(1);
+    expect(health[0]?.map((entry) => [entry.name, entry.reachable])).toEqual([
+      ['boat', true],
+      ['shore', false],
+    ]);
+  });
+
+  it('still reports health when one instance cannot be published at all', async () => {
+    // The publish is per instance now, so one instance's failure must not take
+    // the status line — the only thing that says a Portainer is down — with it.
+    interceptOk('https://boat.test:9443');
+    const health: { name: string; reachable: boolean }[][] = [];
+    const poller = new DeltaPoller({
+      registry: () => new InstanceRegistry(boatOnly),
+      publish: () => {
+        throw new Error('handleMessage exploded');
+      },
+      log: (message) => logs.push(message),
+      intervalMs: 60_000,
+      pathPrefix: 'system.docker',
+      level: 'full',
+      onHealth: (instances) => health.push(instances),
+    });
+
+    await poller.poll();
+
+    expect(health[0]).toEqual([{ name: 'boat', reachable: true }]);
+    expect(logs.join('\n')).toContain('publishing instance boat failed');
   });
 
   it('publishes values and metadata together', async () => {
@@ -208,7 +298,7 @@ describe('DeltaPoller', () => {
 
     await build(new InstanceRegistry(config)).poll();
 
-    const values = paths();
+    const values = Object.assign(paths(0), paths(1));
     expect(values['system.docker.boat.status.reachable']).toBe(true);
     expect(values['system.docker.shore.status.reachable']).toBe(false);
     expect(values['system.docker.boat.status.containersTotal']).toBe(fixtures.containers.length);

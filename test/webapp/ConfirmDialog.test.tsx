@@ -152,4 +152,60 @@ describe('ConfirmDialog', () => {
     expect(screen.getByRole('button', { name: 'Working…' })).toBeDisabled();
     expect(screen.getByRole('button', { name: 'Close' })).toBeEnabled();
   });
+
+  describe('focus', () => {
+    it('hands focus back to the row it was opened from', () => {
+      // Closing used to drop focus on <body>, so the next Tab started at the
+      // top of the Signal K admin UI rather than at the container the operator
+      // had just pressed Stop on.
+      const opener = document.createElement('button');
+      opener.textContent = 'Stop';
+      document.body.append(opener);
+      opener.focus();
+
+      const { unmount } = render(
+        <ConfirmDialog
+          request={{ container: container(), action: 'stop' }}
+          busy={false}
+          onCancel={() => {}}
+          onConfirm={() => {}}
+        />,
+      );
+      expect(screen.getByRole('button', { name: 'Cancel' })).toHaveFocus();
+
+      unmount();
+
+      expect(opener).toHaveFocus();
+      opener.remove();
+    });
+
+    it('cycles Tab inside the dialog instead of letting it walk out', async () => {
+      // aria-modal does not trap anything: the admin UI is right there behind
+      // the scrim, and Tab used to carry on into it.
+      const user = userEvent.setup();
+      render(
+        <ConfirmDialog
+          request={{ container: container(), action: 'stop' }}
+          busy={false}
+          onCancel={() => {}}
+          onConfirm={() => {}}
+        />,
+      );
+
+      const dialog = screen.getByRole('dialog');
+      const cancel = screen.getByRole('button', { name: 'Cancel' });
+      const stop = screen.getByRole('button', { name: 'Stop' });
+
+      await user.tab();
+      expect(stop).toHaveFocus();
+
+      await user.tab();
+      // Round to the front rather than out of the dialog.
+      expect(dialog.contains(document.activeElement)).toBe(true);
+      expect(cancel).toHaveFocus();
+
+      await user.tab({ shift: true });
+      expect(stop).toHaveFocus();
+    });
+  });
 });

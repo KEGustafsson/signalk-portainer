@@ -7,7 +7,7 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -24,6 +24,7 @@ const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig
   allowPutControl: true,
   allowDestructive: false,
   allowSelfManagement: false,
+  putContainers: [],
   watchdog: [],
   ...overrides,
 });
@@ -40,6 +41,7 @@ const buildApp = (
       registry
         ? ({
             instances: [],
+            problems: [],
             telemetry: {
               level: 'off' as const,
               intervalSeconds: 30,
@@ -80,6 +82,7 @@ describe('facade stack writes', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const boat = () => agent.get('https://boat.test:9443');
@@ -134,7 +137,9 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
         .reply(200, fixtures.standaloneInfo);
-      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
       boat()
         .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
         .reply(200, { Id: 11, Name: name, Type: 2, EndpointId: 1 });
@@ -324,7 +329,9 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
         .reply(200, fixtures.standaloneInfo);
-      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
       boat()
         .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
         .reply(200, { Id: 11, Name: 'weather', Type: 2, EndpointId: 1 });
@@ -335,6 +342,11 @@ describe('facade stack writes', () => {
 
       expect(res.status).toBe(200);
       expect(res.body.stack).toMatchObject({ Id: 11, Name: 'weather' });
+      // Including the version probe, which is served at /api/system/status.
+      // Registered at /api/status, it never matched: the probe threw on every
+      // create and the client swallowed it, so these tests were exercising the
+      // failure path without saying so.
+      expect(agent.pendingInterceptors()).toHaveLength(0);
     });
 
     it('creates from a repository, mapping every field the route accepts', async () => {
@@ -342,7 +354,9 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
         .reply(200, fixtures.standaloneInfo);
-      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
       let body: Record<string, unknown> = {};
       boat()
         .intercept({
@@ -377,7 +391,9 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
         .reply(200, fixtures.standaloneInfo);
-      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
       let body: Record<string, unknown> = {};
       boat()
         .intercept({
@@ -408,7 +424,9 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
         .reply(200, fixtures.standaloneInfo);
-      boat().intercept({ path: '/api/status', method: 'GET' }).reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
       let body: Record<string, unknown> = {};
       boat()
         .intercept({

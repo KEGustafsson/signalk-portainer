@@ -91,12 +91,12 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false) {
  */
 async function showContainers(): Promise<void> {
   render(<AppPanel />);
-  fireEvent.click(await screen.findByRole('button', { name: 'Containers' }));
+  fireEvent.click(await screen.findByRole('tab', { name: 'Containers' }));
   // Waited for, not just clicked: the reads the panel starts as it mounts
   // settle inside this act() rather than after the test has moved on, which
   // React reports as an unwrapped update.
   await waitFor(() =>
-    expect(screen.getByRole('button', { name: 'Containers' })).toHaveClass('active'),
+    expect(screen.getByRole('tab', { name: 'Containers' })).toHaveClass('active'),
   );
 }
 
@@ -186,13 +186,15 @@ describe('AppPanel', () => {
         return Promise.resolve({ ok: true, status: 200, json: async () => table[path] ?? {} });
       }) as unknown as typeof fetch);
 
-      await user.click(screen.getByRole('button', { name: 'Select lenovo' }));
+      // Waited for: the panel says "Loading…" until the tab read answers, and
+      // deliberately does not draw a table before it has one.
+      await user.click(await screen.findByRole('button', { name: 'Select lenovo' }));
 
       await waitFor(() =>
         expect(screen.queryByText('Choose an environment to continue')).not.toBeInTheDocument(),
       );
       // The tabs that had nothing to read now read against the chosen one.
-      await user.click(screen.getByRole('button', { name: 'Containers' }));
+      await user.click(screen.getByRole('tab', { name: 'Containers' }));
       expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
 
       // Saved server-side rather than kept in the tab: the delta poller works
@@ -203,6 +205,60 @@ describe('AppPanel', () => {
       expect(sent.some((entry) => entry.startsWith('PUT') && entry.includes('/environment'))).toBe(
         true,
       );
+    });
+
+    it('keeps a refused switch on screen, where the next poll used to erase it', async () => {
+      // The refusal, then a poll that succeeds against the environment the
+      // operator never left. Sharing one error sink with the poll, the banner
+      // vanished ten seconds later: no message, no changed selection, and
+      // nothing left to say the switch had not worked.
+      jest.useFakeTimers({ advanceTimers: true });
+      const fetchMock = unchosen();
+      fetchMock.mockImplementation(((input: string, init?: RequestInit) => {
+        const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+        if (init?.method === 'PUT' && path === '/environment') {
+          return Promise.resolve({
+            ok: false,
+            status: 403,
+            json: async () => ({
+              error: 'Portainer refused the environment change',
+              hint: 'the access token may not reach that environment',
+            }),
+          });
+        }
+        return unchosen()(input, init);
+      }) as unknown as typeof fetch);
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup({ advanceTimers: jest.advanceTimersByTime });
+
+      render(<AppPanel />);
+      await user.click(await screen.findByRole('button', { name: 'Select lenovo' }));
+
+      expect(await screen.findByText(/Portainer refused the environment change/)).toBeVisible();
+
+      // Two polls later the operator can still read why nothing moved.
+      jest.advanceTimersByTime(25_000);
+      await waitFor(() =>
+        expect(screen.getByText(/Portainer refused the environment change/)).toBeInTheDocument(),
+      );
+      // And the choice is genuinely still open, rather than looking made.
+      expect(screen.getByText('Choose an environment to continue')).toBeInTheDocument();
+    });
+
+    it('says out loud that it is switching, rather than only drawing it', async () => {
+      const user = userEvent.setup();
+      const fetchMock = unchosen();
+      fetchMock.mockImplementation(((input: string, init?: RequestInit) => {
+        // Never settles: the switch stays in flight so its status can be read.
+        if (init?.method === 'PUT') return new Promise(() => {});
+        return unchosen()(input, init);
+      }) as unknown as typeof fetch);
+      global.fetch = fetchMock as unknown as typeof fetch;
+
+      render(<AppPanel />);
+      await user.click(await screen.findByRole('button', { name: 'Select lenovo' }));
+
+      expect(await screen.findByRole('status')).toHaveTextContent('Switching environment…');
     });
 
     it('takes a press anywhere on the row, not only on its button', async () => {
@@ -286,7 +342,7 @@ describe('AppPanel', () => {
     await showContainers();
     await screen.findByText('signalk_influxdb');
 
-    await user.click(screen.getByRole('button', { name: 'Stacks' }));
+    await user.click(screen.getByRole('tab', { name: 'Stacks' }));
 
     expect(await screen.findByText('signalk')).toBeInTheDocument();
   });
@@ -297,8 +353,8 @@ describe('AppPanel', () => {
     await showContainers();
     await screen.findByText('signalk_influxdb');
 
-    expect(screen.queryByRole('button', { name: 'Services' })).not.toBeInTheDocument();
-    expect(screen.queryByRole('button', { name: 'Nodes' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Services' })).not.toBeInTheDocument();
+    expect(screen.queryByRole('tab', { name: 'Nodes' })).not.toBeInTheDocument();
   });
 
   it('shows the swarm tabs when the daemon is a swarm member', async () => {
@@ -306,8 +362,8 @@ describe('AppPanel', () => {
 
     await showContainers();
 
-    expect(await screen.findByRole('button', { name: 'Services' })).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Nodes' })).toBeInTheDocument();
+    expect(await screen.findByRole('tab', { name: 'Services' })).toBeInTheDocument();
+    expect(screen.getByRole('tab', { name: 'Nodes' })).toBeInTheDocument();
   });
 
   it('hides the instance selector when only one instance is configured', async () => {
@@ -345,10 +401,157 @@ describe('AppPanel', () => {
     });
   });
 
+  it('does not let the old instance\u2019s environments land on the new one', async () => {
+    // Switching instance while the first /environments read is in flight left
+    // the header naming the wrong Docker host and the Environments tab
+    // offering the wrong instance\u2019s ids \u2014 pressing one sends that id to the
+    // instance it does not belong to.
+    const release: (() => void)[] = [];
+    const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    const environmentsFor = (host: string) => ({
+      selected: 1,
+      environments: [
+        { id: 1, name: `${host}-local`, type: 1, health: 'up', isSelected: true },
+        { id: 2, name: `${host}-spare`, type: 2, health: 'up', isSelected: false },
+      ],
+    });
+
+    global.fetch = jest.fn((input: string) => {
+      const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+      const onShore = input.includes('instance=shore');
+      if (path === '/instances') {
+        return Promise.resolve(
+          answer({
+            instances: [
+              { name: 'boat', isDefault: true },
+              { name: 'shore', isDefault: false },
+            ],
+          }),
+        );
+      }
+      if (path === '/environments') {
+        if (onShore) return Promise.resolve(answer(environmentsFor('shore')));
+        // Held open: the read the operator switched away from.
+        return new Promise((resolve) => {
+          release.push(() => resolve(answer(environmentsFor('boat'))));
+        });
+      }
+      if (path === '/control') return Promise.resolve(answer(control));
+      if (path === '/capabilities') return Promise.resolve(answer({ capabilities: {} }));
+      return Promise.resolve(answer({}));
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    render(<AppPanel />);
+    await waitFor(() => expect(release.length).toBeGreaterThan(0));
+
+    await user.selectOptions(await screen.findByLabelText('Instance'), 'shore');
+    await screen.findByText('shore-spare');
+
+    // The read that belongs to the instance nobody is looking at answers last.
+    for (const settle of release) settle();
+    await waitFor(() => expect(screen.getByText('shore-spare')).toBeInTheDocument());
+
+    // Named after the wrong Docker host in the header, and offering the wrong
+    // instance's ids in the table, is what this used to leave behind.
+    expect(screen.queryAllByText('boat-local')).toHaveLength(0);
+    expect(screen.queryAllByText('boat-spare')).toHaveLength(0);
+  });
+
+  it('stops offering what the last Portainer allowed the moment the instance changes', async () => {
+    // Server-side enforcement means the worst case is a 403, but a button that
+    // is offered and then refused is exactly what the panel exists to avoid.
+    const answer = (body: unknown) => ({ ok: true, status: 200, json: async () => body });
+    global.fetch = jest.fn((input: string) => {
+      const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+      const onShore = input.includes('instance=shore');
+      if (path === '/instances') {
+        return Promise.resolve(
+          answer({
+            instances: [
+              { name: 'boat', isDefault: true },
+              { name: 'shore', isDefault: false },
+            ],
+          }),
+        );
+      }
+      // The new instance answers neither of the two questions that decide what
+      // is on offer.
+      if (onShore && (path === '/control' || path === '/capabilities')) {
+        return new Promise(() => {});
+      }
+      if (path === '/control')
+        return Promise.resolve(answer({ ...control, allowDestructive: true }));
+      if (path === '/capabilities')
+        return Promise.resolve(answer({ capabilities: { swarm: true } }));
+      if (path === '/environments') {
+        return Promise.resolve(
+          answer({
+            selected: 1,
+            environments: [{ id: 1, name: 'local', type: 1, health: 'up', isSelected: true }],
+          }),
+        );
+      }
+      if (path === '/containers') return Promise.resolve(answer({ containers }));
+      return Promise.resolve(answer({}));
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    await showContainers();
+    await screen.findByText('signalk_influxdb');
+    const remove = () =>
+      within(screen.getByRole('group', { name: 'Actions for signalk_influxdb' })).getByRole(
+        'button',
+        { name: 'Remove' },
+      );
+    expect(remove()).not.toHaveAttribute('aria-disabled');
+    expect(screen.getByRole('tab', { name: 'Nodes' })).toBeInTheDocument();
+
+    await user.selectOptions(screen.getByLabelText('Instance'), 'shore');
+
+    await waitFor(() => expect(remove()).toHaveAttribute('aria-disabled', 'true'));
+    expect(remove()).toHaveAccessibleDescription(expect.stringContaining('Waiting for the plugin'));
+    expect(screen.queryByRole('tab', { name: 'Nodes' })).toBeNull();
+  });
+
+  it('presents the tabs as tabs, not as a row of buttons that look active', async () => {
+    const user = userEvent.setup();
+    global.fetch = routeFetch() as unknown as typeof fetch;
+
+    render(<AppPanel />);
+    // Waited for the tab body: the panel draws nothing under the strip until
+    // the first read answers.
+    await screen.findByRole('tabpanel');
+    const environments = screen.getByRole('tab', { name: 'Environments' });
+    const containers = screen.getByRole('tab', { name: 'Containers' });
+
+    expect(screen.getByRole('tablist')).toBeInTheDocument();
+    expect(environments).toHaveAttribute('aria-selected', 'true');
+    expect(containers).toHaveAttribute('aria-selected', 'false');
+    // One tab stop for the strip, as a tablist has.
+    expect(environments).toHaveAttribute('tabindex', '0');
+    expect(containers).toHaveAttribute('tabindex', '-1');
+
+    // The panel each tab controls says which tab it belongs to.
+    const panel = screen.getByRole('tabpanel');
+    expect(panel).toHaveAttribute('aria-labelledby', environments.id);
+    expect(environments).toHaveAttribute('aria-controls', panel.id);
+
+    // And the arrow keys move between them, carrying focus.
+    environments.focus();
+    await user.keyboard('{ArrowRight}');
+
+    expect(containers).toHaveFocus();
+    expect(containers).toHaveAttribute('aria-selected', 'true');
+  });
+
   it('aborts an in-flight request when the panel unmounts', async () => {
     const signals: AbortSignal[] = [];
     global.fetch = jest.fn((input: string, init?: RequestInit) => {
-      if (init?.signal) signals.push(init.signal);
+      // The tab read is the one under test. Every request now carries a signal
+      // — its own 30 second deadline — so which one is being watched has to be
+      // said rather than assumed.
+      if (init?.signal && input.includes('/containers')) signals.push(init.signal);
       if (input.includes('/instances')) {
         return Promise.resolve({
           ok: true,
@@ -370,6 +573,9 @@ describe('AppPanel', () => {
     }) as unknown as typeof fetch;
 
     const { unmount } = render(<AppPanel />);
+    // Onto the tab whose read stalls: the panel lands on Environments, and
+    // that read is answered above so the environment can be known at all.
+    fireEvent.click(await screen.findByRole('tab', { name: 'Containers' }));
     await waitFor(() => expect(signals.length).toBeGreaterThan(0));
 
     expect(signals[0]?.aborted).toBe(false);
@@ -436,6 +642,43 @@ describe('AppPanel', () => {
     expect(await screen.findByText('No containers')).toBeInTheDocument();
   });
 
+  it('keeps saying it is loading rather than claiming there is nothing there', async () => {
+    // /instances answers, /environments does not. The panel used to call the
+    // read finished at that point and draw an empty table — a slow link and a
+    // Docker host with nothing on it look identical afterwards, and only one
+    // of them is worth acting on.
+    global.fetch = jest.fn((input: string) => {
+      if (input.includes('/instances')) {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => ({ instances: [{ name: 'boat', isDefault: true }] }),
+        });
+      }
+      return new Promise(() => {});
+    }) as unknown as typeof fetch;
+
+    render(<AppPanel />);
+
+    expect(await screen.findByRole('status')).toHaveTextContent('Loading…');
+    expect(screen.queryByText('No environments')).toBeNull();
+    expect(screen.queryByText('No containers')).toBeNull();
+  });
+
+  it('renders an environments field that is not a list, instead of dying on it', async () => {
+    // `?? []` stops at null and undefined; a truthy non-array walks into
+    // rows.map during render, which the boundary catches and the operator
+    // cannot get out of.
+    global.fetch = routeFetch({
+      '/environments': { selected: 1, environments: { 1: 'local' } },
+    }) as unknown as typeof fetch;
+
+    render(<AppPanel />);
+
+    expect(await screen.findByText('No environments')).toBeInTheDocument();
+    expect(screen.queryByText('The Portainer panel stopped')).toBeNull();
+  });
+
   it('survives a /control response that is missing its fields', async () => {
     // A proxy or an older plugin build can answer with something else; the
     // panel must degrade to "no actions offered", not to a blank page.
@@ -444,7 +687,7 @@ describe('AppPanel', () => {
     await showContainers();
 
     expect(await screen.findByText('signalk_influxdb')).toBeInTheDocument();
-    expect(screen.getByRole('button', { name: 'Stop' })).toBeDisabled();
+    expect(screen.getByRole('button', { name: 'Stop' })).toHaveAttribute('aria-disabled', 'true');
   });
 });
 
@@ -635,7 +878,11 @@ describe('AppPanel container actions', () => {
     await screen.findByText('signalk_influxdb');
 
     const stop = actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' });
-    expect(stop).toBeDisabled();
+    // Inert and focusable rather than `disabled`: the reason has to be
+    // reachable by anyone who cannot hover, which a disabled button's tooltip
+    // never is.
+    expect(stop).toHaveAttribute('aria-disabled', 'true');
+    expect(stop).toHaveAccessibleDescription(expect.stringContaining('Allow Signal K PUT control'));
     expect(stop).toHaveAttribute('title', expect.stringContaining('Allow Signal K PUT control'));
   });
 
@@ -646,8 +893,9 @@ describe('AppPanel container actions', () => {
     await screen.findByText('signalk_influxdb');
 
     const row = actionsFor('signalk_influxdb');
-    expect(row.getByRole('button', { name: 'Remove' })).toBeDisabled();
+    expect(row.getByRole('button', { name: 'Remove' })).toHaveAttribute('aria-disabled', 'true');
     // Control is on, so the non-destructive actions stay available.
+    expect(row.getByRole('button', { name: 'Stop' })).not.toHaveAttribute('aria-disabled');
     expect(row.getByRole('button', { name: 'Stop' })).toBeEnabled();
   });
 
@@ -661,8 +909,8 @@ describe('AppPanel container actions', () => {
 
     expect(screen.getByText('Signal K')).toBeInTheDocument();
     const stop = actionsFor('signalk_influxdb').getByRole('button', { name: 'Stop' });
-    expect(stop).toBeDisabled();
-    expect(stop).toHaveAttribute('title', expect.stringContaining('running Signal K'));
+    expect(stop).toHaveAttribute('aria-disabled', 'true');
+    expect(stop).toHaveAccessibleDescription(expect.stringContaining('running Signal K'));
     // A different container is unaffected by the protection.
     expect(actionsFor('ais-logger').getByRole('button', { name: 'Start' })).toBeEnabled();
   });
@@ -957,7 +1205,7 @@ describe('AppPanel container actions', () => {
     const openStacks = async (user: ReturnType<typeof userEvent.setup>) => {
       await showContainers();
       await screen.findByText('signalk_influxdb');
-      await user.click(screen.getByRole('button', { name: 'Stacks' }));
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
       await screen.findByRole('group', { name: 'Actions for signalk' });
     };
 
@@ -981,6 +1229,12 @@ describe('AppPanel container actions', () => {
       const row = screen.getByRole('group', { name: 'Actions for signalk' });
       await user.click(within(row).getByRole('button', { name: 'Stop' }));
 
+      // Confirmed first: stopping a stack stops every container in it, which
+      // is more than the single container the panel already refuses to stop
+      // without asking.
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Stop' }));
+
       await waitFor(() => {
         const calls = fetchMock.mock.calls.map(
           (call) => `${String(call[1]?.method ?? 'GET')} ${String(call[0])}`,
@@ -990,7 +1244,55 @@ describe('AppPanel container actions', () => {
       expect(await screen.findByText(/signalk: stopped/)).toBeInTheDocument();
     });
 
-    it('says a started stack was started, not "startped"', async () => {
+    it('sends nothing when the stop is called off', async () => {
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for signalk' });
+      await user.click(within(row).getByRole('button', { name: 'Stop' }));
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/Stop signalk\?/)).toBeInTheDocument();
+      // Named, and with the consequence spelled out: the mistake worth
+      // catching is acting on the wrong row, which "are you sure?" never does.
+      expect(within(dialog).getByText(/Every container in this stack stops/)).toBeInTheDocument();
+
+      await user.click(within(dialog).getByRole('button', { name: 'Cancel' }));
+
+      await waitFor(() => expect(screen.queryByRole('dialog')).toBeNull());
+      const posts = fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST');
+      expect(posts).toHaveLength(0);
+    });
+
+    it('asks before a redeploy, which pulls and recreates every container', async () => {
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Redeploy' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/Redeploy from-git\?/)).toBeInTheDocument();
+      expect(within(dialog).getByText(/pulled again/)).toBeInTheDocument();
+      // Nothing has been sent yet.
+      expect(fetchMock.mock.calls.filter((call) => call[1]?.method === 'POST')).toHaveLength(0);
+
+      await user.click(within(dialog).getByRole('button', { name: 'Redeploy' }));
+
+      await waitFor(() => {
+        const calls = fetchMock.mock.calls.map(
+          (call) => `${String(call[1]?.method ?? 'GET')} ${String(call[0])}`,
+        );
+        expect(calls).toContain(
+          'POST /plugins/signalk-portainer/api/stacks/5/redeploy?instance=boat',
+        );
+      });
+    });
+
+    it('starts without asking, and says "started" rather than "startped"', async () => {
       const fetchMock = stackFetch({
         '/stacks': {
           stacks: [{ Id: 3, Name: 'signalk', Type: 2, EndpointId: 1, Status: 2 }],
@@ -1003,6 +1305,9 @@ describe('AppPanel container actions', () => {
       const row = screen.getByRole('group', { name: 'Actions for signalk' });
       await user.click(within(row).getByRole('button', { name: 'Start' }));
 
+      // Starting is the one stack action whose worst case is that nothing
+      // happens, exactly as it is for a container.
+      expect(screen.queryByRole('dialog')).toBeNull();
       expect(await screen.findByText(/signalk: started/)).toBeInTheDocument();
     });
 
@@ -1037,8 +1342,8 @@ describe('AppPanel container actions', () => {
 
       const row = screen.getByRole('group', { name: 'Actions for signalk' });
       const remove = within(row).getByRole('button', { name: 'Delete' });
-      expect(remove).toBeDisabled();
-      expect(remove).toHaveAttribute('title', expect.stringContaining('destructive'));
+      expect(remove).toHaveAttribute('aria-disabled', 'true');
+      expect(remove).toHaveAccessibleDescription(expect.stringContaining('destructive'));
     });
 
     it('opens the editor on a row and sends the edited file back', async () => {
@@ -1113,7 +1418,10 @@ describe('AppPanel container actions', () => {
       const user = userEvent.setup();
       await openStacks(user);
 
-      expect(screen.getByRole('button', { name: 'New stack' })).toBeDisabled();
+      expect(screen.getByRole('button', { name: 'New stack' })).toHaveAttribute(
+        'aria-disabled',
+        'true',
+      );
     });
   });
 });

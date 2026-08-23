@@ -11,6 +11,7 @@ import {
   socketUrl,
 } from './consolesession';
 import { browserSocket, type ConsoleSocket, type SocketFactory } from './consolesocket';
+import { useDialogFocus } from './dialogfocus';
 import { containerName, shortId } from './format';
 import { lazyTerminal, type Terminal, type TerminalFactory, type TerminalSize } from './terminal';
 
@@ -78,9 +79,9 @@ export function ConsoleDialog({
   const name = containerName(container.Names);
   const id = container.Id;
 
-  useEffect(() => {
-    closeRef.current?.focus();
-  }, []);
+  // Focus starts on Close, stays inside the dialog, and goes back to the row
+  // that opened it when the shell ends.
+  const dialogRef = useDialogFocus(closeRef);
 
   useEffect(() => {
     const onKey = (event: KeyboardEvent): void => {
@@ -210,6 +211,7 @@ export function ConsoleDialog({
       role="dialog"
       aria-modal="true"
       aria-labelledby="portainer-console-title"
+      ref={dialogRef}
       style={{ background: 'rgba(0,0,0,0.5)' }}
     >
       <div className="modal-dialog modal-xl modal-dialog-centered">

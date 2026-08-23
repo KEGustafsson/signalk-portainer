@@ -5,7 +5,20 @@
  */
 export class TtlCache {
   private readonly entries = new Map<string, { value: unknown; expiresAt: number }>();
-  private readonly inflight = new Map<string, Promise<unknown>>();
+  /**
+   * The load in flight per key, with the epoch it started in.
+   *
+   * The epoch is carried here because a pending promise is served to later
+   * callers before anything else is consulted: a load that started before an
+   * invalidation carries pre-invalidation data, so joining a caller that
+   * arrived after one to it answers a question it did not ask — stop a
+   * container, refetch, and it is still listed as running.
+   *
+   * invalidate() leaves the entry in place rather than deleting it. Deleting
+   * would let the older load's `.finally` remove a newer caller's promise, and
+   * every caller after that would start a load of its own.
+   */
+  private readonly inflight = new Map<string, { promise: Promise<unknown>; epoch: number }>();
   /**
    * Per-key epoch, bumped by invalidate(); a load started in an earlier epoch
    * never writes. Kept per key rather than global so invalidating the container
@@ -19,10 +32,10 @@ export class TtlCache {
     const entry = this.entries.get(key);
     if (entry && entry.expiresAt > this.now()) return entry.value as T;
 
-    const pending = this.inflight.get(key);
-    if (pending) return pending as Promise<T>;
-
     const startedAt = this.epoch(key);
+    const pending = this.inflight.get(key);
+    if (pending && pending.epoch === startedAt) return pending.promise as Promise<T>;
+
     const promise = load()
       .then((value) => {
         // A load that was already in flight when invalidate() ran carries data
@@ -33,10 +46,12 @@ export class TtlCache {
         return value;
       })
       .finally(() => {
-        this.inflight.delete(key);
+        // Only while this load still owns the slot: an invalidation may have
+        // let a newer load take it, and that one must outlive this cleanup.
+        if (this.inflight.get(key)?.promise === promise) this.inflight.delete(key);
       });
 
-    this.inflight.set(key, promise);
+    this.inflight.set(key, { promise, epoch: startedAt });
     return promise;
   }
 

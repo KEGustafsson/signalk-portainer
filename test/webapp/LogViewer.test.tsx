@@ -317,6 +317,99 @@ describe('LogViewer', () => {
     expect(screen.getByText(/5000 lines/)).toBeInTheDocument();
   });
 
+  it('gives every row an identity that survives the next line', async () => {
+    // The rows used to be keyed on their index in the buffer. Once the buffer
+    // is full every arriving line shifts the rest down one place, so no key
+    // matches and React unmounts the whole buffer and mounts a replacement for
+    // it — 5000 nodes, per line. That the sequence numbers hold still across a
+    // drop is proved in logstream.test.ts; what this pins is that the viewer
+    // keys on them, so a row is the same DOM node before and after.
+    const user = userEvent.setup();
+    renderViewer();
+    await screen.findByText('listening on 8086');
+    const source = await startFollowing(user);
+    source.emit('open');
+    source.line('stdout', 'first');
+    const first = screen.getByText('first');
+
+    source.line('stdout', 'second');
+    source.line('stdout', 'third');
+
+    expect(screen.getByText('first')).toBe(first);
+  });
+
+  it('marks stderr in words, not only in colour', async () => {
+    // The downloaded file has prefixed [stderr] all along; on screen the only
+    // difference was a colour, which is no difference at all to an operator
+    // who cannot see it.
+    renderViewer();
+
+    const bad = await screen.findByText('disk almost full');
+    expect(bad).toHaveTextContent('stderr');
+    expect(screen.getByText('listening on 8086')).not.toHaveTextContent('stderr');
+  });
+
+  it('announces the stream status rather than only drawing it', async () => {
+    renderViewer();
+
+    await screen.findByText('listening on 8086');
+
+    expect(screen.getByRole('status')).toHaveTextContent('2 lines');
+  });
+
+  it('stops reading the whole buffer aloud while following', async () => {
+    // role="log" makes the pane a polite live region, so a followed container
+    // narrates its own output with no way to stop it short of closing the
+    // dialog. The status beside the controls says what is worth saying.
+    const user = userEvent.setup();
+    renderViewer();
+    await screen.findByText('listening on 8086');
+    const pane = screen.getByRole('log');
+    expect(pane).toHaveAttribute('aria-live', 'polite');
+
+    await startFollowing(user);
+
+    expect(screen.getByRole('log')).toHaveAttribute('aria-live', 'off');
+  });
+
+  it('gives focus back to the row it was opened from', async () => {
+    const opener = document.createElement('button');
+    opener.textContent = 'Logs';
+    document.body.append(opener);
+    opener.focus();
+
+    const { unmount } = renderViewer();
+    await screen.findByText('listening on 8086');
+    expect(screen.getByRole('button', { name: 'Close' })).toHaveFocus();
+
+    unmount();
+
+    // Not dropped on <body>, where the next Tab starts at the top of the
+    // Signal K admin UI instead of at the container the operator came from.
+    expect(opener).toHaveFocus();
+    opener.remove();
+  });
+
+  it('keeps Tab inside the dialog', async () => {
+    const user = userEvent.setup();
+    renderViewer();
+    await screen.findByText('listening on 8086');
+
+    const dialog = screen.getByRole('dialog');
+    const focusable = Array.from(
+      dialog.querySelectorAll<HTMLElement>(
+        'button:not([disabled]), input:not([disabled]), select:not([disabled])',
+      ),
+    );
+    const last = focusable[focusable.length - 1];
+    last?.focus();
+
+    await user.tab();
+
+    expect(dialog.contains(document.activeElement)).toBe(true);
+    expect(document.activeElement).toBe(focusable[0]);
+  });
+
   it('closes on Escape', async () => {
     const user = userEvent.setup();
     const onClose = jest.fn();

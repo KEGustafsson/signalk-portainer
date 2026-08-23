@@ -1,8 +1,8 @@
-import type { MockAgent } from 'undici';
+import { Agent, type MockAgent } from 'undici';
 import { PortainerClient, environmentHealth } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent } from './support';
+import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
 
 describe('PortainerClient authentication', () => {
   let agent: MockAgent;
@@ -13,6 +13,7 @@ describe('PortainerClient authentication', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('sends an API token in X-API-Key and never as a Bearer header', async () => {
@@ -109,6 +110,71 @@ describe('PortainerClient authentication', () => {
     expect(authCalls).toBe(2);
   });
 
+  it('keeps Docker’s “already in that state” a success across a JWT renewal', async () => {
+    // The retry used to drop the flag that claims 304 as success, so a Stop of
+    // an already-stopped container failed whenever the attempt that reached
+    // Portainer was the one after re-authentication — which is every attempt
+    // following a Portainer restart.
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/auth', method: 'POST' })
+      .reply(200, { jwt: 'eyJhbGciOiJIUzI1NiJ9.payload.signature' })
+      .times(2);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/abc/stop', method: 'POST' })
+      .reply(401, { message: 'expired' });
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/containers/abc/stop', method: 'POST' })
+      .reply(304, '');
+
+    const client = createClient(agent, {
+      auth: { mode: 'userPass', username: 'admin', password: 'hunter2' },
+    });
+
+    await expect(client.docker.stopContainer('abc')).resolves.toBeUndefined();
+  });
+
+  it('does not discard a token a sibling request has already renewed', async () => {
+    // Two requests are in flight when Portainer restarts. The first renews the
+    // JWT; the second's 401 arrives afterwards, and clearing the token blindly
+    // throws away the fresh one — so every in-flight request pays for its own
+    // POST /api/auth instead of sharing the one renewal.
+    const pool = agent.get(BASE_URL);
+    let authCalls = 0;
+    pool
+      .intercept({ path: '/api/auth', method: 'POST' })
+      .reply(200, () => {
+        authCalls += 1;
+        return { jwt: `eyJhbGciOiJIUzI1NiJ9.payload.token${authCalls}` };
+      })
+      .times(3);
+
+    pool
+      .intercept({ path: '/api/system/status', method: 'GET' })
+      .reply(401, { message: 'expired' });
+    pool.intercept({ path: '/api/system/status', method: 'GET' }).reply(200, fixtures.systemStatus);
+    // The slow one: its rejection lands after the renewal above has finished.
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(401, { message: 'expired' })
+      .delay(50);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+    const client = createClient(agent, {
+      auth: { mode: 'userPass', username: 'admin', password: 'hunter2' },
+    });
+
+    await Promise.all([client.systemStatus(), client.listEnvironments()]);
+
+    // One authentication to start with, one renewal shared by both.
+    expect(authCalls).toBe(2);
+  });
+
   it('does not retry a rejected API key, and explains the Bearer mistake', async () => {
     agent
       .get(BASE_URL)
@@ -133,6 +199,7 @@ describe('PortainerClient environment resolution', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptEnvironments = (environments: unknown[], times = 1): void => {
@@ -247,6 +314,7 @@ describe('PortainerClient capability probe', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptProbe = (info: object): void => {
@@ -295,6 +363,7 @@ describe('PortainerClient transport failures', () => {
     expect((error as PortainerError).message).toContain('self-signed');
     expect((error as PortainerError).message).toContain(BASE_URL);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 
@@ -409,18 +478,26 @@ describe('PortainerClient transport failure classification', () => {
     expect(error.message).toContain('before the configured timeout');
     expect(error.message).not.toContain('self-signed');
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 
 describe('PortainerClient TLS and lifecycle', () => {
   it('builds its own dispatcher when TLS options are supplied, and closes it', () => {
+    // Asserting only that close() does not throw passes with the whole Agent
+    // branch deleted, which is how a dropped dispatcher — and with it the CA
+    // the operator configured — goes unnoticed.
+    const close = jest.spyOn(Agent.prototype, 'close').mockResolvedValue(undefined);
     const client = new PortainerClient({
       baseUrl: BASE_URL,
       auth: { mode: 'apiKey', apiKey: 'ptr_x' },
       tls: { rejectUnauthorized: false },
     });
 
-    expect(() => client.close()).not.toThrow();
+    client.close();
+
+    expect(close).toHaveBeenCalledTimes(1);
+    close.mockRestore();
   });
 
   it('accepts a CA and a servername override', () => {
@@ -435,11 +512,17 @@ describe('PortainerClient TLS and lifecycle', () => {
   });
 
   it('closing a client that owns no dispatcher is a no-op', () => {
+    // The other direction: a client left on undici's defaults has nothing of
+    // its own to close, and must not reach for a dispatcher it shares.
+    const close = jest.spyOn(Agent.prototype, 'close').mockResolvedValue(undefined);
     const client = new PortainerClient({
       baseUrl: BASE_URL,
       auth: { mode: 'apiKey', apiKey: 'ptr_x' },
     });
+
     expect(() => client.close()).not.toThrow();
+    expect(close).not.toHaveBeenCalled();
+    close.mockRestore();
   });
 
   it('drops cached reads on invalidate', async () => {
@@ -457,6 +540,7 @@ describe('PortainerClient TLS and lifecycle', () => {
 
     expect(agent.pendingInterceptors()).toHaveLength(0);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('rejects an auth response that carries no jwt', async () => {
@@ -470,6 +554,7 @@ describe('PortainerClient TLS and lifecycle', () => {
 
     expect((error as PortainerError).message).toMatch(/no jwt field/);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('surfaces a rejected username and password', async () => {
@@ -487,15 +572,42 @@ describe('PortainerClient TLS and lifecycle', () => {
     expect((error as PortainerError).status).toBe(401);
     expect((error as PortainerError).message).toMatch(/username\/password/);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 
 describe('PortainerClient introspection', () => {
-  it('never exposes credentials', () => {
+  it('reports connection facts and nothing else', () => {
+    // Asserting the absence of the password proves little on its own: it was
+    // never a candidate for this object. What keeps it out is the field list,
+    // so that is what is pinned — a field added here reaches every browser
+    // that asks for /api/instances.
     const client = new PortainerClient({
       baseUrl: BASE_URL,
       auth: { mode: 'apiKey', apiKey: 'ptr_supersecret' },
+      environment: { id: 4 },
+    });
+
+    expect(client.describeSelf()).toEqual({
+      baseUrl: BASE_URL,
+      authMode: 'apiKey',
+      environment: { id: 4 },
+      timeoutMs: 10_000,
+      writeTimeoutMs: 300_000,
     });
     expect(JSON.stringify(client.describeSelf())).not.toContain('supersecret');
+  });
+
+  it('scrubs a credential pasted into a field it does report', () => {
+    // The selector is reported verbatim, and an operator who pasted a token
+    // into the environment name would otherwise have it echoed back into every
+    // instance listing and every debug log line.
+    const client = new PortainerClient({
+      baseUrl: BASE_URL,
+      auth: { mode: 'apiKey', apiKey: 'ptr_x' },
+      environment: { name: 'ptr_pastedbymistake' },
+    });
+
+    expect(client.describeSelf().environment).toEqual({ name: '[redacted]' });
   });
 });

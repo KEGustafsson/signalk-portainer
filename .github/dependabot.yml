@@ -1,0 +1,48 @@
+# ─────────────────────────────────────────────────────────────
+# Dependency updates.
+#
+# Two ecosystems, and the second is the one that is easy to
+# forget: the reusable SignalK workflow and the actions inside
+# our own jobs are pinned by SHA, and a pinned SHA never
+# updates itself. Without the github-actions entry the pin
+# quietly becomes a permanently stale workflow.
+# ─────────────────────────────────────────────────────────────
+version: 2
+
+updates:
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      # One PR for the toolchain rather than one per package: eslint,
+      # prettier, jest, ts-jest, webpack and the typescript-eslint packages
+      # move together and are only ever reviewed together.
+      dev-dependencies:
+        dependency-type: development
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # `engines.node` is >=22 and the CI matrix is 22/24, so the types have
+      # to describe Node 22 — a newer major would put APIs in the typechecker
+      # that are not on the boat. Bump this deliberately with the engine.
+      - dependency-name: '@types/node'
+        update-types:
+          - version-update:semver-major
+      # Tracks the Express that signalk-server actually runs (^4.22.2), not
+      # the newest types published.
+      - dependency-name: '@types/express'
+        update-types:
+          - version-update:semver-major
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      actions:
+        patterns:
+          - '*'

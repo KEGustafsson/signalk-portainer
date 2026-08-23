@@ -2,7 +2,7 @@ import type { MockAgent } from 'undici';
 import { logQuery, DEFAULT_LOG_TAIL, MAX_LOG_TAIL } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent } from './support';
+import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
 
 describe('PortainerClient docker read surface', () => {
   let agent: MockAgent;
@@ -13,6 +13,7 @@ describe('PortainerClient docker read surface', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   /** Every docker call resolves the environment first. */
@@ -81,6 +82,38 @@ describe('PortainerClient docker read surface', () => {
     await client.docker.listContainers();
 
     expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('waits out the grace period it asked Docker for', async () => {
+    // Docker holds the request open for the whole grace period before it
+    // SIGKILLs, so a 30s stop bounded by the 10s read budget aborts a call
+    // that was going to succeed — and Docker stops the container anyway,
+    // leaving the operator with an error and a stopped container.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints/1/docker/containers/abc/stop?t=30', method: 'POST' })
+      .reply(204, '')
+      .delay(150);
+
+    const client = createClient(agent, { timeoutMs: 50 });
+
+    await expect(client.docker.stopContainer('abc', 30)).resolves.toBeUndefined();
+  });
+
+  it('holds a call that asked for no grace period to the read budget', async () => {
+    // The budget is widened for the wait the caller asked for, not for
+    // everything: a start that hangs must still give up.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints/1/docker/containers/abc/start', method: 'POST' })
+      .reply(204, '')
+      .delay(150);
+
+    const client = createClient(agent, { timeoutMs: 50 });
+
+    await expect(client.docker.startContainer('abc')).rejects.toBeInstanceOf(PortainerError);
   });
 
   it('encodes the container id into the inspect path', async () => {
@@ -177,6 +210,7 @@ describe('PortainerClient stacks', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('returns only the stacks belonging to this environment', async () => {
@@ -287,6 +321,7 @@ describe('PortainerClient log streams', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const streamPath =

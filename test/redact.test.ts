@@ -85,4 +85,33 @@ describe('redactValue', () => {
     expect(() => redactValue(node)).not.toThrow();
     expect((redactValue(node) as { self: unknown }).self).toBe('[circular]');
   });
+
+  it('keeps one object referenced twice, which is not a cycle', () => {
+    // Every facade response goes through here. A shared object — one container
+    // listed under two keys, one environment on two instances — is repetition,
+    // not recursion, and blanking the second sighting deletes real data from
+    // the response the panel renders.
+    const shared = { name: 'influxdb', state: 'running' };
+
+    expect(redactValue({ a: shared, b: shared })).toEqual({
+      a: { name: 'influxdb', state: 'running' },
+      b: { name: 'influxdb', state: 'running' },
+    });
+  });
+
+  it('keeps a row that appears twice in the same list', () => {
+    const row = { id: 'abc' };
+
+    expect(redactValue({ list: [row, row] })).toEqual({ list: [{ id: 'abc' }, { id: 'abc' }] });
+  });
+
+  it('still catches a cycle reached through a sibling branch', () => {
+    // The narrower guard must not lose the case it exists for: the root is
+    // reachable again from inside one of its own children.
+    const root: Record<string, unknown> = { name: 'local' };
+    root.children = [{ parent: root }];
+
+    const result = redactValue(root) as { children: { parent: unknown }[] };
+    expect(result.children[0]?.parent).toBe('[circular]');
+  });
 });

@@ -21,12 +21,28 @@ const SWARM_SERVICE = 'com.docker.swarm.service.name';
  * graft a container onto a deeper level of the tree.
  */
 export function normalizeSegment(value: string): string {
+  return segmentOf(value).segment;
+}
+
+/** The segment a value with nothing usable left in it collapses to. */
+const UNKNOWN_SEGMENT = 'unknown';
+
+/**
+ * A normalised segment, and whether anything of the value survived.
+ *
+ * The two have to be reported separately because the sentinel is itself a legal
+ * segment: a container named `unknown` normalises to exactly what `---` does.
+ * Testing the string alone sent that container to the short-id fallback, and a
+ * short id changes on every recreate, so its path moved every time compose
+ * touched it.
+ */
+function segmentOf(value: string): { segment: string; usable: boolean } {
   const cleaned = value
     .trim()
     .toLowerCase()
     .replace(/[^a-z0-9]+/g, '_')
     .replace(/^_+|_+$/g, '');
-  return cleaned || 'unknown';
+  return cleaned ? { segment: cleaned, usable: true } : { segment: UNKNOWN_SEGMENT, usable: false };
 }
 
 /** Where a container's key came from, for diagnostics and for the tests. */
@@ -66,8 +82,8 @@ export function containerKey(container: DockerContainer): ContainerKey {
 
   const name = container.Names?.[0]?.replace(/^\//, '').trim();
   if (name) {
-    const normalized = normalizeSegment(name);
-    if (normalized !== 'unknown') return { key: normalized, source: 'name' };
+    const normalized = segmentOf(name);
+    if (normalized.usable) return { key: normalized.segment, source: 'name' };
   }
 
   return { key: normalizeSegment(container.Id.slice(0, 12)), source: 'id' };
@@ -93,22 +109,44 @@ export function assignKeys(containers: DockerContainer[]): Map<string, Container
     else byKey.set(key, [container]);
   }
 
+  // Every unshared key is claimed before any disambiguated one is built, so a
+  // generated key can be checked against all of them. Appending the short id
+  // without that check produces a key another container already holds:
+  // `/ais-logger` and `/ais_logger` both become `ais_logger_<id>`, and a third
+  // container named `/ais-logger-<id>` is already sitting on that path. Both
+  // would publish onto it, and a PUT would reach whichever Docker listed last.
+  const taken = new Set<string>();
+  for (const [key, bucket] of byKey) if (bucket.length === 1) taken.add(key);
+
   const assigned = new Map<string, ContainerKey>();
   for (const [key, bucket] of byKey) {
     for (const container of bucket) {
       const resolved = containerKey(container);
-      assigned.set(
-        container.Id,
-        bucket.length === 1
-          ? resolved
-          : {
-              key: `${key}_${normalizeSegment(container.Id.slice(0, 12))}`,
-              source: resolved.source,
-            },
-      );
+      const unique = bucket.length === 1 ? key : uniqueKey(key, container.Id, taken);
+      taken.add(unique);
+      assigned.set(container.Id, { key: unique, source: resolved.source });
     }
   }
   return assigned;
+}
+
+/**
+ * `<key>_<short id>`, widened until nothing else holds it.
+ *
+ * The full id is unique, so the widest form always is; the numeric suffix
+ * covers the remaining case of a container named after another's disambiguated
+ * key. Deterministic given the id-sorted input, so the same set of containers
+ * always produces the same assignment.
+ */
+function uniqueKey(key: string, id: string, taken: ReadonlySet<string>): string {
+  const full = normalizeSegment(id);
+  for (let width = Math.min(12, full.length); width <= full.length; width += 4) {
+    const candidate = `${key}_${full.slice(0, width)}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+  let suffix = 2;
+  while (taken.has(`${key}_${full}_${suffix}`)) suffix += 1;
+  return `${key}_${full}_${suffix}`;
 }
 
 /** Joins a path from already-safe segments. */
@@ -126,3 +164,54 @@ export function parseHealth(status: string | undefined): string | undefined {
   const match = /\((health: )?(healthy|unhealthy|starting)\)/i.exec(status);
   return match?.[2]?.toLowerCase();
 }
+
+/**
+ * Does a configured container reference name this container?
+ *
+ * An operator may write the key the plugin publishes, the name `docker ps`
+ * shows, or an id they copied — so all three are accepted rather than making
+ * them discover which one the plugin wanted. Shared by the watchdog and by the
+ * PUT allowlist so the two cannot drift into disagreeing about what a
+ * reference means.
+ */
+export function matchesContainerRef(
+  container: DockerContainer,
+  key: string,
+  wanted: string,
+): boolean {
+  return matchesContainerIdentity(
+    { id: container.Id, name: container.Names?.[0]?.replace(/^\//, '') },
+    key,
+    wanted,
+  );
+}
+
+/**
+ * The same rule over the little that a PUT handler keeps.
+ *
+ * The PUT side remembers only an id and a name per key, not the whole
+ * container, so the rule is written against that and the fuller shape adapts
+ * to it — one definition, so the watchdog and the allowlist cannot come to
+ * disagree about what a reference means.
+ */
+export function matchesContainerIdentity(
+  identity: { id: string; name?: string },
+  key: string,
+  wanted: string,
+): boolean {
+  const target = wanted.trim();
+  if (!target) return false;
+  const normalized = normalizeSegment(target);
+  if (key === normalized) return true;
+  if (identity.name && normalizeSegment(identity.name) === normalized) return true;
+
+  const id = target.toLowerCase();
+  return id.length >= MIN_ID_PREFIX && identity.id.toLowerCase().startsWith(id);
+}
+
+/**
+ * The shortest id prefix a configured reference may use. Six hex characters
+ * is short enough to copy from `docker ps` and long enough not to match a
+ * container the operator did not mean.
+ */
+export const MIN_ID_PREFIX = 6;

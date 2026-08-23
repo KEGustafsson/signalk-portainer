@@ -82,8 +82,15 @@ With the server up, capture:
 
 ```bash
 node tools/screenshots/capture.mjs                       # into docs/images
-node tools/screenshots/capture.mjs --server http://pi.local:3000 --out /tmp/shots
+node tools/screenshots/capture.mjs --out /tmp/shots      # somewhere other than docs/
 ```
+
+`--server` defaults to `http://127.0.0.1:3000` and the script refuses any
+address that is not loopback, because of what it writes (below): pointed at a
+boat it would overwrite the plugin options that boat is running on. A
+throwaway server on another host can be captured with
+`--server http://host:3000 --allow-remote-writes`, which is the acknowledgement
+that its plugin configuration is expendable.
 
 The script drives the admin UI the way a person would — pressing an environment
 row to choose it, clicking through the tabs, opening the log viewer with Follow

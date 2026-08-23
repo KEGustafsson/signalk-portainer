@@ -6,16 +6,24 @@ import type { InstanceRegistry } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 
 /** Every `ws` socket the module under test asked for, and what it asked for. */
-const mockSockets: { url: string; options: Record<string, unknown> }[] = [];
+const mockSockets: { url: string; options: Record<string, unknown>; terminated: boolean }[] = [];
+/**
+ * When set, a socket accepts the connection and never completes the upgrade —
+ * a Portainer behind a proxy that answers TCP and nothing else. `ws` emits
+ * neither 'open' nor 'error' for that.
+ */
+let mockSocketStalls = false;
 
 jest.mock('ws', () => ({
   WebSocket: class {
     constructor(url: string, options: Record<string, unknown>) {
-      mockSockets.push({ url, options });
+      this.record = { url, options, terminated: false };
+      mockSockets.push(this.record);
       // The real socket opens on the next turn, so the await in connectWithWs
       // is a real one.
-      setImmediate(() => this.handlers.get('open')?.());
+      if (!mockSocketStalls) setImmediate(() => this.handlers.get('open')?.());
     }
+    private readonly record: { url: string; options: Record<string, unknown>; terminated: boolean };
     private readonly handlers = new Map<string, () => void>();
     once(event: string, listener: () => void): this {
       this.handlers.set(event, listener);
@@ -26,6 +34,9 @@ jest.mock('ws', () => ({
     }
     send(): void {}
     close(): void {}
+    terminate(): void {
+      this.record.terminated = true;
+    }
   },
 }));
 
@@ -48,7 +59,14 @@ class FakeSocket implements RelaySocket {
     return this;
   }
   emit(event: string, ...args: unknown[]): void {
-    for (const listener of this.listeners.get(event) ?? []) {
+    const listeners = this.listeners.get(event) ?? [];
+    // Node's EventEmitter throws an 'error' that nobody is listening for, and
+    // `ws` sockets are EventEmitters — so a test that emits one without this
+    // cannot tell whether the plugin attached its handler in time.
+    if (event === 'error' && listeners.length === 0) {
+      throw args[0] instanceof Error ? args[0] : new Error(String(args[0]));
+    }
+    for (const listener of listeners) {
       (listener as (...values: unknown[]) => void)(...args);
     }
   }
@@ -102,6 +120,7 @@ describe('openConsole', () => {
       registry?: () => InstanceRegistry | undefined;
       /** Leaves `connect` unset, so the real `ws` client is used. */
       realConnect?: true;
+      connectTimeoutMs?: number;
     } = {},
   ) => {
     const endpoint = new FakeEndpoint();
@@ -127,6 +146,9 @@ describe('openConsole', () => {
       registry: overrides.registry ?? (() => registry),
       log: (message) => lines.push(message),
       idleMs: 0,
+      ...(overrides.connectTimeoutMs === undefined
+        ? {}
+        : { connectTimeoutMs: overrides.connectTimeoutMs }),
       ...(overrides.limits ? { limits: overrides.limits } : {}),
       ...(overrides.realConnect ? {} : { connect: overrides.connect ?? (() => upstream) }),
     });
@@ -357,6 +379,111 @@ describe('openConsole', () => {
     await connect(tickets.mint(grant));
 
     expect(sessions.size).toBe(0);
+  });
+
+  it('records the shell before Portainer has answered', async () => {
+    // `ws` writes the 101 response before it fires 'connection', so the
+    // browser's onopen — and the resize it sends immediately after — arrive
+    // while this is still waiting for the upstream handshake. A session
+    // recorded only afterwards made that first resize a 404, and the shell
+    // stayed at Docker's 80x24 for the rest of its life.
+    let arrive!: (socket: RelaySocket) => void;
+    const pending = new Promise<RelaySocket>((resolve) => {
+      arrive = resolve;
+    });
+    const { tickets, sessions, connect } = setup({ connect: () => pending });
+
+    await connect(tickets.mint(grant));
+
+    expect(sessions.get('session-1')).toEqual({
+      instance: 'boat',
+      execId: 'exec-1',
+      containerId: 'c1f0e2a3b4c5d6e7',
+    });
+    arrive(new FakeSocket());
+    await new Promise((resolve) => setImmediate(resolve));
+  });
+
+  it('forgets the shell again when the console never opens', async () => {
+    // The session is recorded before the awaits, so every path that does not
+    // reach the relay has to take it back out: a resize would otherwise reach
+    // an exec instance that never started.
+    let arrive!: (socket: RelaySocket) => void;
+    const pending = new Promise<RelaySocket>((resolve) => {
+      arrive = resolve;
+    });
+    const { tickets, sessions, connect, server } = setup({ connect: () => pending });
+
+    await connect(tickets.mint(grant));
+    server.close();
+    arrive(new FakeSocket());
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(sessions.size).toBe(0);
+  });
+
+  it('gives up on a Portainer that never completes the handshake', async () => {
+    // A socket that connects and never upgrades emits neither 'open' nor
+    // 'error', so the await held a console permit that only an error would
+    // have released — three of those and the console is refused until Signal K
+    // restarts.
+    mockSockets.length = 0;
+    mockSocketStalls = true;
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    try {
+      const { tickets, connect, sessions } = setup({
+        realConnect: true,
+        connectTimeoutMs: 20,
+        limits,
+      });
+
+      const browser = await connect(tickets.mint(grant));
+      await new Promise((resolve) => setTimeout(resolve, 80));
+
+      expect(browser.closed?.code).toBe(RELAY_CLOSE.upstream);
+      // The socket is torn down rather than left connected to Portainer, and
+      // the permit is back.
+      expect(mockSockets[0]?.terminated).toBe(true);
+      expect(limits.openCount).toBe(0);
+      expect(sessions.size).toBe(0);
+    } finally {
+      mockSocketStalls = false;
+    }
+  });
+
+  it('treats a browser that errors while Portainer answers as gone', async () => {
+    // The browser socket has no 'error' listener until relay() attaches one,
+    // and on four paths it never reaches relay at all.
+    let arrive!: (socket: RelaySocket) => void;
+    const pending = new Promise<RelaySocket>((resolve) => {
+      arrive = resolve;
+    });
+    const upstream = new FakeSocket();
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    const { tickets, connect, sessions } = setup({ connect: () => pending, limits });
+
+    const browser = await connect(tickets.mint(grant));
+    expect(() => browser.emit('error', new Error('the socket failed'))).not.toThrow();
+    arrive(upstream);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(upstream.closed).toBeDefined();
+    expect(limits.openCount).toBe(0);
+    expect(sessions.size).toBe(0);
+  });
+
+  it('logs a connection that failed outside its own try, rather than rejecting', async () => {
+    // An unhandled rejection ends the whole Signal K process, not just the
+    // console.
+    const { tickets, connect, lines } = setup({
+      registry: () => {
+        throw new Error('registry exploded');
+      },
+    });
+
+    await connect(tickets.mint(grant));
+
+    expect(lines.join('\n')).toContain('registry exploded');
   });
 
   it('logs an endpoint error rather than throwing out of it', () => {

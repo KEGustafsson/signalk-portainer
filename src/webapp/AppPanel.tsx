@@ -15,9 +15,10 @@ import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
 import { ConsoleDialog } from './ConsoleDialog';
 import { PanelBoundary } from './PanelBoundary';
 import { LogViewer } from './LogViewer';
+import { StackConfirmDialog, type ConfirmableStackAction } from './StackConfirmDialog';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
-import { normalizeStacks, type StackAction } from './stackcontrol';
+import { STACK_CONTROL_DISABLED, normalizeStacks, type StackAction } from './stackcontrol';
 import {
   actionLabel,
   actionRequest,
@@ -31,6 +32,7 @@ import { containerName } from './format';
 import {
   ContainersTable,
   EnvironmentsTable,
+  GatedButton,
   ImagesTable,
   NetworksTable,
   NodesTable,
@@ -82,6 +84,13 @@ const TABS: TabSpec[] = [
 /** Where the panel opens, and where it falls back to. */
 const LANDING_TAB: TabId = 'environments';
 
+/** The one panel every tab draws into, named so each tab can point at it. */
+const TAB_PANEL_ID = 'portainer-tabpanel';
+
+function tabButtonId(id: TabId): string {
+  return `portainer-tab-${id}`;
+}
+
 /** Shapes returned by the facade for each tab. */
 interface TabPayload {
   environments?: EnvironmentRow[];
@@ -124,6 +133,13 @@ function Panel(): ReactElement {
   const [tab, setTab] = useState<TabId>(LANDING_TAB);
   const [payload, setPayload] = useState<TabPayload>({});
   const [error, setError] = useState<ApiError | undefined>(undefined);
+  // Kept apart from `error` for the reason the panel keeps every other outcome
+  // apart from it: `load` clears `error` on its next success, and the reads
+  // that set this one are not the reads `load` makes. A refused environment
+  // switch cleared by a poll is the worst case — the poll succeeded against
+  // the environment the operator failed to leave, so the banner disappears,
+  // the selection has not moved, and the switch reads as having worked.
+  const [setupError, setSetupError] = useState<ApiError | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [control, setControl] = useState<ControlState | undefined>(undefined);
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
@@ -134,6 +150,10 @@ function Panel(): ReactElement {
   const [editing, setEditing] = useState<StackTarget | undefined>(undefined);
   const [deleting, setDeleting] = useState<Stack | undefined>(undefined);
   const [busyStack, setBusyStack] = useState<number | undefined>(undefined);
+  // The stack action waiting to be confirmed, if any.
+  const [confirmingStack, setConfirmingStack] = useState<
+    { stack: Stack; action: ConfirmableStackAction } | undefined
+  >(undefined);
   // Kept apart from the poll's error for the same reason a container action is.
   const [stackResult, setStackResult] = useState<
     { ok: true; message: string } | { ok: false; error: ApiError } | undefined
@@ -154,7 +174,14 @@ function Panel(): ReactElement {
   // Which instance is selected right now, readable from inside an async action
   // that started before the operator switched.
   const selected = useRef<string | undefined>(instance);
-  selected.current = instance;
+  // Written from an effect rather than during render: React may discard a
+  // render it never commits, and a ref written from one of those would carry a
+  // value the component never actually rendered with. This ref is the guard
+  // that stops a finished action repainting the wrong instance's table, so it
+  // has to hold what was committed, not what was merely attempted.
+  useEffect(() => {
+    selected.current = instance;
+  });
 
   const activeTab = useMemo(
     () => TABS.find((candidate) => candidate.id === tab) ?? TABS[0]!,
@@ -184,7 +211,12 @@ function Panel(): ReactElement {
         setInstance(body.instances.find((entry) => entry.isDefault)?.name);
       })
       .catch((cause: unknown) => {
-        if (!cancelled) setError(asApiError(cause));
+        if (cancelled) return;
+        setSetupError(asApiError(cause));
+        // Nothing else will run: every read below waits on an instance. Left
+        // true, the panel sits under "Loading…" forever beside an error that
+        // says it has already given up.
+        setLoading(false);
       });
     return () => {
       cancelled = true;
@@ -195,33 +227,53 @@ function Panel(): ReactElement {
    * Read on its own rather than with the tab payload: every other read needs a
    * chosen environment, and this is the one that lets the operator choose.
    */
-  const loadEnvironments = useCallback(async (): Promise<void> => {
-    const body = await apiGet<{ environments: EnvironmentRow[]; selected: number | null }>(
-      '/environments',
-      instance,
-    );
-    setEnvironments(body.environments ?? []);
-    // `?? null` rather than leaving it undefined: undefined means "not asked
-    // yet" and holds the panel back, and an answer that omits the field would
-    // otherwise hold it back for good.
-    setEnvironment(body.selected ?? null);
-  }, [instance]);
+  const loadEnvironments = useCallback(
+    async (signal?: AbortSignal, wanted: () => boolean = () => true): Promise<void> => {
+      const body = await apiGet<{ environments: EnvironmentRow[]; selected: number | null }>(
+        '/environments',
+        instance,
+        signal,
+      );
+      // An answer belonging to an instance the operator has already left must
+      // not paint the picker: the header would name the wrong Docker host, and
+      // the Environments tab would then offer the other instance's ids —
+      // pressing one sends that id to this instance.
+      if (!wanted()) return;
+      // Through the same guard the rest of the panel reads rows with: `??`
+      // stops at null and undefined, and a truthy non-array walks straight into
+      // `rows.map` during render.
+      setEnvironments(rowsOf(body.environments));
+      // `?? null` rather than leaving it undefined: undefined means "not asked
+      // yet" and holds the panel back, and an answer that omits the field would
+      // otherwise hold it back for good.
+      setEnvironment(body.selected ?? null);
+    },
+    [instance],
+  );
 
   useEffect(() => {
     if (instances.length === 0) return;
     let cancelled = false;
+    // Cancelled as well as guarded: a read left open against the instance the
+    // operator has left is one more request the browser is waiting on.
+    const controller = new AbortController();
     setEnvironment(undefined);
-    loadEnvironments().catch((cause: unknown) => {
-      if (cancelled) return;
-      setError(asApiError(cause));
-      // Not left as undefined: that state stops the panel from loading
-      // anything, and a picker that could not be read is no reason to keep the
-      // rest of it dark. The tab read runs and reports whatever is really
-      // wrong.
-      setEnvironment(null);
-    });
+    loadEnvironments(controller.signal, () => !cancelled)
+      .then(() => {
+        if (!cancelled) setSetupError(undefined);
+      })
+      .catch((cause: unknown) => {
+        if (cancelled || isAbort(cause)) return;
+        setSetupError(asApiError(cause));
+        // Not left as undefined: that state stops the panel from loading
+        // anything, and a picker that could not be read is no reason to keep the
+        // rest of it dark. The tab read runs and reports whatever is really
+        // wrong.
+        setEnvironment(null);
+      });
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [loadEnvironments, instances.length]);
 
@@ -296,7 +348,15 @@ function Panel(): ReactElement {
     // the choice is made from. A resolved-to-nothing environment with nothing
     // to choose from is a different thing entirely, and is left to the tab
     // read so the real error is the one that surfaces.
-    if (environment === undefined || (needsEnvironment && tab !== LANDING_TAB)) {
+    // Still loading, and it must keep saying so: the answer to "which
+    // environment" has not arrived, so a table drawn now would show "No
+    // containers" — which reads as a Docker host with nothing on it rather
+    // than as a slow link, and there is no way for the operator to tell those
+    // two apart afterwards.
+    if (environment === undefined) return;
+    if (needsEnvironment && tab !== LANDING_TAB) {
+      // This one really has finished: the panel has its answer, and the answer
+      // is that the operator has to choose before anything can be read.
       setLoading(false);
       return;
     }
@@ -379,6 +439,20 @@ function Panel(): ReactElement {
     [instance, load],
   );
 
+  /** Sends one of the simple stack verbs, once there is nothing left to ask. */
+  const sendStackAction = useCallback(
+    (stack: Stack, action: 'start' | ConfirmableStackAction): void => {
+      // Spelled out rather than derived: "start" + "ped" is not a word.
+      const done = action === 'redeploy' ? 'redeployed' : action === 'stop' ? 'stopped' : 'started';
+      void runStack(
+        stack,
+        () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance),
+        done,
+      ).then(() => setConfirmingStack(undefined));
+    },
+    [instance, runStack],
+  );
+
   const requestStackAction = useCallback(
     (stack: Stack, action: StackAction): void => {
       setStackResult(undefined);
@@ -390,11 +464,18 @@ function Panel(): ReactElement {
         setDeleting(stack);
         return;
       }
-      // Spelled out rather than derived: "start" + "ped" is not a word.
-      const done = action === 'redeploy' ? 'redeployed' : action === 'stop' ? 'stopped' : 'started';
-      void runStack(stack, () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance), done);
+      // Stopping a stack stops every container in it, and redeploying pulls
+      // and recreates them — both more disruptive than stopping one container,
+      // which the panel already refuses to do without asking. Start is the
+      // exception, as it is for a container: its worst case is that nothing
+      // happens.
+      if (action === 'stop' || action === 'redeploy') {
+        setConfirmingStack({ stack, action });
+        return;
+      }
+      sendStackAction(stack, action);
     },
-    [instance, runStack],
+    [sendStackAction],
   );
 
   const deployStack = useCallback(
@@ -453,6 +534,7 @@ function Panel(): ReactElement {
     setShelling(undefined);
     setEditing(undefined);
     setDeleting(undefined);
+    setConfirmingStack(undefined);
     setStackResult(undefined);
   }, []);
 
@@ -489,8 +571,10 @@ function Panel(): ReactElement {
       // be actively misleading.
       setPayload({});
       setError(undefined);
+      setSetupError(undefined);
       setActionResult(undefined);
       setStackResult(undefined);
+      const startedOn = instance;
       try {
         await apiSend<{ selected: number; warning?: string }>(
           'PUT',
@@ -500,9 +584,15 @@ function Panel(): ReactElement {
           { id },
         );
         setEnvironment(id);
-        await loadEnvironments();
+        // Guarded the same way an action's refresh is: if the operator has
+        // switched Portainer while the PUT was in flight, this answer belongs
+        // to the one they left.
+        await loadEnvironments(undefined, () => selected.current === startedOn);
       } catch (cause) {
-        setError(asApiError(cause));
+        // Into the setup sink, never into `error`: the next poll succeeds
+        // against the environment that was never left, and would clear a
+        // refusal the operator has to see.
+        setSetupError(asApiError(cause));
       } finally {
         setSwitching(false);
       }
@@ -514,9 +604,49 @@ function Panel(): ReactElement {
   // being chosen once /instances answers, say.
   useEffect(() => {
     closeInstanceViews();
+    // What the last Portainer allowed says nothing about the next one. Left in
+    // place, Remove and Delete stay enabled and the swarm tabs stay visible
+    // until the new reads land, and a press inside that window ends in a 403
+    // instead of on a button that explains itself. Cleared here rather than in
+    // closeInstanceViews, which also runs on an environment switch — where
+    // neither read re-runs, and clearing them would disable the panel for good.
+    setControl(undefined);
+    setCapabilities(undefined);
     // Deliberately only on a change of instance: this closes dialogs, and
     // re-running it for any other reason would close one the operator opened.
   }, [instance]);
+
+  /**
+   * The arrow keys, Home and End across the tab strip.
+   *
+   * The strip holds one tab stop, so moving the selection has to carry focus
+   * with it — otherwise focus is left on a tab that is no longer selected and
+   * no longer in the tab order. The element is focused before the state
+   * changes, while it is certainly still on screen.
+   */
+  const onTabKeyDown = useCallback(
+    (event: React.KeyboardEvent<HTMLButtonElement>): void => {
+      const at = visibleTabs.findIndex((candidate) => candidate.id === tab);
+      if (at < 0) return;
+      const last = visibleTabs.length - 1;
+      const to =
+        event.key === 'ArrowRight'
+          ? (at + 1) % visibleTabs.length
+          : event.key === 'ArrowLeft'
+            ? (at + last) % visibleTabs.length
+            : event.key === 'Home'
+              ? 0
+              : event.key === 'End'
+                ? last
+                : undefined;
+      const next = to === undefined ? undefined : visibleTabs[to];
+      if (!next) return;
+      event.preventDefault();
+      document.getElementById(tabButtonId(next.id))?.focus();
+      setTab(next.id);
+    },
+    [tab, visibleTabs],
+  );
 
   return (
     <div className="p-3">
@@ -555,12 +685,23 @@ function Panel(): ReactElement {
         </div>
       </div>
 
-      <ul className="nav nav-tabs mb-3">
+      {/* A real tablist, not a row of buttons that happen to look like one:
+          the Bootstrap `active` class is a colour, and which tab is open is
+          the single most important thing about the state of this panel. */}
+      <ul className="nav nav-tabs mb-3" role="tablist">
         {visibleTabs.map((candidate) => (
-          <li className="nav-item" key={candidate.id}>
+          <li className="nav-item" key={candidate.id} role="presentation">
             <button
               type="button"
+              role="tab"
+              id={tabButtonId(candidate.id)}
+              aria-selected={candidate.id === tab}
+              aria-controls={TAB_PANEL_ID}
+              // One tab stop for the whole strip, as a tablist has: Tab reaches
+              // the tabs, the arrow keys move between them.
+              tabIndex={candidate.id === tab ? 0 : -1}
               className={`nav-link ${candidate.id === tab ? 'active' : ''}`}
+              onKeyDown={onTabKeyDown}
               onClick={() => setTab(candidate.id)}
             >
               {candidate.label}
@@ -579,6 +720,26 @@ function Panel(): ReactElement {
         <div className="alert alert-danger" role="alert">
           <div>{error.message}</div>
           {error.hint ? <div className="small mt-1">{error.hint}</div> : null}
+        </div>
+      ) : null}
+
+      {/* Dismissed by hand rather than by the next poll: this one outlives a
+          successful read, because a successful read is not an answer to it. */}
+      {setupError ? (
+        <div
+          className="alert alert-danger d-flex justify-content-between align-items-start"
+          role="alert"
+        >
+          <div>
+            <div>{setupError.message}</div>
+            {setupError.hint ? <div className="small mt-1">{setupError.hint}</div> : null}
+          </div>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label="Dismiss"
+            onClick={() => setSetupError(undefined)}
+          />
         </div>
       ) : null}
 
@@ -635,37 +796,49 @@ function Panel(): ReactElement {
         </div>
       ) : null}
 
-      {switching ? <div className="text-muted">Switching environment…</div> : null}
+      {/* Announced, not just drawn: both of these are the panel's answer to a
+          press, and a screen reader is told nothing by a bare div. */}
+      {switching ? (
+        <div className="text-muted" role="status">
+          Switching environment…
+        </div>
+      ) : null}
 
-      {loading && !error && !needsEnvironment ? <div className="text-muted">Loading…</div> : null}
+      {loading && !error && !needsEnvironment ? (
+        <div className="text-muted" role="status">
+          Loading…
+        </div>
+      ) : null}
 
       {/* The Environments tab renders with no environment chosen — it is where
           the choice is made. Every other tab has nothing to show until then. */}
       {!loading && !error && !switching && (!needsEnvironment || tab === LANDING_TAB) ? (
-        <TabBody
-          tab={tab}
-          payload={payload}
-          environments={environments}
-          environmentActions={{
-            onSelect: (id) => void selectEnvironment(id),
-            busy: switching,
-          }}
-          actions={{
-            control,
-            busyId,
-            onAction: requestAction,
-            onLogs: setViewing,
-            // Absent entirely, rather than disabled, on a server that cannot
-            // serve a console at all: there is nothing an operator could do
-            // about it, so a permanently dead button is only clutter.
-            ...(control?.console.available ? { onConsole: setShelling } : {}),
-          }}
-          stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
-          onNewStack={() => {
-            setStackResult(undefined);
-            setEditing({ kind: 'new' });
-          }}
-        />
+        <div role="tabpanel" id={TAB_PANEL_ID} aria-labelledby={tabButtonId(tab)}>
+          <TabBody
+            tab={tab}
+            payload={payload}
+            environments={environments}
+            environmentActions={{
+              onSelect: (id) => void selectEnvironment(id),
+              busy: switching,
+            }}
+            actions={{
+              control,
+              busyId,
+              onAction: requestAction,
+              onLogs: setViewing,
+              // Absent entirely, rather than disabled, on a server that cannot
+              // serve a console at all: there is nothing an operator could do
+              // about it, so a permanently dead button is only clutter.
+              ...(control?.console.available ? { onConsole: setShelling } : {}),
+            }}
+            stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
+            onNewStack={() => {
+              setStackResult(undefined);
+              setEditing({ kind: 'new' });
+            }}
+          />
+        </div>
       ) : null}
 
       {viewing ? (
@@ -718,6 +891,16 @@ function Panel(): ReactElement {
         />
       ) : null}
 
+      {confirmingStack ? (
+        <StackConfirmDialog
+          stack={confirmingStack.stack}
+          action={confirmingStack.action}
+          busy={busyStack === confirmingStack.stack.Id}
+          onCancel={() => setConfirmingStack(undefined)}
+          onConfirm={() => sendStackAction(confirmingStack.stack, confirmingStack.action)}
+        />
+      ) : null}
+
       {confirming ? (
         <ConfirmDialog
           request={confirming}
@@ -756,19 +939,12 @@ function TabBody({
       return (
         <div>
           <div className="d-flex justify-content-end mb-2">
-            <button
-              type="button"
+            <GatedButton
               className="btn btn-sm btn-outline-primary"
-              disabled={!stackActions.control?.allowPutControl}
-              title={
-                stackActions.control?.allowPutControl
-                  ? undefined
-                  : 'stack control is disabled; enable "Allow Signal K PUT control" in the plugin configuration'
-              }
-              onClick={onNewStack}
-            >
-              New stack
-            </button>
+              label="New stack"
+              {...(stackActions.control?.allowPutControl ? {} : { reason: STACK_CONTROL_DISABLED })}
+              onPress={onNewStack}
+            />
           </div>
           {/* Normalized rather than trusted: these rows carry the ids that
               destructive actions are sent with. */}
