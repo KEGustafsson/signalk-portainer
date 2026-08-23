@@ -2,7 +2,7 @@ import { ConfigError, normalizeConfig, type RawConfig } from '../src/config';
 
 const validInstance = {
   name: 'local',
-  host: 'localhost',
+  url: 'https://localhost:9443',
   apiKey: 'ptr_token',
 };
 
@@ -13,7 +13,7 @@ describe('normalizeConfig', () => {
     // Node's timer and does the same.
     const at = (intervalSeconds: unknown): number =>
       normalizeConfig({
-        instances: [{ name: 'local', host: 'h', apiKey: 'ptr_x' }],
+        instances: [{ name: 'local', url: 'https://h', apiKey: 'ptr_x' }],
         telemetry: { intervalSeconds },
       } as never).telemetry.intervalSeconds;
 
@@ -27,26 +27,51 @@ describe('normalizeConfig', () => {
   it('refuses a timeout large enough to abort instantly', () => {
     expect(() =>
       normalizeConfig({
-        instances: [{ name: 'local', host: 'h', apiKey: 'ptr_x', timeoutMs: 3_000_000_000 }],
+        instances: [
+          {
+            name: 'local',
+            url: 'https://h',
+            apiKey: 'ptr_x',
+            advanced: { timeoutMs: 3_000_000_000 },
+          },
+        ],
       }),
     ).toThrow(/between 1000 and 120000 ms/);
   });
 
-  it('builds a base URL from protocol, host, port and base path', () => {
-    const config = normalizeConfig({
-      instances: [{ ...validInstance, protocol: 'http', port: 9000, basePath: '/portainer/' }],
+  describe('the address', () => {
+    const urlOf = (url: string): string | undefined =>
+      normalizeConfig({ instances: [{ ...validInstance, url }] }).instances[0]?.baseUrl;
+
+    it('is taken as one field, the way everybody writes it', () => {
+      expect(urlOf('https://boat.local:9443')).toBe('https://boat.local:9443');
+      expect(urlOf('http://192.168.1.10:9000')).toBe('http://192.168.1.10:9000');
     });
-    expect(config.instances[0]?.baseUrl).toBe('http://localhost:9000/portainer');
-  });
 
-  it('defaults to https on 9443', () => {
-    const config = normalizeConfig({ instances: [validInstance] });
-    expect(config.instances[0]?.baseUrl).toBe('https://localhost:9443');
-  });
+    it('keeps a proxy prefix and drops the slash it may end with', () => {
+      expect(urlOf('https://boat.local:9443/portainer/')).toBe('https://boat.local:9443/portainer');
+    });
 
-  it('defaults to port 9000 for plain http', () => {
-    const config = normalizeConfig({ instances: [{ ...validInstance, protocol: 'http' }] });
-    expect(config.instances[0]?.baseUrl).toBe('http://localhost:9000');
+    it("uses the scheme's own port when none is given", () => {
+      // A Portainer behind a reverse proxy answers on 443, and typing a port
+      // should not be the price of that being understood.
+      expect(urlOf('https://portainer.example.com')).toBe('https://portainer.example.com');
+    });
+
+    it('keeps an IPv6 address in its brackets', () => {
+      expect(urlOf('https://[fd00::1]:9443')).toBe('https://[fd00::1]:9443');
+    });
+
+    it('says so rather than connecting somewhere unintended', () => {
+      expect(() => urlOf('boat.local')).toThrow(/not a URL/);
+      // "boat.local:9443" parses as a URL with a scheme of "boat.local", which
+      // is exactly the mistake this message has to name.
+      expect(() => urlOf('boat.local:9443')).toThrow(/https:\/\/ or http:\/\//);
+      expect(() => urlOf('ftp://boat.local')).toThrow(/https:\/\/ or http:\/\//);
+      expect(() => normalizeConfig({ instances: [{ name: 'local', apiKey: 'ptr_x' }] })).toThrow(
+        /has no address/,
+      );
+    });
   });
 
   it('rejects an empty instance list', () => {
@@ -82,19 +107,10 @@ describe('normalizeConfig', () => {
     ).toThrow(/username\/password but one of them is empty/);
   });
 
-  it('rejects an invalid port and an implausible timeout', () => {
-    expect(() => normalizeConfig({ instances: [{ ...validInstance, port: 70000 }] })).toThrow(
-      /invalid port/,
-    );
+  it('rejects an implausible timeout', () => {
     expect(() => normalizeConfig({ instances: [{ ...validInstance, timeoutMs: 10 }] })).toThrow(
       /between 1000 and 120000 ms/,
     );
-  });
-
-  it('rejects a base path that is not rooted', () => {
-    expect(() =>
-      normalizeConfig({ instances: [{ ...validInstance, basePath: 'portainer' }] }),
-    ).toThrow(/must start with/);
   });
 
   it('rejects a config whose every instance is disabled', () => {
@@ -108,7 +124,12 @@ describe('normalizeConfig', () => {
     expect(plain.instances[0]?.tls).toEqual({});
 
     const custom = normalizeConfig({
-      instances: [{ ...validInstance, rejectUnauthorized: false, caCert: 'PEM', servername: 'pi' }],
+      instances: [
+        {
+          ...validInstance,
+          advanced: { rejectUnauthorized: false, caCert: 'PEM', servername: 'pi' },
+        },
+      ],
     });
     expect(custom.instances[0]?.tls).toEqual({
       rejectUnauthorized: false,
@@ -189,5 +210,62 @@ describe('normalizeConfig', () => {
   it('treats an omitted environment as auto-select', () => {
     const config = normalizeConfig({ instances: [validInstance] });
     expect(config.instances[0]?.environment).toEqual({ id: null, name: '' });
+  });
+  /**
+   * The address used to be four fields, and the advanced settings sat flat
+   * beside the ones an operator fills in every time. Both are still read: a
+   * configuration written by an earlier build must keep connecting to the same
+   * Portainer rather than coming up empty and having to be typed again.
+   */
+  describe('a configuration written by an earlier build', () => {
+    const legacy = { name: 'local', host: 'localhost', apiKey: 'ptr_token' };
+
+    it('still builds the address from protocol, host, port and base path', () => {
+      const config = normalizeConfig({
+        instances: [{ ...legacy, protocol: 'http', port: 9000, basePath: '/portainer/' }],
+      });
+      expect(config.instances[0]?.baseUrl).toBe('http://localhost:9000/portainer');
+    });
+
+    it('still defaults to https on 9443, and to 9000 for plain http', () => {
+      expect(normalizeConfig({ instances: [legacy] }).instances[0]?.baseUrl).toBe(
+        'https://localhost:9443',
+      );
+      expect(
+        normalizeConfig({ instances: [{ ...legacy, protocol: 'http' }] }).instances[0]?.baseUrl,
+      ).toBe('http://localhost:9000');
+    });
+
+    it('still rejects an invalid port and an unrooted base path', () => {
+      expect(() => normalizeConfig({ instances: [{ ...legacy, port: 70000 }] })).toThrow(
+        /invalid port/,
+      );
+      expect(() => normalizeConfig({ instances: [{ ...legacy, basePath: 'portainer' }] })).toThrow(
+        /must start with/,
+      );
+    });
+
+    it('still reads the advanced settings from where they used to live', () => {
+      const config = normalizeConfig({
+        instances: [{ ...legacy, timeoutMs: 25_000, caCert: 'PEM', rejectUnauthorized: false }],
+      });
+      expect(config.instances[0]?.timeoutMs).toBe(25_000);
+      expect(config.instances[0]?.tls).toEqual({ ca: 'PEM', rejectUnauthorized: false });
+    });
+
+    it('prefers the new address and the new advanced block over the old fields', () => {
+      const config = normalizeConfig({
+        instances: [
+          {
+            ...legacy,
+            url: 'https://boat.local:9443',
+            timeoutMs: 25_000,
+            advanced: { timeoutMs: 5_000 },
+          },
+        ],
+      });
+      expect(config.instances[0]?.baseUrl).toBe('https://boat.local:9443');
+      expect(config.instances[0]?.timeoutMs).toBe(5_000);
+    });
   });
 });

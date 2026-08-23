@@ -22,6 +22,21 @@ export const EDGE_ENVIRONMENT_TYPES: readonly number[] = [
   EnvironmentType.EdgeAgentOnKubernetes,
 ];
 
+/**
+ * Edge-agent settings. Only `AsyncMode` and the three async intervals matter
+ * here: they decide how often the agent is expected to check in, and so how
+ * stale a check-in has to be before the environment is really down.
+ */
+export interface EnvironmentEdgeSettings {
+  AsyncMode?: boolean;
+  /** Seconds. Async mode only; standard mode uses EdgeCheckinInterval. */
+  PingInterval?: number;
+  /** Seconds. Async mode only. */
+  SnapshotInterval?: number;
+  /** Seconds. Async mode only. */
+  CommandInterval?: number;
+}
+
 export interface Environment {
   Id: number;
   Name: string;
@@ -29,10 +44,19 @@ export interface Environment {
   /** 1 = up, 2 = down. Meaningless for edge types. */
   Status?: number;
   URL?: string;
-  /** Epoch seconds. Edge environments only. */
+  /**
+   * Portainer's own up/down verdict for an edge environment, computed by the
+   * endpoint list handler on Portainer's clock and with the async intervals it
+   * alone knows. This is what Portainer's UI shows, so it is what this plugin
+   * shows. Absent on Portainer versions old enough not to publish it.
+   */
+  Heartbeat?: boolean;
+  /** Epoch seconds, on Portainer's clock. Edge environments only. */
   LastCheckInDate?: number;
-  /** Seconds. Edge environments only. */
+  /** Seconds. Edge environments in standard (non-async) mode only. */
   EdgeCheckinInterval?: number;
+  /** Edge environments only. */
+  Edge?: EnvironmentEdgeSettings;
 }
 
 export interface PortainerStatus {

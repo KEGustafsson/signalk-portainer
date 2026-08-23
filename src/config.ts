@@ -57,57 +57,39 @@ export const PLUGIN_SCHEMA = {
   properties: {
     instances: {
       type: 'array',
-      title: 'Portainer instances',
+      title: 'Portainer servers',
       description:
-        'One entry per Portainer server. The name is used in the UI and as a Signal K path segment.',
+        'One entry per Portainer. Add a second one to manage a shore server from the same panel.',
       items: {
         type: 'object',
-        required: ['name', 'host'],
+        required: ['name', 'url'],
         properties: {
           name: {
             type: 'string',
             title: 'Name',
             default: 'local',
-            description: 'Unique, path-safe. Renaming it moves this instance’s Signal K paths.',
+            description:
+              'Letters, digits, underscore or hyphen. Renaming it moves this server’s Signal K paths.',
           },
           enabled: { type: 'boolean', title: 'Enabled', default: true },
-          protocol: {
+          url: {
             type: 'string',
-            title: 'Protocol',
-            enum: ['https', 'http'],
-            default: 'https',
-          },
-          host: { type: 'string', title: 'Host', default: 'localhost' },
-          port: { type: 'number', title: 'Port', default: 9443 },
-          basePath: {
-            type: 'string',
-            title: 'Base path',
+            title: 'Portainer address',
+            // Deliberately empty rather than a plausible-looking
+            // https://localhost:9443. The admin UI fills a default into a
+            // field a saved configuration does not have, and a configuration
+            // written before this was one field has no address to fill it
+            // from — so a default here would quietly re-point an operator's
+            // working instance at localhost the next time they pressed Save.
             default: '',
-            description: 'Only if Portainer sits behind a path-prefixing proxy.',
-          },
-          timeoutMs: { type: 'number', title: 'Request timeout (ms)', default: 10000 },
-          rejectUnauthorized: {
-            type: 'boolean',
-            title: 'Verify TLS certificate',
-            default: true,
-            description: 'Turn off only for a self-signed certificate you cannot supply a CA for.',
-          },
-          caCert: {
-            type: 'string',
-            title: 'CA certificate (PEM)',
-            default: '',
-            description: 'Preferred over disabling verification for self-signed certificates.',
-          },
-          servername: {
-            type: 'string',
-            title: 'TLS servername override',
-            default: '',
-            description: 'Set when connecting by IP to a certificate issued for a hostname.',
+            description:
+              'Scheme, host and port, e.g. https://localhost:9443, http://192.168.1.10:9000, or https://portainer.example.com behind a proxy. A path only if Portainer sits behind a path-prefixing one.',
           },
           authMode: {
             type: 'string',
-            title: 'Authentication',
+            title: 'Sign in with',
             enum: ['apiKey', 'userPass'],
+            enumNames: ['API access token', 'Username and password'],
             default: 'apiKey',
           },
           apiKey: {
@@ -119,11 +101,38 @@ export const PLUGIN_SCHEMA = {
           },
           username: { type: 'string', title: 'Username', default: '' },
           password: { type: 'string', title: 'Password', format: 'password', default: '' },
-          environmentId: {
-            type: 'number',
-            title: 'Environment id',
-            description: 'Leave empty to auto-select when Portainer has exactly one environment.',
+          advanced: {
+            type: 'object',
+            title: 'Advanced',
+            description:
+              'Only for a self-signed certificate, a slow link, or a Portainer reached by IP.',
+            properties: {
+              caCert: {
+                type: 'string',
+                title: 'CA certificate (PEM)',
+                default: '',
+                description:
+                  'Portainer’s own certificate is self-signed; pasting its CA here is the way to trust it.',
+              },
+              rejectUnauthorized: {
+                type: 'boolean',
+                title: 'Verify TLS certificate',
+                default: true,
+                description: 'Turn off only for a certificate you cannot supply a CA for.',
+              },
+              servername: {
+                type: 'string',
+                title: 'TLS servername override',
+                default: '',
+                description: 'Set when connecting by IP to a certificate issued for a hostname.',
+              },
+              timeoutMs: { type: 'number', title: 'Request timeout (ms)', default: 10000 },
+            },
           },
+          // Written by the panel when an environment is chosen there, and
+          // hidden from this form by the UI schema below: an id typed here by
+          // hand is how an operator ends up managing the wrong Docker host.
+          environmentId: { type: 'number', title: 'Environment id' },
           environmentName: { type: 'string', title: 'Environment name', default: '' },
         },
       },
@@ -181,9 +190,9 @@ export const PLUGIN_SCHEMA = {
               },
               instance: {
                 type: 'string',
-                title: 'Instance',
+                title: 'Portainer server',
                 default: '',
-                description: 'Leave empty for the first enabled instance.',
+                description: 'Leave empty for the first enabled one.',
               },
             },
           },
@@ -193,23 +202,64 @@ export const PLUGIN_SCHEMA = {
   },
 } as const;
 
-interface RawInstance {
-  name?: string;
-  enabled?: boolean;
-  protocol?: string;
-  host?: string;
-  port?: number;
-  basePath?: string;
+/**
+ * How the admin UI renders the schema above.
+ *
+ * Two jobs. The environment fields are hidden: the panel writes them when an
+ * environment is chosen from its Environments tab, and an id typed in by hand
+ * is how an operator ends up managing the wrong Docker host. And the fields
+ * that matter come first, so what an operator has to fill in to connect is not
+ * buried among the ones they almost never touch.
+ */
+export const PLUGIN_UI_SCHEMA = {
+  instances: {
+    items: {
+      'ui:order': ['name', 'enabled', 'url', 'authMode', 'apiKey', 'username', 'password', '*'],
+      environmentId: { 'ui:widget': 'hidden' },
+      environmentName: { 'ui:widget': 'hidden' },
+      advanced: {
+        // A PEM is a dozen lines; a single-line input makes it unreadable.
+        caCert: { 'ui:widget': 'textarea' },
+      },
+    },
+  },
+} as const;
+
+/** The settings an operator rarely touches, kept out of the way in the form. */
+interface RawAdvanced {
   timeoutMs?: number;
   rejectUnauthorized?: boolean;
   caCert?: string;
   servername?: string;
+}
+
+/**
+ * An instance as the admin UI hands it back.
+ *
+ * The address is one field now — `url` — and the rarely-used settings live
+ * under `advanced`. The fields either replaced are still read, so a
+ * configuration written by an earlier build keeps connecting to the same
+ * Portainer instead of coming up empty and having to be typed again.
+ */
+interface RawInstance extends RawAdvanced {
+  name?: string;
+  enabled?: boolean;
+  url?: string;
+  advanced?: RawAdvanced;
   authMode?: string;
   apiKey?: string;
   username?: string;
   password?: string;
   environmentId?: number | null;
   environmentName?: string;
+  /** @deprecated superseded by `url`. */
+  protocol?: string;
+  /** @deprecated superseded by `url`. */
+  host?: string;
+  /** @deprecated superseded by `url`. */
+  port?: number;
+  /** @deprecated superseded by `url`. */
+  basePath?: string;
 }
 
 export interface RawConfig {
@@ -323,16 +373,13 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
   }
   seen.add(name.toLowerCase());
 
-  const host = (entry.host || '').trim();
-  if (!host) throw new ConfigError(`Instance "${label}" has no host`);
+  const baseUrl = baseUrlOf(entry, label);
 
-  const protocol = entry.protocol === 'http' ? 'http' : 'https';
-  const port = entry.port ?? (protocol === 'https' ? 9443 : 9000);
-  if (!Number.isInteger(port) || port < 1 || port > 65535) {
-    throw new ConfigError(`Instance "${label}" has an invalid port: ${entry.port}`);
-  }
+  // `advanced` wins where both are present; the flat ones are what an older
+  // configuration wrote.
+  const advanced: RawAdvanced = { ...pickAdvanced(entry), ...(entry.advanced ?? {}) };
 
-  const timeoutMs = entry.timeoutMs ?? 10_000;
+  const timeoutMs = advanced.timeoutMs ?? 10_000;
   // A ceiling as well as a floor. `AbortSignal.timeout` is bounded by the same
   // 32-bit timer everything else in Node is, and a value past it aborts almost
   // immediately — so an operator typing a very large number would get a plugin
@@ -342,22 +389,17 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
     throw new ConfigError(`Instance "${label}" needs a timeout between 1000 and 120000 ms`);
   }
 
-  const basePath = (entry.basePath || '').replace(/\/+$/, '');
-  if (basePath && !basePath.startsWith('/')) {
-    throw new ConfigError(`Instance "${label}" base path must start with "/"`);
-  }
-
   const auth = normalizeAuth(entry, label);
 
   const tls: TlsOptions = {};
-  if (entry.rejectUnauthorized === false) tls.rejectUnauthorized = false;
-  if (entry.caCert) tls.ca = entry.caCert;
-  if (entry.servername) tls.servername = entry.servername;
+  if (advanced.rejectUnauthorized === false) tls.rejectUnauthorized = false;
+  if (advanced.caCert) tls.ca = advanced.caCert;
+  if (advanced.servername) tls.servername = advanced.servername;
 
   return {
     name,
     enabled: entry.enabled ?? true,
-    baseUrl: `${protocol}://${host}:${port}${basePath}`,
+    baseUrl,
     auth,
     tls,
     timeoutMs,
@@ -369,6 +411,66 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
       name: entry.environmentName || '',
     },
   };
+}
+
+/** The advanced settings an older configuration wrote as flat fields. */
+function pickAdvanced(entry: RawInstance): RawAdvanced {
+  const advanced: RawAdvanced = {};
+  if (entry.timeoutMs !== undefined) advanced.timeoutMs = entry.timeoutMs;
+  if (entry.rejectUnauthorized !== undefined)
+    advanced.rejectUnauthorized = entry.rejectUnauthorized;
+  if (entry.caCert) advanced.caCert = entry.caCert;
+  if (entry.servername) advanced.servername = entry.servername;
+  return advanced;
+}
+
+/**
+ * Where this instance's Portainer answers.
+ *
+ * One address rather than the four fields — protocol, host, port, base path —
+ * this used to ask for separately, since one address is how everybody already
+ * writes it. A port left out means the scheme's own, as it does in a browser,
+ * so a Portainer behind a reverse proxy on 443 needs no port typed at all.
+ */
+function baseUrlOf(entry: RawInstance, label: string): string {
+  const raw = (entry.url ?? '').trim();
+  if (!raw) return legacyBaseUrl(entry, label);
+
+  let parsed: URL;
+  try {
+    parsed = new URL(raw);
+  } catch {
+    throw new ConfigError(`Instance "${label}" has an address that is not a URL: ${raw}`);
+  }
+  if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+    throw new ConfigError(`Instance "${label}" address must start with https:// or http://`);
+  }
+  // `origin` rather than the parts: it keeps an IPv6 host's brackets and drops
+  // a port that is the scheme's default anyway.
+  return `${parsed.origin}${parsed.pathname.replace(/\/+$/, '')}`;
+}
+
+/** The address as an earlier build's configuration spelled it. */
+function legacyBaseUrl(entry: RawInstance, label: string): string {
+  const host = (entry.host ?? '').trim();
+  if (!host) {
+    throw new ConfigError(
+      `Instance "${label}" has no address — set it to where Portainer answers, e.g. https://localhost:9443`,
+    );
+  }
+
+  const protocol = entry.protocol === 'http' ? 'http' : 'https';
+  const port = entry.port ?? (protocol === 'https' ? 9443 : 9000);
+  if (!Number.isInteger(port) || port < 1 || port > 65535) {
+    throw new ConfigError(`Instance "${label}" has an invalid port: ${entry.port}`);
+  }
+
+  const basePath = (entry.basePath || '').replace(/\/+$/, '');
+  if (basePath && !basePath.startsWith('/')) {
+    throw new ConfigError(`Instance "${label}" base path must start with "/"`);
+  }
+
+  return `${protocol}://${host}:${port}${basePath}`;
 }
 
 function normalizeAuth(entry: RawInstance, label: string): AuthOptions {

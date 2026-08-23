@@ -18,7 +18,14 @@ import {
   type ControlState,
 } from './control';
 import { consoleState } from './consolesession';
-import { containerName, formatAge, formatBytes, shortId, stateColour } from './format';
+import {
+  containerName,
+  formatAge,
+  formatBytes,
+  healthColour,
+  shortId,
+  stateColour,
+} from './format';
 import {
   isActive,
   stackActionLabel,
@@ -81,25 +88,80 @@ function Table({
   );
 }
 
-export function EnvironmentsTable({ rows }: { rows: EnvironmentRow[] }): ReactElement {
+export interface EnvironmentActionsProps {
+  /** Applies the choice. Omitted for a read-only render; no row is then clickable. */
+  onSelect?: (id: number) => void;
+  /** True while a switch is in flight, so a second click cannot start another. */
+  busy?: boolean;
+}
+
+/**
+ * The environments, and the place the operator picks one.
+ *
+ * The choice is made here rather than from a picker above the tabs: this table
+ * already says what each environment is, where it lives and whether it is
+ * answering, which is what the choice actually turns on. A dropdown showed
+ * names alone.
+ */
+export function EnvironmentsTable({
+  rows,
+  actions,
+}: {
+  rows: EnvironmentRow[];
+  actions?: EnvironmentActionsProps;
+}): ReactElement {
+  const select = actions?.onSelect;
   return (
     <Table headers={['Name', 'Type', 'Health', 'URL', '']}>
       {rows.length === 0 ? (
         <EmptyRow columns={5} message="No environments" />
       ) : (
-        rows.map((row) => (
-          <tr key={row.id}>
-            <td>{row.name}</td>
-            <td>{ENVIRONMENT_TYPES[row.type] ?? `Type ${row.type}`}</td>
-            <td>
-              <span className={`badge bg-${row.health === 'up' ? 'success' : 'danger'}`}>
-                {row.health}
-              </span>
-            </td>
-            <td className="text-muted small">{row.url ?? '—'}</td>
-            <td>{row.isSelected ? <span className="badge bg-primary">selected</span> : null}</td>
-          </tr>
-        ))
+        rows.map((row) => {
+          // The one already in use is not offered again, and neither is any
+          // row while a switch is still going through.
+          const choosable = select !== undefined && !row.isSelected && actions?.busy !== true;
+          return (
+            <tr
+              key={row.id}
+              className={row.isSelected ? 'table-active' : undefined}
+              // The whole row answers, since the whole row is what the operator
+              // is reading. The button below is the same choice for anyone
+              // driving this from a keyboard.
+              {...(choosable
+                ? { onClick: () => select(row.id), style: { cursor: 'pointer' } }
+                : {})}
+            >
+              <td>{row.name}</td>
+              <td>{ENVIRONMENT_TYPES[row.type] ?? `Type ${row.type}`}</td>
+              <td>
+                <span className={`badge bg-${healthColour(row.health)}`}>{row.health}</span>
+              </td>
+              <td className="text-muted small">{row.url ?? '—'}</td>
+              <td>
+                {row.isSelected ? (
+                  <span className="badge bg-primary">selected</span>
+                ) : select ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-primary"
+                    // Named per row: half a dozen buttons all reading "Select"
+                    // tell a screen reader nothing about which one they are.
+                    aria-label={`Select ${row.name}`}
+                    disabled={actions?.busy === true}
+                    onClick={(event) => {
+                      // Without this the row underneath answers the same click,
+                      // and the same environment is chosen twice.
+                      event.stopPropagation();
+                      select(row.id);
+                    }}
+                  >
+                    Select
+                  </button>
+                ) : null}
+              </td>
+            </tr>
+          );
+        })
       )}
     </Table>
   );

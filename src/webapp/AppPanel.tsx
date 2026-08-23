@@ -38,6 +38,7 @@ import {
   StacksTable,
   VolumesTable,
   type ContainerActionsProps,
+  type EnvironmentActionsProps,
   type EnvironmentRow,
   type StackActionsProps,
 } from './tables';
@@ -78,9 +79,14 @@ const TABS: TabSpec[] = [
   { id: 'nodes', label: 'Nodes', path: '/swarm/nodes', swarmOnly: true },
 ];
 
+/** Where the panel opens, and where it falls back to. */
+const LANDING_TAB: TabId = 'environments';
+
 /** Shapes returned by the facade for each tab. */
 interface TabPayload {
   environments?: EnvironmentRow[];
+  /** Only from /environments: which one this instance is working against. */
+  selected?: number | null;
   containers?: DockerContainer[];
   stacks?: Stack[];
   images?: DockerImage[];
@@ -112,7 +118,10 @@ function Panel(): ReactElement {
   const [environment, setEnvironment] = useState<number | null | undefined>(undefined);
   const [switching, setSwitching] = useState(false);
   const [capabilities, setCapabilities] = useState<Capabilities | undefined>(undefined);
-  const [tab, setTab] = useState<TabId>('containers');
+  // The environments are the landing page: which Docker host the panel is
+  // about is the first thing an operator needs to see, and on a Portainer with
+  // several it is the first thing they have to answer.
+  const [tab, setTab] = useState<TabId>(LANDING_TAB);
   const [payload, setPayload] = useState<TabPayload>({});
   const [error, setError] = useState<ApiError | undefined>(undefined);
   const [loading, setLoading] = useState(true);
@@ -148,7 +157,7 @@ function Panel(): ReactElement {
   selected.current = instance;
 
   const activeTab = useMemo(
-    () => TABS.find((candidate) => candidate.id === tab) ?? TABS[1]!,
+    () => TABS.find((candidate) => candidate.id === tab) ?? TABS[0]!,
     [tab],
   );
 
@@ -157,6 +166,9 @@ function Panel(): ReactElement {
    * panel has an answer, and the answer is that the operator has to pick.
    */
   const needsEnvironment = environment === null && environments.length > 1;
+
+  /** The environment in use, once there is one and its row has been read. */
+  const chosen = environments.find((entry) => entry.id === environment);
 
   const visibleTabs = useMemo(
     () => TABS.filter((candidate) => !candidate.swarmOnly || capabilities?.swarm),
@@ -259,6 +271,13 @@ function Panel(): ReactElement {
       const body = await apiGet<TabPayload>(activeTab.path, instance, controller.signal);
       if (seq !== requestSeq.current) return;
       setPayload(body);
+      // This tab reads the very list the choice is made from, so one read keeps
+      // both current: an environment that goes down, or a choice made from
+      // another browser, shows up without a second request.
+      if (activeTab.id === 'environments') {
+        setEnvironments(rowsOf(body.environments));
+        setEnvironment(body.selected ?? null);
+      }
       setError(undefined);
     } catch (cause) {
       // A cancelled request is expected, not a failure to report.
@@ -267,16 +286,17 @@ function Panel(): ReactElement {
     } finally {
       if (seq === requestSeq.current) setLoading(false);
     }
-  }, [activeTab.path, instance]);
+  }, [activeTab.id, activeTab.path, instance]);
 
   useEffect(() => {
     if (instances.length === 0) return;
-    // Every tab read is scoped to an environment, so polling while the choice
-    // is still open only produces the same refusal ten seconds apart. The
-    // picker is shown instead. A resolved-to-nothing environment with nothing
+    // Every other tab read is scoped to an environment, so polling while the
+    // choice is still open only produces the same refusal ten seconds apart.
+    // The Environments tab is the exception, and the way out: it is the list
+    // the choice is made from. A resolved-to-nothing environment with nothing
     // to choose from is a different thing entirely, and is left to the tab
     // read so the real error is the one that surfaces.
-    if (environment === undefined || needsEnvironment) {
+    if (environment === undefined || (needsEnvironment && tab !== LANDING_TAB)) {
       setLoading(false);
       return;
     }
@@ -288,7 +308,7 @@ function Panel(): ReactElement {
       // Unmounting or switching away must not leave a request open.
       inFlight.current?.abort();
     };
-  }, [load, instances.length, environment, needsEnvironment]);
+  }, [load, instances.length, environment, needsEnvironment, tab]);
 
   const runAction = useCallback(
     async (
@@ -419,7 +439,7 @@ function Panel(): ReactElement {
 
   // A tab that disappears (swarm turned off) must not leave a blank panel.
   useEffect(() => {
-    if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab('containers');
+    if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab(LANDING_TAB);
   }, [visibleTabs, tab]);
 
   /**
@@ -523,33 +543,14 @@ function Panel(): ReactElement {
             </div>
           ) : null}
 
-          {/* Only worth the space when there is a choice to make: a Portainer
-              with one environment resolves it without being asked. */}
-          {environments.length > 1 ? (
-            <div className="d-flex align-items-center gap-2">
-              <label className="form-label mb-0 small text-muted" htmlFor="portainer-environment">
-                Environment
-              </label>
-              <select
-                id="portainer-environment"
-                className="form-select form-select-sm w-auto"
-                value={environment ?? ''}
-                disabled={switching}
-                onChange={(event) => void selectEnvironment(Number(event.target.value))}
-              >
-                {/* Present only until something is chosen, so the select has
-                    something truthful to show rather than appearing to have
-                    picked the first environment on its own. */}
-                {environment === null || environment === undefined ? (
-                  <option value="">Choose…</option>
-                ) : null}
-                {environments.map((entry) => (
-                  <option key={entry.id} value={entry.id}>
-                    {entry.name}
-                  </option>
-                ))}
-              </select>
-            </div>
+          {/* What is being worked on, not a control: the choice itself is made
+              by pressing a row on the Environments tab. Worth the space only
+              where there is more than one, since a Portainer with one resolves
+              it without being asked. */}
+          {environments.length > 1 && chosen ? (
+            <span className="small text-muted">
+              Environment <span className="fw-semibold">{chosen.name}</span>
+            </span>
           ) : null}
         </div>
       </div>
@@ -628,7 +629,7 @@ function Panel(): ReactElement {
         <div className="alert alert-info" role="alert">
           <div>Choose an environment to continue</div>
           <div className="small mt-1">
-            This Portainer manages {environments.length} environments. Pick the one this Signal K
+            This Portainer manages {environments.length} environments. Press the one this Signal K
             server should work with — it is remembered, so this is asked once.
           </div>
         </div>
@@ -638,10 +639,17 @@ function Panel(): ReactElement {
 
       {loading && !error && !needsEnvironment ? <div className="text-muted">Loading…</div> : null}
 
-      {!loading && !error && !needsEnvironment && !switching ? (
+      {/* The Environments tab renders with no environment chosen — it is where
+          the choice is made. Every other tab has nothing to show until then. */}
+      {!loading && !error && !switching && (!needsEnvironment || tab === LANDING_TAB) ? (
         <TabBody
           tab={tab}
           payload={payload}
+          environments={environments}
+          environmentActions={{
+            onSelect: (id) => void selectEnvironment(id),
+            busy: switching,
+          }}
           actions={{
             control,
             busyId,
@@ -725,19 +733,25 @@ function Panel(): ReactElement {
 function TabBody({
   tab,
   payload,
+  environments,
+  environmentActions,
   actions,
   stackActions,
   onNewStack,
 }: {
   tab: TabId;
   payload: TabPayload;
+  /** Held by the panel rather than taken from the payload, so switching
+      environment does not blank the table the choice was made from. */
+  environments: EnvironmentRow[];
+  environmentActions: EnvironmentActionsProps;
   actions: ContainerActionsProps;
   stackActions: StackActionsProps;
   onNewStack: () => void;
 }): ReactElement {
   switch (tab) {
     case 'environments':
-      return <EnvironmentsTable rows={rowsOf(payload.environments)} />;
+      return <EnvironmentsTable rows={environments} actions={environmentActions} />;
     case 'stacks':
       return (
         <div>
