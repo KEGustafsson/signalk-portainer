@@ -7,6 +7,8 @@ import {
   type RawConfig,
 } from './config';
 import type { MetaValue, PathValue } from './deltas';
+import { ExecTickets } from './exectickets';
+import { openConsole, type ConsoleServer } from './console';
 import { registerRoutes } from './facade';
 import { DeltaPoller, type KeyedContainer } from './poller';
 import { PutHandlers, replaceKnownContainers, type ActionHandler } from './put';
@@ -24,6 +26,13 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
   let poller: DeltaPoller | undefined;
   /** Containers seen on the last poll, keyed by "<instance>/<key>", for PUT. */
   let seen = new Map<string, KeyedContainer>();
+  /**
+   * Console authorisations, and the socket endpoint that redeems them. Both
+   * absent when the server is too old to let a plugin serve a WebSocket, and
+   * the console is then not offered rather than half-offered.
+   */
+  let tickets: ExecTickets | undefined;
+  let consoleServer: ConsoleServer | undefined;
   // Detected once at load: the container id cannot change under a running
   // process, and probing /proc on every request would be wasted work.
   const self: SelfContainer = detectSelfContainer();
@@ -126,6 +135,23 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         setStatus(`Starting — ${registry.names.length} instance(s): ${registry.names.join(', ')}`);
         void reportHealth();
 
+        // Feature-detected rather than assumed: a plugin WebSocket needs a
+        // server new enough to offer one, and on an older one the console is
+        // absent from /control instead of being a button that cannot work.
+        if (config.control.allowPutControl && typeof app.registerWebSocket === 'function') {
+          tickets = new ExecTickets();
+          consoleServer = openConsole({
+            register: (path) => app.registerWebSocket!(path),
+            tickets,
+            registry: () => registry,
+            log,
+          });
+        } else if (config.control.allowPutControl) {
+          log(
+            'This Signal K server cannot serve a plugin WebSocket, so the container console is not available',
+          );
+        }
+
         // Only when something is actually watched. Alarms nobody asked for are
         // worse than no alarms: the first thing an operator does with an alarm
         // they did not configure is learn to ignore that channel.
@@ -194,6 +220,12 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       poller?.stop();
       poller = undefined;
       seen = new Map();
+      // Every open shell ends with the plugin, and every unredeemed ticket
+      // stops being one.
+      consoleServer?.close();
+      consoleServer = undefined;
+      tickets?.clear();
+      tickets = undefined;
       registry?.close();
       registry = undefined;
       config = undefined;
@@ -206,6 +238,11 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         config: () => config,
         self: () => self,
         log,
+        // Read through a getter rather than captured: the router is registered
+        // once, and the tickets come and go with each start.
+        get execTickets() {
+          return tickets;
+        },
       });
     },
   };

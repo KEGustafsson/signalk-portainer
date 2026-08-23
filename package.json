@@ -48,7 +48,8 @@
   ],
   "dependencies": {
     "@signalk/server-admin-ui-dependencies": "^2.23.0",
-    "undici": "^7.16.0"
+    "undici": "^7.16.0",
+    "ws": "^8.18.0"
   },
   "devDependencies": {
     "@signalk/server-api": "^2.31.1",
@@ -60,6 +61,7 @@
     "@types/react": "^19.2.18",
     "@types/react-dom": "^19.2.4",
     "@types/supertest": "^6.0.2",
+    "@types/ws": "^8.5.13",
     "eslint": "^9.25.0",
     "eslint-config-prettier": "^10.1.2",
     "express": "^4.21.2",

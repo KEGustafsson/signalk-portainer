@@ -11,9 +11,9 @@ reachable host, and several Portainer instances may be configured at once
 (boat and shore, for example). Each is configured with its own scheme, host,
 port, TLS settings, credentials and environment.
 
-> **Status: M5b — stacks in the panel.** Everything through M5a, plus a Stacks
-> tab that can act: a compose and environment editor, start/stop, redeploy,
-> create, and delete behind a confirmation.
+> **Status: M6a — the server-side console.** Everything through M5, plus an
+> authenticated WebSocket relay that opens a shell in a container. The terminal
+> in the panel is M6b.
 
 ## Documents
 
@@ -37,7 +37,7 @@ poller turning container state into Signal K paths under
 when a container that should be running is not, and PUT handlers so any Signal
 K client can start or stop a container.
 
-## What works today (M5b)
+## What works today (M6a)
 
 - Configure one or more Portainer instances (protocol, host, port, base path,
   TLS, API token or username/password, environment).
@@ -112,6 +112,28 @@ K client can start or stop a container.
   per container and 8 in total, so a few forgotten browser tabs cannot exhaust a
   Raspberry Pi's file descriptors.
 
+- **A container console**, as a WebSocket relay rather than a proxy. Signal K
+  authenticates the plugin's REST routes but hands a plugin the raw WebSocket
+  upgrade to authenticate itself — and a cookie is the wrong thing to trust
+  there, because upgrades are not subject to CORS, so any page the operator
+  visits can open one to their own server and have the browser attach the
+  session. So the authorisation happens where it can: an admin-authenticated
+  POST creates the exec instance and returns a **single-use ticket**, valid for
+  30 seconds and bound to exactly that shell, and the socket presents the
+  ticket. A socket without one is closed knowing nothing else.
+
+  The command is a list of arguments, never a string to be split, so nothing a
+  request contains reaches a shell as text. A shell in the Signal K container
+  is refused like every other way of stopping it. At most 3 shells are open at
+  once, 2 per container, and one nobody has touched for 15 minutes is closed —
+  a forgotten shell holds a process in the container as well as two sockets.
+  Both sockets always end together, whichever end goes first, and the plugin
+  stopping ends all of them.
+
+  Requires a Signal K server that lets a plugin serve a WebSocket. On an older
+  one the console is absent and `GET /control` says why, rather than offering a
+  button that cannot work.
+
 - **A stacks editor in the panel.** Each row offers what applies to it: a
   running stack is stopped and a stopped one started, never both; Redeploy
   appears only for a stack that has a repository. Edit opens the compose file
@@ -144,27 +166,28 @@ K client can start or stop a container.
   Signal K. Every route takes `?instance=<name>`, defaulting to the first
   enabled instance:
 
-  | Route                                      | Returns                                                      |
-  | ------------------------------------------ | ------------------------------------------------------------ |
-  | `GET /instances`                           | configured instances and which is default                    |
-  | `GET /health`                              | reachability, version and capabilities per instance          |
-  | `GET /environments`                        | environments with health, and which is selected              |
-  | `GET /capabilities`                        | swarm support, swarm id, Docker and Portainer versions       |
-  | `GET /containers`                          | container list (`?all=true` to include stopped)              |
-  | `GET /containers/:id`                      | container inspect                                            |
-  | `GET /containers/:id/logs`                 | log lines (`?tail=` `?since=` `?timestamps=`)                |
-  | `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                        |
-  | `GET /stacks`                              | stacks belonging to this environment                         |
-  | `GET /stacks/:id/file`                     | the stack's compose file                                     |
-  | `POST /stacks`                             | create from `content` or from `repositoryUrl`                |
-  | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` `?pullImage=`)      |
-  | `PUT /stacks/:id`                          | deploy a new compose file and environment                    |
-  | `DELETE /stacks/:id`                       | delete (`?removeVolumes=`)                                   |
-  | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                     |
-  | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                             |
-  | `GET /control`                             | what the UI may offer, and whether self-protection is active |
-  | `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`  |
-  | `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                         |
+  | Route                                      | Returns                                                                          |
+  | ------------------------------------------ | -------------------------------------------------------------------------------- |
+  | `GET /instances`                           | configured instances and which is default                                        |
+  | `GET /health`                              | reachability, version and capabilities per instance                              |
+  | `GET /environments`                        | environments with health, and which is selected                                  |
+  | `GET /capabilities`                        | swarm support, swarm id, Docker and Portainer versions                           |
+  | `GET /containers`                          | container list (`?all=true` to include stopped)                                  |
+  | `GET /containers/:id`                      | container inspect                                                                |
+  | `GET /containers/:id/logs`                 | log lines (`?tail=` `?since=` `?timestamps=`)                                    |
+  | `GET /containers/:id/logs/stream`          | the same, live, as Server-Sent Events                                            |
+  | `GET /stacks`                              | stacks belonging to this environment                                             |
+  | `GET /stacks/:id/file`                     | the stack's compose file                                                         |
+  | `POST /stacks`                             | create from `content` or from `repositoryUrl`                                    |
+  | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` `?pullImage=`)                          |
+  | `PUT /stacks/:id`                          | deploy a new compose file and environment                                        |
+  | `DELETE /stacks/:id`                       | delete (`?removeVolumes=`)                                                       |
+  | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                         |
+  | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                 |
+  | `GET /control`                             | what the UI may offer, and whether self-protection is active                     |
+  | `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                      |
+  | `POST /containers/:id/exec`                | a console ticket, redeemed on `ws://…/plugins/signalk-portainer/console?ticket=` |
+  | `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                                             |
 
 ### Guards on the mutating routes
 
@@ -211,7 +234,7 @@ Requires Node.js 22 or newer — the versions CI actually verifies.
 npm install        # install dependencies
 npm run lint       # eslint
 npm run format:check
-npm test           # 547 unit tests, no network required, 80% coverage enforced
+npm test           # 607 unit tests, no network required, 80% coverage enforced
 npm run build      # emits dist/
 ```
 

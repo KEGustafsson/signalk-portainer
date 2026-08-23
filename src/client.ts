@@ -262,6 +262,8 @@ export class PortainerClient {
   private readonly timeoutMs: number;
   private readonly selector: EnvironmentSelector;
   private readonly dispatcher: Dispatcher | undefined;
+  /** Kept for the exec WebSocket, which is a ws client rather than a fetch. */
+  private readonly tls: TlsOptions | undefined;
   private readonly ownsDispatcher: boolean;
   private readonly cache = new TtlCache();
   private readonly log: (message: string) => void;
@@ -278,6 +280,7 @@ export class PortainerClient {
     this.selector = options.environment ?? {};
     this.log = options.log ?? (() => {});
 
+    this.tls = options.tls;
     if (options.dispatcher) {
       this.dispatcher = options.dispatcher;
       this.ownsDispatcher = false;
@@ -850,6 +853,77 @@ export class PortainerClient {
         options.removeVolumes ? 'true' : 'false'
       }`,
     );
+  }
+
+  /**
+   * Creates an exec instance in a container, ready to be started by a socket.
+   *
+   * Two steps rather than one because that is how Docker works: this reserves
+   * the instance and the WebSocket starts it. Doing the reservation over HTTP
+   * means a container that is gone, or stopped, is an ordinary status rather
+   * than a socket that opens and immediately closes for reasons nobody sees.
+   */
+  async createExec(containerId: string, command: readonly string[]): Promise<string> {
+    const payload = await this.json<{ Id?: string }>(
+      'POST',
+      `${await this.dockerBase()}/containers/${encodeURIComponent(containerId)}/exec`,
+      {
+        json: {
+          AttachStdin: true,
+          AttachStdout: true,
+          AttachStderr: true,
+          Tty: true,
+          Cmd: [...command],
+        },
+      },
+    );
+    if (!payload.Id) {
+      throw new PortainerError({
+        status: 502,
+        method: 'POST',
+        path: `/containers/${containerId}/exec`,
+        message: 'Docker did not return an exec id',
+        hint: 'the container may have stopped between the check and the request',
+      });
+    }
+    return payload.Id;
+  }
+
+  /** Resizes the terminal behind an exec instance. */
+  async resizeExec(execId: string, size: { rows: number; columns: number }): Promise<void> {
+    const query = `h=${Math.max(1, Math.floor(size.rows))}&w=${Math.max(1, Math.floor(size.columns))}`;
+    const response = await this.send(
+      'POST',
+      `${await this.dockerBase()}/exec/${encodeURIComponent(execId)}/resize?${query}`,
+      {},
+      true,
+    );
+    await response.body?.cancel().catch(() => undefined);
+  }
+
+  /**
+   * Everything needed to open Portainer's exec WebSocket.
+   *
+   * Returned rather than opened here so the socket itself is somebody else's
+   * problem: the relay owns the two sockets and their lifetimes, and this class
+   * stays the thing that knows about Portainer.
+   *
+   * The credential goes in a header, which a browser could not do — this
+   * connection is made by the plugin, which is the whole reason the browser
+   * never sees a Portainer credential.
+   */
+  async execSocket(execId: string): Promise<{
+    url: string;
+    headers: Record<string, string>;
+    tls: TlsOptions | undefined;
+  }> {
+    const environmentId = await this.environmentId();
+    const base = this.baseUrl.replace(/^http/, 'ws');
+    return {
+      url: `${base}/api/websocket/exec?endpointId=${environmentId}&id=${encodeURIComponent(execId)}`,
+      headers: await this.authHeaders(),
+      tls: this.tls,
+    };
   }
 
   /**
