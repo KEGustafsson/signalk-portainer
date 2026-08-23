@@ -44,8 +44,7 @@ directory:
         "enabled": true,
         "url": "http://127.0.0.1:9500",
         "authMode": "apiKey",
-        "apiKey": "ptr_screenshotfixture",
-        "environmentName": "boat"
+        "apiKey": "ptr_screenshotfixture"
       },
       {
         "name": "shore",
@@ -70,11 +69,12 @@ directory:
 }
 ```
 
-`environmentName` is what saves the Environments tab from having to be answered
-before anything else can be captured; the panel writes `environmentId` back
-there itself when a row is pressed. `allowDestructive` stays off on purpose: a
-disabled Remove button carrying the setting that would enable it is part of what
-the screenshots are showing.
+The first server deliberately has no environment named: the capture presses one
+in the panel, which is the flow the screenshots document, and the plugin writes
+`environmentId` back into this file itself. The second one names `nas` so that
+switching instance does not land on another question. `allowDestructive` stays
+off on purpose: a disabled Remove button carrying the setting that would enable
+it is part of what the screenshots are showing.
 
 With the server up, capture:
 
@@ -83,11 +83,21 @@ node tools/screenshots/capture.mjs                       # into docs/images
 node tools/screenshots/capture.mjs --server http://pi.local:3000 --out /tmp/shots
 ```
 
-The script drives the admin UI the way a person would — clicking through the
-tabs, opening the log viewer with Follow on, typing commands into the console,
-opening a stack — and crops each shot to the part of the window that matters.
-The data browser shot waits for the delta poller to publish, which can take a
-whole poll interval.
+The script drives the admin UI the way a person would — pressing an environment
+row to choose it, clicking through the tabs, opening the log viewer with Follow
+on, typing commands into the console, opening a stack — and crops each shot to
+the part of the window that matters. The data browser shot waits for the delta
+poller to publish, which can take a whole poll interval.
+
+**It writes to the plugin's configuration**, through the same Signal K API the
+admin UI saves from, twice. First it clears the chosen environment, because the
+panel writes that choice back the moment a row is pressed: without clearing it
+the first-run state would exist exactly once, and every later run would
+photograph the after picture twice. Then, once the panel has chosen one again,
+it saves the options unchanged — a plain restart, which is what clears the
+error the plugin reported while it had no environment, so the configuration page
+is photographed showing the steady state rather than the tooling's own mess.
+Point it at a fixture server, not at anything you care about.
 
 ## When a screenshot needs redoing
 

@@ -93,6 +93,8 @@ Docker host this Signal K server should work with, and the plugin writes the
 choice back into its own configuration, where it survives a restart. A Portainer
 with exactly one environment selects it without being asked.
 
+![The panel on a Portainer whose environment has not been chosen: a notice reading "Choose an environment to continue — This Portainer manages 3 environments. Press the one this Signal K server should work with", above the three rows, each with a Select button](docs/images/panel-environment-choose.png)
+
 ### 5. Decide what the plugin may do
 
 Three independent switches, each enforced server-side however the panel behaves:

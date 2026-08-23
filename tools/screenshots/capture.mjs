@@ -115,10 +115,69 @@ async function panel(tab, height = 1000) {
 
 const actions = (container) => page.getByRole('group', { name: `Actions for ${container}` });
 
-// ── the panel, tab by tab ──────────────────────────────────────────────────
+const PLUGIN = `${SERVER}/plugins/signalk-portainer`;
 
-// Where the panel opens, and where the environment is chosen: the row in use
-// carries the badge, the others carry the button that switches to them.
+/**
+ * Saves the plugin's options through Signal K's own config API — the one the
+ * admin UI saves from — and waits for the plugin it restarts to answer again.
+ *
+ * `edit` may change the options in place; saving them unchanged is a plain
+ * restart, which is worth having on its own: a plugin that has reported an
+ * error keeps showing it on its configuration page until it restarts.
+ */
+async function savePluginOptions(edit = () => {}) {
+  const options = await fetch(`${PLUGIN}/config`).then((response) => response.json());
+  edit(options);
+  await fetch(`${PLUGIN}/config`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(options),
+  });
+
+  // The POST stops and restarts the plugin, and its facade goes with it.
+  for (let attempt = 0; attempt < 60; attempt += 1) {
+    const alive = await fetch(`${PLUGIN}/api/instances`)
+      .then((response) => response.ok)
+      .catch(() => false);
+    if (alive) return;
+    await new Promise((resolve) => setTimeout(resolve, 500));
+  }
+  throw new Error('the plugin did not come back after its configuration was saved');
+}
+
+/**
+ * Puts the first Portainer back to having no environment chosen.
+ *
+ * The panel writes the choice into the plugin's own options the moment a row is
+ * pressed, so without this the first-run state exists exactly once and every
+ * later run would photograph the after picture twice.
+ */
+async function clearEnvironmentChoice() {
+  await savePluginOptions((options) => {
+    const first = options?.configuration?.instances?.[0];
+    if (!first) throw new Error('the plugin has no configured Portainer to clear');
+    delete first.environmentId;
+    first.environmentName = '';
+  });
+}
+
+// ── choosing an environment ────────────────────────────────────────────────
+
+// The first thing a new installation has to answer, so the first thing to
+// photograph: the panel opens on the environments with none of them chosen and
+// says so, and pressing a row is the whole of the answer.
+await clearEnvironmentChoice();
+await panel('Environments');
+await shot('panel-environment-choose', { bottom: 'table' });
+
+// Pressed rather than posted: what the screenshot claims is that the row is the
+// control, so the row is what the capture uses.
+await page.getByRole('row', { name: /^boat/ }).click();
+await page.getByText('Environment', { exact: false }).first().waitFor({ timeout: 30_000 });
+await page.waitForTimeout(1500);
+
+// Where the panel opens from then on: the row in use carries the badge, the
+// others carry the button that switches to them.
 await panel('Environments');
 await shot('panel-environments', { bottom: 'table' });
 
@@ -193,9 +252,17 @@ await shot('panel-stack-editor', { bottom: '.modal-content' });
 // the width.
 const CARD = '.card:has(#root_configuration_instances_0_name)';
 
+// The status line is part of this picture, and clearing the environment choice
+// above made the plugin report an error it goes on showing until it restarts.
+// Saving its options unchanged is that restart.
+await savePluginOptions();
 await page.setViewportSize({ width: WIDTH, height: 1000 });
 await page.goto(CONFIG, { waitUntil: 'networkidle' });
-await page.waitForTimeout(2500);
+await page
+  .getByText(/Connected: /)
+  .first()
+  .waitFor({ state: 'visible', timeout: 60_000 });
+await page.waitForTimeout(1500);
 await shot('plugin-config', {
   top: CARD,
   // Down to where Advanced starts: everything above it is what an operator has

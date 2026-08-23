@@ -97,7 +97,8 @@ containers you can afford to lose.
 
 - Screenshots of the panel, the configuration page and the published Signal K
   paths in the README, captured from the plugin running in a real Signal K
-  admin UI against a fixture Portainer.
+  admin UI against a fixture Portainer — including the first-run state where
+  the environment has still to be chosen.
 - `tools/screenshots/` — the fixture Portainer those captures run against, and
   the script that drives the admin UI and takes them, so an image can be
   retaken rather than edited when the panel changes.
