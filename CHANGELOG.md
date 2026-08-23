@@ -10,9 +10,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Nothing has been published to npm yet, so everything below is the contents of
 the first release rather than a change against one.
 
-**Not yet exercised against a real Portainer.** See
-[What has and has not been verified](README.md#what-has-and-has-not-been-verified)
-before installing this anywhere you would mind losing a container.
+**Not yet exercised against a real Portainer.** Start with an instance whose
+containers you can afford to lose.
 
 ### Added
 
