@@ -18,7 +18,7 @@ import { LogViewer } from './LogViewer';
 import { StackConfirmDialog, type ConfirmableStackAction } from './StackConfirmDialog';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
-import { normalizeStacks, type StackAction } from './stackcontrol';
+import { STACK_CONTROL_DISABLED, normalizeStacks, type StackAction } from './stackcontrol';
 import {
   actionLabel,
   actionRequest,
@@ -942,12 +942,7 @@ function TabBody({
             <GatedButton
               className="btn btn-sm btn-outline-primary"
               label="New stack"
-              {...(stackActions.control?.allowPutControl
-                ? {}
-                : {
-                    reason:
-                      'stack control is disabled; enable "Allow Signal K PUT control" in the plugin configuration',
-                  })}
+              {...(stackActions.control?.allowPutControl ? {} : { reason: STACK_CONTROL_DISABLED })}
               onPress={onNewStack}
             />
           </div>

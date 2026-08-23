@@ -61,6 +61,16 @@ export interface StackActionState {
 }
 
 /**
+ * Why every stack action is refused when PUT control is off.
+ *
+ * Exported because the panel gates "New stack" on the same setting without
+ * having a stack to ask about, and two copies of this sentence drift into two
+ * different explanations for one switch.
+ */
+export const STACK_CONTROL_DISABLED =
+  'stack control is disabled; enable "Allow Signal K PUT control" in the plugin configuration';
+
+/**
  * Whether the panel may offer this action, and what to say when it may not.
  *
  * Editing is a read until the operator presses Deploy, so it stays available
@@ -78,11 +88,7 @@ export function stackActionState(
     return { enabled: false, reason: 'waiting for the plugin to report what is allowed' };
   }
   if (!control.allowPutControl) {
-    return {
-      enabled: false,
-      reason:
-        'stack control is disabled; enable "Allow Signal K PUT control" in the plugin configuration',
-    };
+    return { enabled: false, reason: STACK_CONTROL_DISABLED };
   }
   if (action === 'delete' && !control.allowDestructive) {
     return {

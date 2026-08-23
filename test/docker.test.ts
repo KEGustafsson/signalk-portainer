@@ -2,7 +2,7 @@ import type { MockAgent } from 'undici';
 import { logQuery, DEFAULT_LOG_TAIL, MAX_LOG_TAIL } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent } from './support';
+import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
 
 describe('PortainerClient docker read surface', () => {
   let agent: MockAgent;
@@ -13,6 +13,7 @@ describe('PortainerClient docker read surface', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   /** Every docker call resolves the environment first. */
@@ -209,6 +210,7 @@ describe('PortainerClient stacks', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('returns only the stacks belonging to this environment', async () => {
@@ -319,6 +321,7 @@ describe('PortainerClient log streams', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const streamPath =

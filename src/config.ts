@@ -366,6 +366,17 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
       );
       continue;
     }
+    // A name that matches no instance is reported but still kept. Dropping it
+    // would be the dangerous repair: an allowlist is only consulted while it
+    // has entries, so removing the last bad one empties the list and opens
+    // every container to a PUT. Kept, it goes on matching nothing — which is
+    // what an operator who wrote a name down meant, minus the typo — and the
+    // problem says so in the plugin status.
+    if (!instances.some((candidate) => candidate.name === instance)) {
+      problems.push(
+        `PUT allowlist entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance — it allows nothing until the name is corrected`,
+      );
+    }
     putContainers.push({ instance, container: entry.container });
   }
 

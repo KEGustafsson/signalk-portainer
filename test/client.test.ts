@@ -2,7 +2,7 @@ import { Agent, type MockAgent } from 'undici';
 import { PortainerClient, environmentHealth } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent } from './support';
+import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
 
 describe('PortainerClient authentication', () => {
   let agent: MockAgent;
@@ -13,6 +13,7 @@ describe('PortainerClient authentication', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('sends an API token in X-API-Key and never as a Bearer header', async () => {
@@ -198,6 +199,7 @@ describe('PortainerClient environment resolution', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptEnvironments = (environments: unknown[], times = 1): void => {
@@ -312,6 +314,7 @@ describe('PortainerClient capability probe', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptProbe = (info: object): void => {
@@ -360,6 +363,7 @@ describe('PortainerClient transport failures', () => {
     expect((error as PortainerError).message).toContain('self-signed');
     expect((error as PortainerError).message).toContain(BASE_URL);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 
@@ -474,6 +478,7 @@ describe('PortainerClient transport failure classification', () => {
     expect(error.message).toContain('before the configured timeout');
     expect(error.message).not.toContain('self-signed');
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 
@@ -535,6 +540,7 @@ describe('PortainerClient TLS and lifecycle', () => {
 
     expect(agent.pendingInterceptors()).toHaveLength(0);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('rejects an auth response that carries no jwt', async () => {
@@ -548,6 +554,7 @@ describe('PortainerClient TLS and lifecycle', () => {
 
     expect((error as PortainerError).message).toMatch(/no jwt field/);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   it('surfaces a rejected username and password', async () => {
@@ -565,6 +572,7 @@ describe('PortainerClient TLS and lifecycle', () => {
     expect((error as PortainerError).status).toBe(401);
     expect((error as PortainerError).message).toMatch(/username\/password/);
     await agent.close();
+    restoreGlobalDispatcher();
   });
 });
 

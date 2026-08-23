@@ -265,6 +265,20 @@ describe('StackEditor', () => {
       expect(onClose).toHaveBeenCalled();
     });
 
+    it('asks before discarding a new stack whose only edit is an environment row', async () => {
+      // The dirty check for a new stack looked at the compose file and the
+      // repository URL alone, so an operator who had filled in only the
+      // environment rows lost them to Close without being asked.
+      const user = userEvent.setup();
+      const { onClose } = renderEditor({ target: { kind: 'new' } });
+
+      await user.click(screen.getByRole('button', { name: 'Add' }));
+      await user.click(screen.getByRole('button', { name: 'Close' }));
+
+      expect(onClose).not.toHaveBeenCalled();
+      expect(screen.getByText(/Close without deploying/)).toBeInTheDocument();
+    });
+
     it('goes back to the file when the operator changes their mind', async () => {
       const user = userEvent.setup();
       const { onClose } = renderEditor();

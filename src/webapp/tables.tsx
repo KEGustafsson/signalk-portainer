@@ -97,7 +97,15 @@ export function GatedButton({
   return (
     <button
       type="button"
-      className={className}
+      // Bootstrap dims `.disabled` the same way it dims a real disabled button,
+      // which this one deliberately is not: dropping the native attribute to
+      // keep the control focusable also dropped the styling, so an inert button
+      // looked identical to a live one and a sighted operator pressed it for
+      // nothing. `pointer-events` comes back because the class turns it off,
+      // and the tooltip below is still the fastest way to read the reason with
+      // a mouse.
+      className={inert ? `${className} disabled` : className}
+      {...(inert ? { style: { pointerEvents: 'auto' as const } } : {})}
       // Named explicitly because the reason is carried inside the button. As a
       // sibling it would sit between two buttons of a btn-group and flatten
       // the group's corners; inside and unnamed it would be read out as part

@@ -1,7 +1,7 @@
 import type { MockAgent } from 'undici';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent } from './support';
+import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
 
 /** The paths of the interceptors nothing consumed, as plain strings. */
 const pendingPaths = (agent: MockAgent): string[] =>
@@ -16,6 +16,7 @@ describe('PortainerClient stack writes', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   /**

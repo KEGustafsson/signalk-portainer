@@ -80,11 +80,20 @@ describe('normalizeConfig', () => {
   });
 
   it('drops a duplicate instance name case-insensitively, keeping the first', () => {
+    // The duplicate carries a different address, so keeping the wrong row is
+    // visible: comparing names alone passes either way, since both normalise
+    // to the same one.
     const config = normalizeConfig({
-      instances: [validInstance, { ...validInstance, name: 'LOCAL' }],
+      instances: [
+        validInstance,
+        { ...validInstance, name: 'LOCAL', url: 'https://impostor.test:9443' },
+      ],
     });
 
-    expect(config.instances.map((instance) => instance.name)).toEqual(['local']);
+    expect(config.instances).toHaveLength(1);
+    expect(config.instances[0]?.name).toBe('local');
+    expect(config.instances[0]?.baseUrl).toContain('localhost');
+    expect(config.instances[0]?.baseUrl).not.toContain('impostor.test');
     expect(config.problems.join(' ')).toMatch(/Duplicate instance name/);
   });
 

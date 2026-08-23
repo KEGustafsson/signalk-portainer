@@ -338,7 +338,9 @@ dropped, so stale rows do not linger in dashboards forever. Stopping the plugin
 clears them the same way.
 
 **Publishing level** (`telemetry.level`) decides how much of this is published.
-`off` polls nothing at all; `health` publishes the instance status paths plus
+`off` publishes nothing — though it still polls when a watchdog is configured
+or PUT control is on, since both are fed by the poll, and the values are
+built and dropped rather than sent; `health` publishes the instance status paths plus
 each container's `state` and `health`; `full` adds `image`, `name` and `id`.
 `health` is the default — it is what a dashboard and the watchdog read, and the
 identifying strings never change, so republishing them every poll costs

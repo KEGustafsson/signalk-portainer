@@ -59,7 +59,14 @@ class FakeSocket implements RelaySocket {
     return this;
   }
   emit(event: string, ...args: unknown[]): void {
-    for (const listener of this.listeners.get(event) ?? []) {
+    const listeners = this.listeners.get(event) ?? [];
+    // Node's EventEmitter throws an 'error' that nobody is listening for, and
+    // `ws` sockets are EventEmitters — so a test that emits one without this
+    // cannot tell whether the plugin attached its handler in time.
+    if (event === 'error' && listeners.length === 0) {
+      throw args[0] instanceof Error ? args[0] : new Error(String(args[0]));
+    }
+    for (const listener of listeners) {
       (listener as (...values: unknown[]) => void)(...args);
     }
   }

@@ -130,7 +130,14 @@ export function StackEditor({
 
   const changed = existing
     ? hasChanges(original.current, { content, env })
-    : content.trim().length > 0 || repositoryUrl.trim().length > 0;
+    : // A new stack has nothing to compare against, so "changed" is "anything
+      // typed at all". Every editable field counts: an operator who filled in
+      // only the environment rows has still done work that Close would throw
+      // away without asking.
+      name.trim().length > 0 ||
+      content.trim().length > 0 ||
+      repositoryUrl.trim().length > 0 ||
+      env.length > 0;
 
   /**
    * Close, but not over unsaved work.

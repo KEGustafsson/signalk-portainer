@@ -73,16 +73,26 @@ describe('TtlCache', () => {
 
     const inflight = cache.get('k', 10_000, () => slow);
     cache.invalidate('k');
-    const load = async () => {
+    let releaseFresh: (value: string) => void = () => {};
+    const fresh = new Promise<string>((resolve) => {
+      releaseFresh = resolve;
+    });
+    const load = () => {
       loads += 1;
-      return 'fresh';
+      return fresh;
     };
     const [a, b] = [cache.get('k', 10_000, load), cache.get('k', 10_000, load)];
     // The superseded load finishing must not take the newer one's slot with it.
     release('stale');
     await inflight;
 
-    await expect(Promise.all([a, b])).resolves.toEqual(['fresh', 'fresh']);
+    // Held open on purpose: a caller arriving now proves the replacement is
+    // still in flight and still joinable. If the stale load's cleanup had
+    // deleted it, this would start a third load instead.
+    const c = cache.get('k', 10_000, load);
+    releaseFresh('fresh');
+
+    await expect(Promise.all([a, b, c])).resolves.toEqual(['fresh', 'fresh', 'fresh']);
     expect(loads).toBe(1);
   });
 

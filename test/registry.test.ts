@@ -2,7 +2,7 @@ import type { MockAgent } from 'undici';
 import { normalizeConfig } from '../src/config';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import * as fixtures from './fixtures';
-import { createMockAgent } from './support';
+import { createMockAgent, restoreGlobalDispatcher } from './support';
 
 const instances = (extra: Record<string, unknown>[] = []) =>
   normalizeConfig({
@@ -68,6 +68,7 @@ describe('InstanceRegistry.health', () => {
 
   afterEach(async () => {
     await agent.close();
+    restoreGlobalDispatcher();
   });
 
   const interceptReachable = (origin: string): void => {
