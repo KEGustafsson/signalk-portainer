@@ -80,37 +80,16 @@ is what [step 3](#3-deal-with-the-certificate) is about. Naming the container
 `portainer` also keeps it recognisable in the Signal K paths, which lower-case
 what they are given: `system.docker.<instance>.containers.portainer.state`.
 
-Four of those lines are choices rather than boilerplate:
-
-- **`lts`, not `latest`.** Portainer publishes a long-term channel and a
-  short-term one, and `latest` follows the short-term releases. `lts` moves too
-  — it is whatever the current long-term release is, `2.39.6` at the time of
-  writing — but it moves within a channel that changes less under a plugin
-  speaking the CE 2.x API. For a machine that should come back identical after
-  a rebuild, name the exact version, or its digest:
-  `portainer/portainer-ce@sha256:…`.
-- **`./data`, not `$PWD/data`.** Compose resolves a relative path against the
-  directory holding the compose file, but `$PWD` against wherever the command
-  was run from. `docker compose -f /opt/portainer/docker-compose.yml up -d`
-  from your home directory would put Portainer's database in your home
-  directory — and the next `up` from somewhere else would start it with an
-  empty one.
-- **`unless-stopped`, not `always`.** `always` starts a container again when
-  the daemon starts, including one you deliberately stopped — from this
-  plugin's panel, say. `unless-stopped` leaves that decision alone, which
-  matters when the thing being stopped is being stopped for a reason.
-- **`127.0.0.1:9443`, not `9443`.** The plugin talks to Portainer from the
-  Signal K server, so nothing has to reach it across the boat's network.
-  Publishing on every interface puts a UI that manages Docker on the same wifi
-  as the chartplotter and every guest's phone. Bind it wider only if you also
-  want Portainer's own UI from another machine, and then give it a certificate.
-
-And one line that is not a choice: mounting `/var/run/docker.sock` hands the
-container root-equivalent control of the host, since anything that can talk to
-that socket can start another container that mounts the host's filesystem.
-That is true of every Portainer installation rather than of this compose file
-in particular, and it is why this plugin's destructive and self-management
-switches are off until you turn them on.
+What that file does: runs Portainer's current long-term release — `lts` follows
+the long-term channel rather than a fixed version, so name an exact tag or
+digest where a rebuild has to come back identical — restarts it unless you stop
+it yourself, and publishes its HTTPS port to this machine only, which is all the
+plugin needs to reach it. Portainer's database lives in `./data`, beside the
+compose file. `/var/run/docker.sock` is how it manages Docker, and passing it in
+gives the container root-equivalent control of the host; that is true of any
+Portainer installation, and it is why this plugin's destructive and
+self-management switches stay off until you turn them on. The two commented
+lines add plain HTTP and the Edge agent tunnel.
 
 If Signal K itself runs in a container, `localhost` inside it is not the host:
 put both on the same compose network and use `https://portainer:9443`, or give
