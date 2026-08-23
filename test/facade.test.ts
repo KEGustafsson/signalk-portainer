@@ -7,7 +7,7 @@ import { normalizeConfig } from '../src/config';
 import type { PluginConfig } from '../src/config';
 import { PortainerError } from '../src/errors';
 import type { SelfContainer } from '../src/self';
-import { registerRoutes, instanceParam } from '../src/facade';
+import { registerRoutes, instanceParam, type FacadeHandle } from '../src/facade';
 import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
@@ -32,11 +32,13 @@ const buildApp = (
     log?: (message: string) => void;
     streams?: StreamLimiter;
     keepalive?: number;
+    /** Receives the handle a stopping plugin would reach back through. */
+    onHandle?: (handle: FacadeHandle) => void;
   } = {},
 ) => {
   const app = express();
   const router = express.Router();
-  registerRoutes(router, {
+  const handle = registerRoutes(router, {
     registry: () => registry,
     config: () =>
       registry
@@ -56,6 +58,7 @@ const buildApp = (
     ...(opts.streams ? { streams: opts.streams } : {}),
     ...(opts.keepalive ? { keepaliveMs: opts.keepalive } : {}),
   });
+  opts.onHandle?.(handle);
   app.use(router);
   return app;
 };
@@ -685,61 +688,43 @@ describe('facade log stream lifecycle', () => {
       await server.close();
     }
   }, 20_000);
-});
 
-describe('stopping the plugin', () => {
-  let agent: MockAgent;
-
-  beforeEach(() => {
-    agent = createMockAgent();
-  });
-
-  afterEach(async () => {
-    await agent.close();
-  });
-
-  it('ends an open log stream, giving its permit back', async () => {
+  it('ends an open log stream when the plugin stops, giving its permit back', async () => {
     // The limiter and each request's AbortController live inside the closure
     // registerRoutes builds, and the router is registered once for the life of
     // the server. Without a handle back into it, a stream survives the plugin
     // stopping — still relaying, still holding one of eight permits — until
     // Signal K itself restarts.
+    //
+    // Held open by the test rather than mocked: a mocked reply that arrives and
+    // ends releases the permit by itself, and the assertions below would then
+    // hold against a shutdown() that did nothing at all.
     const limiter = new StreamLimiter({ total: 2, perTarget: 1 });
-    const app = express();
-    const router = express.Router();
-    const handle = registerRoutes(router, {
-      registry: () => new InstanceRegistry(config),
-      config: () =>
-        ({
-          instances: [],
-          telemetry: { level: 'off' as const, intervalSeconds: 30, pathPrefix: 'x' },
-          control: control(),
-        }) as PluginConfig,
-      self: () => noSelf,
-      log: () => {},
-      streams: limiter,
-    });
-    app.use(router);
+    const held = heldStream();
+    let handle!: FacadeHandle;
+    const server = await serve(
+      buildApp(held.registry, { streams: limiter, onHandle: (given) => (handle = given) }),
+    );
 
-    const boat = agent.get('https://boat.test:9443');
-    boat
-      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
-      .reply(200, [fixtures.localEnvironment]);
-    const header = Buffer.alloc(8);
-    header[0] = 1;
-    header.writeUInt32BE(10, 4);
-    boat
-      .intercept({ path: (p: string) => p.includes('/logs'), method: 'GET' })
-      .reply(200, Buffer.concat([header, Buffer.from('listening\n')]));
+    try {
+      const req = open(server.port);
+      await waitFor('the request to reach Portainer', () => held.signal() !== undefined);
+      held.answer();
+      // Genuinely connected, genuinely holding a permit, and with nothing about
+      // to end it on its own: the container is simply quiet.
+      await waitFor('the stream to take its permit', () => limiter.openCount === 1);
 
-    await request(app).get('/api/containers/abc123def456/logs/stream');
-    const held = limiter.openCount;
+      handle.shutdown();
 
-    handle.shutdown();
-
-    expect(held).toBeGreaterThanOrEqual(0);
-    expect(limiter.openCount).toBe(0);
-  });
+      await waitFor('the permit to come back', () => limiter.openCount === 0);
+      // And the upstream follow stream is abandoned, rather than left relaying
+      // into a plugin that has stopped.
+      expect(held.signal()?.aborted).toBe(true);
+      req.destroy();
+    } finally {
+      await server.close();
+    }
+  }, 20_000);
 });
 
 describe('facade container lifecycle', () => {
