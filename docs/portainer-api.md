@@ -68,13 +68,25 @@ name — always resolve by listing first.
 | 1 | Local Docker (socket) | `Status` |
 | 2 | Agent on Docker | `Status` |
 | 3 | Azure ACI | `Status` |
-| 4 | Edge agent on Docker | check-in time |
+| 4 | Edge agent on Docker | `Heartbeat` |
 | 5 | Local Kubernetes | `Status` |
 | 6 | Agent on Kubernetes | `Status` |
-| 7 | Edge agent on Kubernetes | check-in time |
+| 7 | Edge agent on Kubernetes | `Heartbeat` |
 
-`Status`: `1` = up, `2` = down. For Edge types (4, 7) `Status` is meaningless —
-health is `now - LastCheckInDate <= 2 × interval + 20s`.
+`Status`: `1` = up, `2` = down, and it is omitted entirely (`omitempty`) on an
+environment Portainer has never snapshotted. For Edge types (4, 7) `Status` is
+meaningless — the snapshot job skips them, so it keeps whatever it was set to at
+creation, usually `1`.
+
+Edge health is `Heartbeat`, a boolean the endpoint list computes per request and
+what Portainer's own UI shows. **Prefer it over recomputing the window.** It is
+`now - LastCheckInDate <= 2 × interval + 20s`, but with `now` on Portainer's
+clock and an `interval` that depends on `Edge.AsyncMode`: standard mode uses
+`EdgeCheckinInterval` (falling back to the global setting, 5s by default),
+async mode ignores that field and uses the shortest of `Edge.PingInterval`,
+`Edge.CommandInterval` and `Edge.SnapshotInterval`, capped at 60s. Recomputing
+locally is how a healthy async edge agent — checking in every 60s, against a
+window built from the 5s default — ends up badged "down".
 
 Snapshot fields (heavy — exclude unless needed): `ContainerCount`,
 `RunningContainerCount`, `StoppedContainerCount`, `ImageCount`, `VolumeCount`,

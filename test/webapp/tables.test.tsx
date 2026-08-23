@@ -182,6 +182,11 @@ describe('tables with sparse Docker data', () => {
     expect(screen.getByText('Edge agent')).toBeInTheDocument();
     expect(screen.getByText('Type 99')).toBeInTheDocument();
     expect(screen.getByText('selected')).toBeInTheDocument();
+
+    // Only a real "down" earns the red badge; "unknown" is not an outage.
+    expect(screen.getByText('up')).toHaveClass('bg-success');
+    expect(screen.getByText('down')).toHaveClass('bg-danger');
+    expect(screen.getByText('unknown')).toHaveClass('bg-secondary');
   });
 });
 

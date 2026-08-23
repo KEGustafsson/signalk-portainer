@@ -1038,20 +1038,48 @@ function describe(environments: Environment[]): string {
 /**
  * Edge environments (types 4 and 7) do not populate Status; their health is
  * check-in recency. Direct environments ignore the check-in fields entirely.
+ *
+ * Portainer already answers the edge question itself, in `Heartbeat`, and that
+ * answer is preferred over recomputing one here. Recomputing is what made
+ * healthy remote environments read as "down": Portainer stamps
+ * `LastCheckInDate` with its own clock, and works the window out from the
+ * intervals that only it can see. A local recomputation gets both wrong — any
+ * clock skew between this host and Portainer's counts straight against the
+ * window, and an async edge agent checks in on its ping interval (60s by
+ * default) while `EdgeCheckinInterval` in the same payload still carries the
+ * 5s standard-mode default, a window three times too short for a link that is
+ * perfectly healthy.
  */
 export function environmentHealth(environment: Environment, nowMs = Date.now()): EnvironmentHealth {
   if (EDGE_ENVIRONMENT_TYPES.includes(environment.Type)) {
+    if (typeof environment.Heartbeat === 'boolean') return environment.Heartbeat ? 'up' : 'down';
+
     if (!environment.LastCheckInDate) return 'down';
-    const interval =
-      environment.EdgeCheckinInterval && environment.EdgeCheckinInterval > 0
-        ? environment.EdgeCheckinInterval
-        : EDGE_DEFAULT_INTERVAL_SECONDS;
     const ageSeconds = nowMs / 1000 - environment.LastCheckInDate;
-    return ageSeconds <= 2 * interval + EDGE_GRACE_SECONDS ? 'up' : 'down';
+    return ageSeconds <= 2 * edgeCheckinInterval(environment) + EDGE_GRACE_SECONDS ? 'up' : 'down';
   }
   if (environment.Status === 1) return 'up';
   if (environment.Status === 2) return 'down';
   return 'unknown';
+}
+
+/**
+ * How often the agent is expected to check in, for the Portainer versions that
+ * do not publish `Heartbeat`. Mirrors Portainer's own rule: in async mode the
+ * agent checks in on the shortest of its ping, command and snapshot intervals
+ * — capped at 60s — and `EdgeCheckinInterval` does not apply at all.
+ */
+function edgeCheckinInterval(environment: Environment): number {
+  const edge = environment.Edge;
+  if (edge?.AsyncMode) {
+    const intervals = [edge.PingInterval, edge.CommandInterval, edge.SnapshotInterval].filter(
+      (value): value is number => typeof value === 'number' && value > 0,
+    );
+    return Math.min(EDGE_DEFAULT_INTERVAL_SECONDS, ...intervals);
+  }
+  return environment.EdgeCheckinInterval && environment.EdgeCheckinInterval > 0
+    ? environment.EdgeCheckinInterval
+    : EDGE_DEFAULT_INTERVAL_SECONDS;
 }
 
 /**

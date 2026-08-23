@@ -2,6 +2,7 @@ import {
   containerName,
   formatAge,
   formatBytes,
+  healthColour,
   shortId,
   stateColour,
 } from '../../src/webapp/format';
@@ -65,6 +66,14 @@ describe('stateColour', () => {
     expect(stateColour('exited')).toBe('danger');
     expect(stateColour('dead')).toBe('danger');
     expect(stateColour('paused')).toBe('secondary');
+  });
+});
+
+describe('healthColour', () => {
+  it('keeps "unknown" out of the red badge that means down', () => {
+    expect(healthColour('up')).toBe('success');
+    expect(healthColour('down')).toBe('danger');
+    expect(healthColour('unknown')).toBe('secondary');
   });
 });
 

@@ -49,6 +49,22 @@ export function stateColour(state: string): string {
   }
 }
 
+/**
+ * Bootstrap badge colour for an environment's health. "unknown" is Portainer
+ * declining to say — an environment it has not snapshotted yet, say — so it
+ * gets the neutral badge rather than the red one that means "down".
+ */
+export function healthColour(health: string): string {
+  switch (health) {
+    case 'up':
+      return 'success';
+    case 'down':
+      return 'danger';
+    default:
+      return 'secondary';
+  }
+}
+
 export function shortId(id: string | undefined, length = 12): string {
   if (!id) return '—';
   return id.replace(/^sha256:/, '').slice(0, length);

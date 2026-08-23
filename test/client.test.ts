@@ -306,6 +306,51 @@ describe('environmentHealth', () => {
     expect(environmentHealth(fixtures.nasEnvironment, now)).toBe('down');
   });
 
+  it("prefers Portainer's own heartbeat over recomputing the window", () => {
+    // The check-in is far outside the window this plugin would work out on its
+    // own — an async agent's is, routinely — but Portainer, which knows the
+    // async intervals and stamped the check-in with its own clock, says up.
+    const async = {
+      ...fixtures.edgeEnvironment,
+      Heartbeat: true,
+      LastCheckInDate: now / 1000 - 55,
+      Edge: { AsyncMode: true, PingInterval: 60, CommandInterval: 60, SnapshotInterval: 60 },
+    };
+    expect(environmentHealth(async, now)).toBe('up');
+
+    // And the other way: recent enough for the local window, but Portainer has
+    // stopped hearing from it.
+    const silent = {
+      ...fixtures.edgeEnvironment,
+      Heartbeat: false,
+      LastCheckInDate: now / 1000 - 1,
+    };
+    expect(environmentHealth(silent, now)).toBe('down');
+  });
+
+  it('uses the async intervals when Portainer publishes no heartbeat', () => {
+    // EdgeCheckinInterval carries the 5s standard-mode default and must be
+    // ignored: an async agent checks in on its ping interval, so 55s is fine.
+    const async = {
+      ...fixtures.edgeEnvironment,
+      EdgeCheckinInterval: 5,
+      LastCheckInDate: now / 1000 - 55,
+      Edge: { AsyncMode: true, PingInterval: 60, CommandInterval: 60, SnapshotInterval: 60 },
+    };
+    expect(environmentHealth(async, now)).toBe('up');
+    expect(environmentHealth({ ...async, LastCheckInDate: now / 1000 - 141 }, now)).toBe('down');
+  });
+
+  it('takes the shortest async interval, as Portainer does', () => {
+    const async = {
+      ...fixtures.edgeEnvironment,
+      LastCheckInDate: now / 1000 - 41,
+      Edge: { AsyncMode: true, PingInterval: 60, CommandInterval: 10, SnapshotInterval: 60 },
+    };
+    expect(environmentHealth(async, now)).toBe('down');
+    expect(environmentHealth({ ...async, LastCheckInDate: now / 1000 - 40 }, now)).toBe('up');
+  });
+
   it('ignores Status for edge environments and uses check-in recency', () => {
     const recent = { ...fixtures.edgeEnvironment, LastCheckInDate: now / 1000 - 30 };
     const stale = { ...fixtures.edgeEnvironment, LastCheckInDate: now / 1000 - 500 };
