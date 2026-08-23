@@ -18,7 +18,14 @@ import {
   type ControlState,
 } from './control';
 import { consoleState } from './consolesession';
-import { containerName, formatAge, formatBytes, shortId, stateColour } from './format';
+import {
+  containerName,
+  formatAge,
+  formatBytes,
+  healthColour,
+  shortId,
+  stateColour,
+} from './format';
 import {
   isActive,
   stackActionLabel,
@@ -92,9 +99,7 @@ export function EnvironmentsTable({ rows }: { rows: EnvironmentRow[] }): ReactEl
             <td>{row.name}</td>
             <td>{ENVIRONMENT_TYPES[row.type] ?? `Type ${row.type}`}</td>
             <td>
-              <span className={`badge bg-${row.health === 'up' ? 'success' : 'danger'}`}>
-                {row.health}
-              </span>
+              <span className={`badge bg-${healthColour(row.health)}`}>{row.health}</span>
             </td>
             <td className="text-muted small">{row.url ?? '—'}</td>
             <td>{row.isSelected ? <span className="badge bg-primary">selected</span> : null}</td>

@@ -30,6 +30,10 @@ before installing this anywhere you would mind losing a container.
 - Environment resolution by id or by name, auto-selecting when Portainer has
   exactly one, plus a Swarm capability probe so swarm views appear only where
   the daemon is in a swarm.
+- Environment health taken from Portainer's own verdict: `Status` for direct
+  environments and `Heartbeat` for edge ones, rather than a locally recomputed
+  check-in window that would call a healthy async edge agent — or one behind a
+  host whose clock disagrees with Portainer's — down.
 
 #### REST facade
 

@@ -192,8 +192,10 @@ Behaviour baked into the client:
   Swarm support (decision D3) and yields the `SwarmID` that swarm stack creation
   needs. No Swarm toggle in the config; nothing Swarm-shaped is offered when the
   daemon is not in a swarm.
-- **Edge-aware health.** For `Type` 4/7 compute health from `LastCheckInDate`
-  (`now - last <= 2×interval + 20s`), not `Status`.
+- **Edge-aware health.** For `Type` 4/7 take health from `Heartbeat`, not
+  `Status` and not a locally recomputed check-in window — Portainer knows its
+  own clock and the async intervals. Recompute from `LastCheckInDate` only when
+  `Heartbeat` is absent.
 - **Bounded reads.** `excludeSnapshots=true` on environment listings,
   `stats?stream=false` for polling, `tail=` always set on logs. Snapshot and
   `StackFileContent` fields are dropped before caching.
