@@ -7,13 +7,18 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-08-23
+
+The release that loads. 0.1.0 could not be started at all; everything below
+exists because of that, plus what the review of the fix turned up.
+
 ### Fixed
 
 - **The plugin loads.** 0.1.0 as published does not: it imports `express` at
   runtime while declaring it only under `devDependencies`, so a fresh install
   fails with `Cannot find module 'express'` and the plugin never starts. The
   JSON body parsing that needed it now uses `body-parser`, which is a real
-  dependency. This is the whole reason for the release that carries it.
+  dependency. This is the whole reason for 0.1.1.
 - One instance that fails validation no longer takes the working ones with it.
   The bad entry is dropped and named in the plugin status, and the Portainer
   that was answering perfectly well keeps its panel, its deltas and its
@@ -32,12 +37,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 - The panel's dialogs are usable from the keyboard: focus moves into a dialog
   when it opens, stays inside it while it is open, and returns to the control
   that opened it afterwards. The table tabs are marked up as tabs.
+- A panel request whose deadline expires while the response body is arriving is
+  reported as the timeout it is. The deadline used to be released as soon as the
+  headers came back, so a server that answered and then stalled mid-body left
+  the row's buttons disabled with no error and no way back.
+- A **Containers a Signal K PUT may control** entry naming an instance that does
+  not exist is named in the plugin status. Because the allowlist is consulted
+  only while it has entries, a single typo silently refused every container; the
+  entry is still kept — dropping the last bad one would empty the list, and an
+  empty list allows everything — but the operator is now told why nothing
+  matches.
+- A button the plugin has gated looks gated again. Keeping it focusable for
+  screen-reader users had dropped the dimming with the native `disabled`
+  attribute, so an inert control was indistinguishable from a live one.
+- Closing a half-filled new stack asks first when only its environment variables
+  have been entered. The dirty check looked at the compose file and the git URL
+  alone, and threw those rows away without a word.
 
 ### Changed
 
 - A refused Portainer request now says what Portainer said. The message it sent
   is surfaced instead of being replaced by a generic one, so "environment 3 not
   found" reads as itself rather than as a bare 404.
+- The GitHub Actions used by CI are pinned to commit SHAs, and Dependabot keeps
+  them current alongside the npm dependencies.
 
 ### Added
 
@@ -51,8 +74,8 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 ## [0.1.0] - 2026-08-23
 
 The first published release. It is on npm and in the Signal K plugin registry,
-and it **does not load**: see the `express` defect at the top of this file. Use
-the release that follows it.
+and it **does not load**: see the `express` defect under 0.1.1. Install 0.1.1
+instead.
 
 **Not yet exercised against a real Portainer.** Start with an instance whose
 containers you can afford to lose.
@@ -196,5 +219,6 @@ containers you can afford to lose.
 - Updating a file-based stack drops any auto-update schedule Portainer had on
   it, which no field in the request can prevent. The answer says so.
 
-[Unreleased]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.0...HEAD
+[Unreleased]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.1...HEAD
+[0.1.1]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/KEGustafsson/signalk-portainer/releases/tag/0.1.0

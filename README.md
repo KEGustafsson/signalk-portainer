@@ -48,7 +48,7 @@ To install from a checkout instead:
 
 ```bash
 npm install && npm run build && npm pack
-cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.0.tgz
+cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.1.tgz
 ```
 
 ## Running Portainer
@@ -497,6 +497,11 @@ least six characters, and an optional server name that defaults to the first
 enabled one. So a boat that wants a dashboard button for its AIS logger can
 list that one container and leave the database and the broker unreachable,
 without turning PUT control off altogether.
+
+An entry whose server name matches no configured instance is kept, not dropped —
+an allowlist that empties itself allows everything again — so it simply matches
+nothing, and the plugin status names it. Check there if a container you listed
+has no writable path.
 
 Signal K's own ACLs are the other lever, and they are finer than anything the
 plugin can offer: `checkACL` matches a context and a path pattern and can grant
