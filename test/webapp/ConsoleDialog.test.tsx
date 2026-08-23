@@ -26,6 +26,19 @@ class FakeTerminal implements Terminal {
   size: TerminalSize = { cols: 120, rows: 40 };
   private data: ((data: string) => void) | undefined;
   private resized: ((size: TerminalSize) => void) | undefined;
+  private textarea: HTMLTextAreaElement | undefined;
+
+  /**
+   * xterm puts a real textarea inside the host and focuses that; the keyboard
+   * trap the dialog has to offer a way out of is precisely that textarea
+   * holding the focus. A fake that only counts focus() calls cannot show the
+   * trap, so it cannot show the escape either.
+   */
+  attach(host: HTMLElement): void {
+    const area = document.createElement('textarea');
+    host.appendChild(area);
+    this.textarea = area;
+  }
 
   write(data: string): void {
     // xterm's write buffer throws `Object has been disposed` once the terminal
@@ -45,6 +58,7 @@ class FakeTerminal implements Terminal {
   }
   focus(): void {
     this.focused += 1;
+    this.textarea?.focus();
   }
   dispose(): void {
     this.disposed = true;
@@ -114,8 +128,9 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="boat"
         onClose={props.onClose ?? (() => {})}
-        terminal={async () => {
+        terminal={async (element) => {
           terminalRequests += 1;
+          terminal.attach(element);
           return terminal;
         }}
         openSocket={(url, handlers) => {
@@ -364,8 +379,9 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="shore"
         onClose={() => {}}
-        terminal={async () => {
+        terminal={async (element) => {
           terminalRequests += 1;
+          terminal.attach(element);
           return terminal;
         }}
         openSocket={(url, handlers) => {
@@ -395,8 +411,9 @@ describe('ConsoleDialog', () => {
         container={container}
         instance="boat"
         onClose={() => {}}
-        terminal={async () => {
+        terminal={async (element) => {
           terminalRequests += 1;
+          terminal.attach(element);
           return terminal;
         }}
         openSocket={(url, handlers) => {
@@ -441,6 +458,9 @@ describe('ConsoleDialog', () => {
     // way back to Close — and the shell nobody can leave is a root one.
     await connected();
     expect(terminal.focused).toBe(1);
+    // The shell has the keyboard, which is the trap: assert it, or the escape
+    // below proves nothing but that Close never lost focus in the first place.
+    expect(screen.getByRole('button', { name: 'Close' })).not.toHaveFocus();
 
     await userEvent.keyboard('{Control>}]{/Control}');
 

@@ -200,6 +200,11 @@ essentials:
   altogether on a server that cannot serve a console, since that is not
   something an operator can change.
 
+  The terminal takes the keyboard once the shell is connected, including Tab,
+  and Escape belongs to the shell rather than the dialog — so **Ctrl+]**, the
+  break-out key `telnet` and `docker attach` already use, moves focus back to
+  Close. Without it a shell reached by keyboard could not be left by one.
+
   The browser is the only end that knows how big the terminal is, so it says
   so: the POST that mints the ticket also returns a session handle, and
   `POST /console/resize` tells Docker the size, on connect and whenever the

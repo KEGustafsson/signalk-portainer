@@ -222,7 +222,11 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
         // 'off' means off: no polling, no paths. The one thing that still needs
         // a poll is a configured watchdog, which cannot check a container
         // without looking at it — it then publishes alarms and nothing else.
-        if (config.telemetry.level !== 'off' || watchdog) {
+        // `putsWanted` belongs here: PUT paths are discovered by the poll's
+        // onKeys callback, so decoupling PUT from the telemetry level (which
+        // this change did) without this leaves allowPutControl on and no path
+        // ever registered — control that says it is enabled and does nothing.
+        if (config.telemetry.level !== 'off' || watchdog || putsWanted) {
           const prefix = config.telemetry.pathPrefix;
           poller = new DeltaPoller({
             registry: () => registry,

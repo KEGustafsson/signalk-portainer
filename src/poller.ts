@@ -109,6 +109,25 @@ export class DeltaPoller {
       );
       if (this.stopped) return;
 
+      // Reported here rather than after publishing. Reachability is the one
+      // thing this poll definitely learned, and everything below it can throw
+      // — so leaving it to the end would let a delta-building failure freeze
+      // the plugin status on a Portainer state that is no longer true. Its own
+      // try, so a listener that throws cannot stop the telemetry either.
+      try {
+        this.deps.onHealth?.(
+          snapshots.map(({ name, snapshot }) => ({
+            name,
+            reachable: snapshot.reachable,
+            ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
+          })),
+        );
+      } catch (cause) {
+        this.deps.log(
+          `reporting health failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        );
+      }
+
       const values: PathValue[] = [];
       const meta: MetaValue[] = [];
       const notifications: Notification[] = [];
@@ -128,13 +147,6 @@ export class DeltaPoller {
 
       if (values.length > 0 || meta.length > 0) this.deps.publish(values, meta);
       if (notifications.length > 0) this.deps.publishNotifications?.(notifications);
-      this.deps.onHealth?.(
-        snapshots.map(({ name, snapshot }) => ({
-          name,
-          reachable: snapshot.reachable,
-          ...(snapshot.error === undefined ? {} : { error: snapshot.error }),
-        })),
-      );
     } catch (cause) {
       // A poll must never be worse than a poll that reports "unreachable".
       // `snapshot()` already contains network failures; this catches everything

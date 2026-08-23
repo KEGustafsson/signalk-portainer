@@ -255,10 +255,19 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
 
   const watchdog = (raw?.control?.watchdog ?? [])
     .filter((entry) => entry.container)
-    .map((entry) => ({
-      instance: entry.instance || (instances.find((i) => i.enabled)?.name ?? 'local'),
-      container: entry.container as string,
-    }));
+    .map((entry) => {
+      const instance = entry.instance || (instances.find((i) => i.enabled)?.name ?? 'local');
+      // Checked rather than trusted. The poller only evaluates instances that
+      // exist and are enabled, so a typo here does not fail — it silently
+      // watches nothing, and the operator discovers it the night the container
+      // they were watching dies and no alarm sounds.
+      if (!instances.some((candidate) => candidate.enabled && candidate.name === instance)) {
+        throw new ConfigError(
+          `Watchdog entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance`,
+        );
+      }
+      return { instance, container: entry.container as string };
+    });
 
   return {
     instances,

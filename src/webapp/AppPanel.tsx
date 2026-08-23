@@ -597,7 +597,7 @@ function TabBody({
 }): ReactElement {
   switch (tab) {
     case 'environments':
-      return <EnvironmentsTable rows={payload.environments ?? []} />;
+      return <EnvironmentsTable rows={rowsOf(payload.environments)} />;
     case 'stacks':
       return (
         <div>
