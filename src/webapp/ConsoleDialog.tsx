@@ -58,6 +58,16 @@ export function ConsoleDialog({
   const closeRef = useRef<HTMLButtonElement>(null);
   /** The live terminal, so a window resize can re-measure it. */
   const screenRef = useRef<Terminal | undefined>(undefined);
+  // Held in refs and kept out of the effect's dependencies. A caller passing
+  // these inline — which is the natural way to write a test, and easy to reach
+  // for elsewhere — would otherwise change their identity on every render, and
+  // the effect would tear down a working shell and open a new one each time.
+  // What a shell depends on is the container, the Portainer and the command;
+  // not who supplied the constructors.
+  const makeTerminalRef = useRef(makeTerminal);
+  const openSocketRef = useRef(openSocket);
+  makeTerminalRef.current = makeTerminal;
+  openSocketRef.current = openSocket;
   const name = containerName(container.Names);
   const id = container.Id;
 
@@ -115,7 +125,7 @@ export function ConsoleDialog({
           );
         }
 
-        screen = await makeTerminal(element);
+        screen = await makeTerminalRef.current(element);
         // The chunk that carries the terminal can take a moment to arrive, and
         // the dialog can close while it does. The ticket is left to expire on
         // its own — thirty seconds, and it was never redeemed.
@@ -128,7 +138,7 @@ export function ConsoleDialog({
         screenRef.current = screen;
 
         const opened = screen;
-        socket = openSocket(socketUrl(granted.ticket), {
+        socket = openSocketRef.current(socketUrl(granted.ticket), {
           onOpen: () => {
             if (!live) return;
             setPhase({ kind: 'open' });
@@ -158,7 +168,7 @@ export function ConsoleDialog({
 
     return abandon;
     // `attempt` is a deliberate dependency: it is how the retry re-runs this.
-  }, [id, instance, shell, attempt, makeTerminal, openSocket]);
+  }, [id, instance, shell, attempt]);
 
   // The dialog is a fixed fraction of the window, so the terminal has to be
   // re-measured whenever the window changes shape. xterm reports the new size

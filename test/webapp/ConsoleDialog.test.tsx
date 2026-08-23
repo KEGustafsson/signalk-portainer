@@ -367,7 +367,10 @@ describe('ConsoleDialog', () => {
     );
   });
 
-  it('loads the terminal once per shell, not once per render', async () => {
+  it('does not restart a live shell because a prop changed identity', async () => {
+    // The factories arrive as props, and a caller passing them inline gets a
+    // new function on every render. Treating that as a reason to reopen would
+    // kill a shell somebody was typing into.
     const view = await connected();
 
     view.rerender(
@@ -387,7 +390,12 @@ describe('ConsoleDialog', () => {
       />,
     );
 
+    await new Promise((resolve) => setTimeout(resolve, 20));
     expect(terminalRequests).toBe(1);
+    // And the socket that was carrying the shell is still the one open.
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.closed).toBe(false);
+    expect(terminal.disposed).toBe(false);
   });
 
   it('gives the keyboard to the shell once it is connected', async () => {
