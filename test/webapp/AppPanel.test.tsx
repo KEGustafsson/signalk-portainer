@@ -1630,6 +1630,62 @@ describe('AppPanel container actions', () => {
       });
     });
 
+    it('does not let the tab’s slower usage read undo what a prune reported', async () => {
+      // The two /df reads land in the order Docker answers them, not the order
+      // they were asked for: the one the tab opened with can still be in
+      // flight when the prune's answer arrives, and it is an account of the
+      // disk from before the prune ran. Applied on top, the freed space
+      // reappears in the summary and the operator is told the prune did
+      // nothing.
+      const pending: Array<(body: unknown) => void> = [];
+      const afterPrune = {
+        LayersSize: 412_000_000,
+        Images: [{ Id: held, Created: 1, Size: 412_000_000, SharedSize: 0, Containers: 1 }],
+      };
+      const base = imageFetch();
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0];
+        // Held rather than answered, so the test decides the order.
+        if (path === '/df') {
+          return new Promise<Response>((resolve) => {
+            // Wrapped as the panel reads it: /df answers with the figures
+            // under a `df` key, not as the body itself.
+            pending.push((body) =>
+              resolve(
+                asResponse({ ok: true, status: 200, json: () => Promise.resolve({ df: body }) }),
+              ),
+            );
+          });
+        }
+        return base(input, init);
+      }) as FetchMock;
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Reclaim space' }));
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByRole('button', { name: 'Delete untagged layers' }));
+
+      // The prune's own read of the disk, made after it finished.
+      await waitFor(() => expect(pending).toHaveLength(2));
+      await act(async () => {
+        pending[1]?.(afterPrune);
+        await Promise.resolve();
+      });
+      expect(await screen.findByText(/412 MB on disk/)).toBeInTheDocument();
+
+      // And now the read from before the prune, arriving last.
+      await act(async () => {
+        pending[0]?.(df);
+        await Promise.resolve();
+      });
+
+      expect(screen.getByText(/412 MB on disk/)).toBeInTheDocument();
+      expect(screen.queryByText(/502 MB on disk/)).not.toBeInTheDocument();
+      expect(screen.queryByText(/90 MB reclaimable/)).not.toBeInTheDocument();
+    });
+
     it('offers neither action until destructive operations are enabled', async () => {
       global.fetch = imageFetch({ '/control': control }) as unknown as typeof fetch;
       const user = userEvent.setup();

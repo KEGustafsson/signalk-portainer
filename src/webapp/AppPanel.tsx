@@ -190,6 +190,9 @@ function Panel(): ReactElement {
   // Keeps a slow response from overwriting the results of a later request when
   // the operator switches tab or instance while one is still in flight.
   const requestSeq = useRef(0);
+  // The same guard for /df, which needs its own: a prune reads it while the
+  // read the tab started may still be open, and that one predates the prune.
+  const usageSeq = useRef(0);
   // A stalled request would otherwise stay open while every poll starts
   // another, so each new request cancels the one before it.
   const inFlight = useRef<AbortController | undefined>(undefined);
@@ -374,8 +377,13 @@ function Panel(): ReactElement {
    */
   const loadUsage = useCallback(
     async (signal?: AbortSignal): Promise<void> => {
+      const seq = (usageSeq.current += 1);
       try {
         const body = await apiGet<{ df?: DockerDiskUsage }>('/df', instance, signal);
+        // A read this one overtook is a read of the state before: the tab's
+        // opening /df can land after the prune's, and letting it through puts
+        // the pre-prune total and its badges back over what the prune freed.
+        if (seq !== usageSeq.current) return;
         setUsage(body.df);
       } catch {
         // Deliberately silent. Nothing is offered on the strength of this read
@@ -396,7 +404,13 @@ function Panel(): ReactElement {
     // otherwise sit under the new one's rows until this read lands.
     setUsage(undefined);
     void loadUsage(controller.signal);
-    return () => controller.abort();
+    return () => {
+      controller.abort();
+      // The abort only reaches this read. A prune's /df carries no signal, so
+      // retiring the sequence is what stops one that is still open from
+      // answering for the instance or tab the operator has just left.
+      usageSeq.current += 1;
+    };
   }, [tab, instances.length, environment, needsEnvironment, loadUsage]);
 
   useEffect(() => {
