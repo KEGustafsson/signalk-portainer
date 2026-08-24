@@ -7,6 +7,13 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [0.1.2] - 2026-08-24
+
+The release that works behind a proxy and can free the disk. Every write was
+refused with a 403 for anyone who publishes Signal K through nginx, Caddy or
+Traefik. And the Images tab had no way to remove anything, though images are the
+one inventory whose growth fills an SD card and takes Signal K down with it.
+
 ### Added
 
 - A **Behind a reverse proxy** section in the README: what nginx, Caddy and
@@ -30,6 +37,17 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Volumes and networks stay read-only. A deleted volume is the one loss nothing
 in the panel can undo, and a detached network leaves a container reporting
 `running` while being unreachable.
+
+### Changed
+
+- The ten type-aware lint rules that were staged at `warn` while the backlog
+  they surfaced was worked off are errors like the rest of the set, so the next
+  finding fails the run rather than joining a list. Clearing the backlog's one
+  substantive finding moved the facade's async work into a wrapper: Express 4
+  does nothing with a promise a route handler returns, and every route was an
+  `async` function handed straight to it. Nothing had ever escaped that way —
+  the handler already answered in every branch it could name — so this closes
+  the gap rather than fixing a defect.
 
 ### Fixed
 
@@ -256,6 +274,7 @@ containers you can afford to lose.
 - Updating a file-based stack drops any auto-update schedule Portainer had on
   it, which no field in the request can prevent. The answer says so.
 
-[Unreleased]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.1...HEAD
+[Unreleased]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.2...HEAD
+[0.1.2]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.1...0.1.2
 [0.1.1]: https://github.com/KEGustafsson/signalk-portainer/compare/0.1.0...0.1.1
 [0.1.0]: https://github.com/KEGustafsson/signalk-portainer/releases/tag/0.1.0
