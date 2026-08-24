@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto';
 import bodyParser from 'body-parser';
-import type { NextFunction, Request, Response, Router } from 'express';
+import type { Request, RequestHandler, Response, Router } from 'express';
 import type {
   PortainerClient,
   StackEnvVar,
@@ -72,38 +72,163 @@ const KEEPALIVE_MS = 20_000;
  * which self-protection deliberately relies on — so an attacker needs no
  * container id, just a plausible name.
  *
- * `Origin` is set by the browser on exactly these requests and cannot be
- * forged by page script. A request without one is not from a browser form or
- * fetch — curl, a Signal K plugin, an automation — and those are already
- * authenticated by Signal K, so they are left alone rather than broken.
+ * Two headers say where a request came from, and behind a reverse proxy they
+ * are not equally good. `Sec-Fetch-Site` is the browser's own verdict, reached
+ * against the URL the page was really loaded from, so a proxy in between
+ * cannot spoil it. `Origin` has to be compared against an origin this process
+ * reconstructs, and behind nginx the request arriving here says
+ * `http://127.0.0.1:3000` while the browser used
+ * `https://boat.example:4443` — a mismatch that refused the admin UI's own
+ * writes. So the browser's verdict decides whenever it is offered, and the
+ * comparison is the fallback for browsers too old to send one.
+ *
+ * Neither header can be set by page script: `Origin` is the browser's to
+ * write, and the forwarding headers the fallback reads are not
+ * CORS-safelisted, so adding one to a cross-site fetch earns a preflight that
+ * Signal K never answers.
+ *
+ * A request with neither header is not from a browser form or fetch — curl, a
+ * Signal K plugin, an automation — and those are already authenticated by
+ * Signal K, so they are left alone rather than broken.
  */
-export function sameOriginOnly(req: Request, res: Response, next: NextFunction): void {
-  if (SAFE_METHODS.has(req.method)) {
-    next();
-    return;
-  }
+export function sameOriginOnly(log: (message: string) => void = () => {}): RequestHandler {
+  return (req, res, next) => {
+    if (SAFE_METHODS.has(req.method)) {
+      next();
+      return;
+    }
 
-  const origin = req.get('origin');
-  if (origin !== undefined && origin !== `${req.protocol}://${req.get('host')}`) {
-    res.status(403).json({
-      error: 'Refusing a request from another site',
-      hint: 'this route changes something, so it is only accepted from the Signal K admin UI itself',
-    });
-    return;
-  }
+    const site = req.get('sec-fetch-site');
+    if (site !== undefined) {
+      // 'same-site' is refused alongside 'cross-site': a sibling host under
+      // the same registrable domain is still not the admin UI.
+      if (site === 'same-origin' || site === 'none') {
+        next();
+        return;
+      }
+      refuseCrossSite(req, res, log, `the browser says this request is ${site}`);
+      return;
+    }
 
-  // Browsers that send it say where the request came from even when Origin is
-  // absent; anything else is left to the check above.
-  const site = req.get('sec-fetch-site');
-  if (site !== undefined && site !== 'same-origin' && site !== 'none') {
-    res.status(403).json({
-      error: 'Refusing a request from another site',
-      hint: 'this route changes something, so it is only accepted from the Signal K admin UI itself',
-    });
-    return;
-  }
+    const origin = req.get('origin');
+    if (origin === undefined) {
+      next();
+      return;
+    }
+    const ours = ourOrigins(req);
+    if (ours.has(normalizeOrigin(origin))) {
+      next();
+      return;
+    }
+    refuseCrossSite(req, res, log, `${origin} is not ${[...ours].join(' or ')}`);
+  };
+}
 
-  next();
+/**
+ * Answers the refusal, and says in the log what did not match.
+ *
+ * A 403 whose body a cross-site page cannot read is also a 403 an operator
+ * cannot diagnose: the two addresses being compared are the whole story, and
+ * only this process has both. Signal K's Log page is where they belong.
+ */
+function refuseCrossSite(
+  req: Request,
+  res: Response,
+  log: (message: string) => void,
+  because: string,
+): void {
+  log(`${req.method} ${req.path}: refused a cross-site request — ${because}`);
+  res.status(403).json({
+    error: 'Refusing a request from another site',
+    hint: 'this route changes something, so it is only accepted from the Signal K admin UI itself — behind a reverse proxy, forward Host unchanged and set X-Forwarded-Proto',
+  });
+}
+
+/**
+ * Every address this request could honestly have been sent to.
+ *
+ * The one Express reports is the address the last hop used, which behind a
+ * proxy is the internal one; what the browser typed survives only in the
+ * forwarding headers, so those count as ours too. Both are crossed with each
+ * other rather than paired, because a proxy that rewrites the host commonly
+ * leaves the scheme to `X-Forwarded-Proto` and vice versa.
+ */
+function ourOrigins(req: Request): Set<string> {
+  const forwarded = forwardedHeader(req.get('forwarded'));
+  const protocols = present([
+    req.protocol,
+    firstHop(req.get('x-forwarded-proto')),
+    forwarded.proto,
+  ]);
+  const hosts = present([req.get('host'), firstHop(req.get('x-forwarded-host')), forwarded.host]);
+  const port = firstHop(req.get('x-forwarded-port'));
+
+  const origins = new Set<string>();
+  for (const protocol of protocols) {
+    for (const host of hosts) {
+      origins.add(normalizeOrigin(`${protocol}://${host}`));
+      // `proxy_set_header Host $host` — the line most nginx guides carry —
+      // drops the port the browser used, and an Origin keeps it. Nothing else
+      // can put it back, so a proxy that also sets X-Forwarded-Port is taken
+      // at its word.
+      if (port !== undefined && !hasPort(host)) {
+        origins.add(normalizeOrigin(`${protocol}://${host}:${port}`));
+      }
+    }
+  }
+  return origins;
+}
+
+/** The nearest hop's value from a header proxies append to, not replace. */
+function firstHop(value: string | undefined): string | undefined {
+  const first = value?.split(',')[0]?.trim();
+  return first !== undefined && first.length > 0 ? first : undefined;
+}
+
+/** `Forwarded: for=10.0.0.1;host=boat.example:4443;proto=https` (RFC 7239). */
+function forwardedHeader(value: string | undefined): { proto?: string; host?: string } {
+  const first = firstHop(value);
+  if (first === undefined) return {};
+  const pairs = new Map<string, string>();
+  for (const part of first.split(';')) {
+    const at = part.indexOf('=');
+    if (at <= 0) continue;
+    pairs.set(
+      part.slice(0, at).trim().toLowerCase(),
+      part
+        .slice(at + 1)
+        .trim()
+        .replace(/^"(.*)"$/, '$1'),
+    );
+  }
+  return { proto: pairs.get('proto'), host: pairs.get('host') };
+}
+
+function present(values: (string | undefined)[]): string[] {
+  return [
+    ...new Set(values.filter((value): value is string => value !== undefined && value !== '')),
+  ];
+}
+
+/** True for `boat.example:4443` and `[::1]:3000`, false for `[::1]`. */
+function hasPort(host: string): boolean {
+  const afterAddress = host.startsWith('[') ? host.slice(host.indexOf(']') + 1) : host;
+  return afterAddress.includes(':');
+}
+
+/**
+ * The comparable form of an origin: lower case, and without a port the scheme
+ * implies — a browser writes `https://boat.example`, never `…:443`.
+ */
+function normalizeOrigin(value: string): string {
+  try {
+    return new URL(value).origin.toLowerCase();
+  } catch {
+    // An unparseable Origin — the literal `null` a sandboxed frame sends — or
+    // a host header that is not one. Neither is ours; returning it unchanged
+    // simply fails to match.
+    return value.toLowerCase();
+  }
 }
 
 const SAFE_METHODS = new Set(['GET', 'HEAD', 'OPTIONS']);
@@ -149,7 +274,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   // against a ceiling of 8 — until Signal K itself restarts.
   const openStreams = new Set<() => void>();
 
-  router.use(sameOriginOnly);
+  router.use(sameOriginOnly(deps.log));
 
   // ── instances and health ────────────────────────────────────────────────
 

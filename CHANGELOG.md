@@ -7,6 +7,25 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- Every write is no longer refused with **403 Refusing a request from another
+  site** when Signal K is published through a reverse proxy. The check compared
+  the browser's `Origin` against the address the request arrived on, which
+  behind nginx is the internal `http://127.0.0.1:3000` rather than the
+  `https://boat.example:4443` the operator used. It now takes the browser's own
+  `Sec-Fetch-Site` verdict where one is offered — that survives any proxy — and
+  falls back for older browsers to a comparison that counts the forwarded
+  address as ours, reading `X-Forwarded-Proto`, `X-Forwarded-Host`,
+  `X-Forwarded-Port` and `Forwarded`. A cross-site write is still refused, and a
+  refusal now names both addresses in the plugin's log.
+
+### Added
+
+- A **Behind a reverse proxy** section in the README: what nginx, Caddy and
+  Traefik have to forward for the same-site check, the console's WebSocket
+  upgrade and the live log stream, with a worked nginx `location` block.
+
 ## [0.1.1] - 2026-08-23
 
 The release that loads. 0.1.0 could not be started at all; everything below
