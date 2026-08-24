@@ -147,33 +147,33 @@ function refuseCrossSite(
 /**
  * Every address this request could honestly have been sent to.
  *
- * The one Express reports is the address the last hop used, which behind a
+ * The address Express reports is the one the last hop used, which behind a
  * proxy is the internal one; what the browser typed survives only in the
- * forwarding headers, so those count as ours too. Both are crossed with each
- * other rather than paired, because a proxy that rewrites the host commonly
- * leaves the scheme to `X-Forwarded-Proto` and vice versa.
+ * forwarding headers, so those are what is believed when they are there — a
+ * request that did not come through a proxy carries none of them, so there is
+ * nothing to prefer over what arrived.
+ *
+ * One scheme, though, not a choice between them. Pairing every scheme with
+ * every host also accepted `http://boat.example` where the proxy had said the
+ * browser used `https`, and a page at a plain-http address on the boat's own
+ * name is one anyone sharing the marina wifi can serve. The hosts stay a set,
+ * because a proxy commonly names the browser's address in one header and the
+ * internal one in the other, and both spellings are the same server.
  */
 function ourOrigins(req: Request): Set<string> {
   const forwarded = forwardedHeader(req.get('forwarded'));
-  const protocols = present([
-    req.protocol,
-    firstHop(req.get('x-forwarded-proto')),
-    forwarded.proto,
-  ]);
-  const hosts = present([req.get('host'), firstHop(req.get('x-forwarded-host')), forwarded.host]);
+  const protocol = firstHop(req.get('x-forwarded-proto')) ?? forwarded.proto ?? req.protocol;
+  const hosts = present([firstHop(req.get('x-forwarded-host')), forwarded.host, req.get('host')]);
   const port = firstHop(req.get('x-forwarded-port'));
 
   const origins = new Set<string>();
-  for (const protocol of protocols) {
-    for (const host of hosts) {
-      origins.add(normalizeOrigin(`${protocol}://${host}`));
-      // `proxy_set_header Host $host` — the line most nginx guides carry —
-      // drops the port the browser used, and an Origin keeps it. Nothing else
-      // can put it back, so a proxy that also sets X-Forwarded-Port is taken
-      // at its word.
-      if (port !== undefined && !hasPort(host)) {
-        origins.add(normalizeOrigin(`${protocol}://${host}:${port}`));
-      }
+  for (const host of hosts) {
+    origins.add(normalizeOrigin(`${protocol}://${host}`));
+    // `proxy_set_header Host $host` — the line most nginx guides carry — drops
+    // the port the browser used, and an Origin keeps it. Nothing else can put
+    // it back, so a proxy that also sets X-Forwarded-Port is taken at its word.
+    if (port !== undefined && !hasPort(host)) {
+      origins.add(normalizeOrigin(`${protocol}://${host}:${port}`));
     }
   }
   return origins;

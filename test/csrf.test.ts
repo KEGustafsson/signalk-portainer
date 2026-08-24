@@ -177,6 +177,19 @@ describe('requests from another site', () => {
     expect(res.status).toBe(403);
   });
 
+  it('refuses a plain-http origin when the proxy says the browser used https', async () => {
+    // TLS ends at the proxy, so what arrives here is http — but the admin UI
+    // is https, and a page at http://boat.example is one anybody sharing the
+    // marina wifi can serve. The forwarded scheme is the one that counts.
+    const res = await request(app())
+      .post('/api/containers/mosquitto/stop')
+      .set('Origin', 'http://boat.example')
+      .set('Host', 'boat.example')
+      .set('X-Forwarded-Proto', 'https');
+
+    expect(res.status).toBe(403);
+  });
+
   it('says in the log which two addresses did not match', async () => {
     // The body a cross-site page is not allowed to read is also the body the
     // operator cannot see; the log is where a proxy misconfiguration is found.
@@ -187,7 +200,7 @@ describe('requests from another site', () => {
       .set('X-Forwarded-Proto', 'https');
 
     expect(logged.join('\n')).toContain(
-      'https://not-the-boat.example is not http://boat.example:4443 or https://boat.example:4443',
+      'https://not-the-boat.example is not https://boat.example:4443',
     );
   });
 
