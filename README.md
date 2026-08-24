@@ -409,7 +409,8 @@ reaching Docker.
 
 The facade lives under `/plugins/signalk-portainer/api/`, is authenticated by
 Signal K, and is refused when the browser says the request came from another
-site. Almost every route takes `?instance=<name>`, defaulting to the first
+site — see [Behind a reverse proxy](#behind-a-reverse-proxy) for what that check
+needs from a proxy in front of Signal K. Almost every route takes `?instance=<name>`, defaulting to the first
 enabled instance (`/instances` and `/health` span them all, and
 `/console/resize` takes its instance from the session):
 
@@ -462,6 +463,67 @@ ticket**, valid for 30 seconds and bound to exactly that shell; the socket
 presents the ticket, and a socket without one is closed. The exec command is a
 list of arguments, never a string to be split, so nothing a request contains
 reaches a shell as text.
+
+## Behind a reverse proxy
+
+Signal K is often published through nginx, Caddy or Traefik rather than exposed
+directly, and the panel asks three things of whatever sits in front of it:
+WebSocket upgrades for the console, unbuffered responses for live logs, and
+enough of the original request to tell the admin UI's own writes from another
+site's.
+
+The third is the one that bites. Every write — picking an environment, starting
+a container, deploying a stack — is refused with **403 Refusing a request from
+another site** if the proxy hides where the request came from. Current browsers
+send `Sec-Fetch-Site`, which is the browser's own verdict about the address the
+operator actually used, so a proxy cannot spoil it and those writes work
+through any of them. Browsers too old to send one (Safari before 16.4, Firefox
+before 90) send only `Origin`, and that is compared against `Host`,
+`X-Forwarded-Proto`, `X-Forwarded-Host`, `X-Forwarded-Port` and `Forwarded` —
+so forward those and the comparison lands. A refusal names both addresses in
+the plugin's log, on the server's Log page, which is the fastest way to see
+which header is missing.
+
+nginx, with Signal K on `127.0.0.1:3000`:
+
+```nginx
+# At http level, beside the other map directives.
+map $http_upgrade $connection_upgrade {
+    default upgrade;
+    ''      close;
+}
+
+location / {
+    proxy_pass http://127.0.0.1:3000;
+    proxy_http_version 1.1;
+
+    # The console is a WebSocket; without these the upgrade is answered 400.
+    proxy_set_header Upgrade $http_upgrade;
+    proxy_set_header Connection $connection_upgrade;
+
+    # $http_host rather than the much-copied $host: it keeps the port the
+    # browser used, which is the part an Origin carries and $host drops.
+    proxy_set_header Host $http_host;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    proxy_set_header X-Forwarded-Proto $scheme;
+    proxy_set_header X-Forwarded-Host $http_host;
+    proxy_set_header X-Forwarded-Port $server_port;
+
+    # Live logs are Server-Sent Events: buffering holds every line back until
+    # the stream ends, and a log stream does not end.
+    proxy_buffering off;
+    proxy_read_timeout 1h;
+}
+```
+
+Caddy needs none of this — `reverse_proxy 127.0.0.1:3000` forwards the host,
+sets the `X-Forwarded-*` headers, upgrades WebSockets and streams by default.
+Traefik likewise, as long as no middleware rewrites the Host header.
+
+Whatever sits in front, it is Signal K's own admin authentication that guards
+these routes; a proxy that adds its own does no harm, and one that strips the
+session cookie breaks the panel entirely.
 
 ## Safety guards
 
