@@ -355,3 +355,115 @@ describe('the console button', () => {
     expect(screen.queryByRole('button', { name: 'Console' })).not.toBeInTheDocument();
   });
 });
+
+describe('the images table', () => {
+  const image = {
+    Id: 'sha256:aaaa1111bbbb2222',
+    RepoTags: ['influxdb:2.7'],
+    Created: 1,
+    Size: 412_000_000,
+  };
+  const control = {
+    allowPutControl: true,
+    allowDestructive: true,
+    allowSelfManagement: false,
+    console: { available: true },
+    self: {
+      inContainer: true,
+      identified: true,
+      shortId: 'aaaabbbbcccc',
+      source: 'cgroup',
+      protectionActive: true,
+    },
+  };
+
+  it('renders no action column at all for a read-only panel', () => {
+    render(<ImagesTable rows={[image]} />);
+
+    expect(screen.queryByRole('button', { name: 'Delete' })).not.toBeInTheDocument();
+  });
+
+  it('says which setting is in the way rather than failing the press', () => {
+    render(
+      <ImagesTable
+        rows={[image]}
+        actions={{
+          control: { ...control, allowDestructive: false },
+          onRemove: () => {},
+        }}
+      />,
+    );
+
+    const button = screen.getByRole('button', { name: 'Delete' });
+    expect(button).toHaveAttribute('aria-disabled', 'true');
+    expect(button).toHaveAccessibleDescription(/Destructive operations are disabled/);
+  });
+
+  it('hands the whole row to the dialog, not just its id', async () => {
+    const user = userEvent.setup();
+    const onRemove = jest.fn();
+    render(<ImagesTable rows={[image]} actions={{ control, onRemove }} />);
+
+    await user.click(screen.getByRole('button', { name: 'Delete' }));
+
+    // The dialog names the image and shows its size; an id alone would leave
+    // it to look those up from a list it does not have.
+    expect(onRemove).toHaveBeenCalledWith(image);
+  });
+
+  it('marks a row in use only once Docker has counted', () => {
+    const { rerender } = render(
+      <ImagesTable rows={[image]} actions={{ control, onRemove: () => {} }} />,
+    );
+
+    // Nothing is claimed before /df answers: the image list Docker serves says
+    // -1 for every row, so "unused" there would be a guess.
+    expect(screen.queryByText('unused')).not.toBeInTheDocument();
+    expect(screen.queryByText('in use')).not.toBeInTheDocument();
+
+    rerender(
+      <ImagesTable
+        rows={[image]}
+        actions={{
+          control,
+          onRemove: () => {},
+          usage: {
+            LayersSize: 1,
+            Images: [{ Id: image.Id, Created: 1, Size: 1, Containers: 2 }],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('in use')).toBeInTheDocument();
+  });
+
+  it('keeps a row that nothing holds offerable', () => {
+    render(
+      <ImagesTable
+        rows={[image]}
+        actions={{
+          control,
+          onRemove: () => {},
+          usage: {
+            LayersSize: 1,
+            Images: [{ Id: image.Id, Created: 1, Size: 1, Containers: 0 }],
+          },
+        }}
+      />,
+    );
+
+    expect(screen.getByText('unused')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Delete' })).not.toHaveAttribute('aria-disabled');
+  });
+
+  it('holds the button while that row’s own request is in flight', () => {
+    render(
+      <ImagesTable rows={[image]} actions={{ control, busyId: image.Id, onRemove: () => {} }} />,
+    );
+
+    expect(screen.getByRole('button', { name: 'Delete' })).toHaveAccessibleDescription(
+      /Waiting for the last action on this image/,
+    );
+  });
+});

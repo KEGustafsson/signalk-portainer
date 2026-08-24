@@ -470,6 +470,69 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     withClient(deps, async (_req, client) => ({ df: await client.docker.diskUsage() })),
   );
 
+  // ── images, written ─────────────────────────────────────────────────────
+  //
+  // The only inventory this plugin will change. Volumes and networks stay
+  // read-only on purpose: a deleted volume is the one loss nothing here can
+  // undo, and a network detached from a running container leaves it reporting
+  // "running" while being unreachable. An image is the one of the three that
+  // can be fetched again — so it is the one worth freeing space from.
+  //
+  // Both routes need destructive as well as control: an image the operator
+  // still wanted back costs whatever bandwidth the boat has, if it has any.
+
+  /**
+   * Removes one image, by id or by tag.
+   *
+   * Not guarded against the image Signal K runs from, because Docker already
+   * is: it refuses to remove an image any container references, and the plugin
+   * would have to inspect itself to learn which image that is. The refusal
+   * arrives as Docker's own 409, with Docker's own words about it.
+   */
+  router.delete(
+    '/api/images/:reference',
+    withClient(deps, async (req, client) => {
+      const reference = String(req.params.reference);
+
+      requireControlEnabled(deps);
+      requireDestructiveAllowed(deps);
+
+      const removed = await client.docker.removeImage(reference);
+      audit(deps, req, 'remove', reference, undefined, 'image');
+      return { reference, action: 'remove', removed, ok: true };
+    }),
+  );
+
+  /**
+   * Frees the space unused images are holding.
+   *
+   * `?all=true` widens it from untagged layers to every image no container
+   * references. Off by default, and asked for separately in the panel, for the
+   * same reason `removeVolumes` is: the wide one is the version that can take
+   * away the tag a rollback needed.
+   */
+  router.post(
+    '/api/images/prune',
+    withClient(deps, async (req, client) => {
+      const all = req.query.all === 'true';
+
+      requireControlEnabled(deps);
+      requireDestructiveAllowed(deps);
+
+      const result = await client.docker.pruneImages({ all });
+      // Docker sends null rather than [] when a prune found nothing to do.
+      const deleted = result.ImagesDeleted?.length ?? 0;
+      audit(deps, req, `prune${all ? ' --all' : ''}`, `${deleted} removed`, undefined, 'image');
+      return {
+        action: 'prune',
+        all,
+        deleted,
+        reclaimed: result.SpaceReclaimed ?? 0,
+        ok: true,
+      };
+    }),
+  );
+
   // ── logs ────────────────────────────────────────────────────────────────
 
   router.get(

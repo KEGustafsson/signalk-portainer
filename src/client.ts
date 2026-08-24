@@ -10,6 +10,8 @@ import {
   type DockerContainerInspect,
   type DockerDiskUsage,
   type DockerImage,
+  type DockerImagePrune,
+  type DockerImageRemoval,
   type DockerInfo,
   type DockerNetwork,
   type DockerNode,
@@ -141,9 +143,14 @@ export interface StackFromRepository {
 }
 
 /**
- * Read-only slice of the Docker Engine API, reached through Portainer's docker
- * proxy. The environment id is already bound to the client, so no call site
- * passes one.
+ * The slice of the Docker Engine API this plugin uses, reached through
+ * Portainer's docker proxy. The environment id is already bound to the client,
+ * so no call site passes one.
+ *
+ * Mostly reads. What it writes is container lifecycle and image reclamation,
+ * and nothing else: volumes and networks are listed and never touched, because
+ * a deleted volume is unrecoverable and a detached network breaks a container
+ * that goes on reporting itself as running.
  */
 export interface DockerApi {
   info(): Promise<DockerInfo>;
@@ -190,6 +197,33 @@ export interface DockerApi {
     options?: LogOptions,
   ): Promise<AsyncIterable<LogFrame>>;
   removeContainer(id: string, opts?: { force?: boolean; removeVolumes?: boolean }): Promise<void>;
+
+  // ── images ──────────────────────────────────────────────────────────────
+
+  /**
+   * Removes one image, named by id or by tag.
+   *
+   * Never forced. Docker refuses (409) to remove an image a container still
+   * references — running or stopped — and that refusal is what keeps the image
+   * Signal K itself runs from out of reach, without this plugin having to
+   * discover which image that is. Forcing would step over exactly that guard.
+   *
+   * An image carrying several tags is refused too, for a reason worth reading
+   * in Docker's own words: removing it by id would take every tag with it.
+   * Naming one tag untags just that one, which is what the answer reports.
+   */
+  removeImage(reference: string): Promise<DockerImageRemoval[]>;
+
+  /**
+   * Reclaims the space images are holding.
+   *
+   * `all` is the difference between tidying and losing something: without it
+   * Docker removes only untagged layers, which nothing could deploy from
+   * anyway. With it, every image no container references goes — including the
+   * previous tag of a service that was just updated, which is what a rollback
+   * would have used. Getting those back needs the internet a boat may not have.
+   */
+  pruneImages(options?: { all?: boolean }): Promise<DockerImagePrune>;
 }
 
 /**
@@ -205,6 +239,13 @@ const CONTAINER_VOLATILE_KEYS = [
   'df',
   'services',
 ] as const;
+
+/**
+ * Cache keys an image mutation can change: the image list itself, and the disk
+ * usage that counts it. The container list is untouched — removing an image
+ * cannot remove a container, because Docker refuses whenever one is using it.
+ */
+const IMAGE_VOLATILE_KEYS = ['images', 'df'] as const;
 
 /** A JWT is valid for ~8h; renew at 7h so a long poll never straddles expiry. */
 const JWT_MAX_AGE_MS = 7 * 60 * 60 * 1000;
@@ -372,6 +413,29 @@ export class PortainerClient {
       this.cache.invalidate(CONTAINER_VOLATILE_KEYS);
     };
 
+    /**
+     * A state-changing proxy call whose answer is the point of making it.
+     *
+     * `mutate` above throws the body away, which is right for a lifecycle call
+     * — Docker answers those with 204 and nothing else. An image removal
+     * answers with what it removed, and for a prune that list is the only
+     * account of what was actually destroyed.
+     */
+    const mutateJson = async <T>(
+      method: string,
+      path: string,
+      keys: readonly string[],
+      timeoutMs?: number,
+    ): Promise<T> => {
+      const body = await this.json<T>(
+        method,
+        `${await this.dockerBase()}${path}`,
+        timeoutMs === undefined ? {} : { timeoutMs },
+      );
+      this.cache.invalidate(keys);
+      return body;
+    };
+
     return {
       info: () => this.dockerInfo(),
 
@@ -473,6 +537,38 @@ export class PortainerClient {
           `/containers/${encode(id)}?force=${opts.force ? 'true' : 'false'}&v=${
             opts.removeVolumes ? 'true' : 'false'
           }`,
+        ),
+
+      // No `force`, and no `noprune`: see the interface for why the first is
+      // absent, and Docker's default for the second already drops the untagged
+      // parents an image leaves behind, which is the space this exists to free.
+      //
+      // The reference is encoded whole, so a registry tag's slashes travel as
+      // %2F and reach Docker as part of the image name rather than as more
+      // path. The panel sends an id, which has none — a slashed tag only
+      // arrives from a direct API caller.
+      removeImage: (reference) =>
+        mutateJson<DockerImageRemoval[]>(
+          'DELETE',
+          `/images/${encode(reference)}`,
+          IMAGE_VOLATILE_KEYS,
+          this.writeTimeoutMs,
+        ),
+
+      // The filter is always sent rather than left to Docker's default, which
+      // is `dangling=true`. Depending on a default for the difference between
+      // removing untagged layers and removing every unused image is how a
+      // future Docker changing its mind takes a boat's images with it.
+      pruneImages: (options = {}) =>
+        mutateJson<DockerImagePrune>(
+          'POST',
+          `/images/prune?filters=${encodeURIComponent(
+            JSON.stringify({ dangling: [options.all ? 'false' : 'true'] }),
+          )}`,
+          IMAGE_VOLATILE_KEYS,
+          // The write budget: a prune deletes layer by layer, and a year of
+          // redeploys on a slow SD card is minutes of work, not seconds.
+          this.writeTimeoutMs,
         ),
     };
   }

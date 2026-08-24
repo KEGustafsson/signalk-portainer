@@ -73,6 +73,27 @@ describe('requests from another site', () => {
     expect(res.status).toBe(403);
   });
 
+  it('refuses a cross-site image prune, which carries no body either', async () => {
+    // Same shape as the stop above, and the same reason it gets through the
+    // browser without a preflight: a POST with no body is a simple request.
+    // What it destroys here is disk state rather than a running service.
+    const res = await request(app())
+      .post('/api/images/prune?all=true')
+      .set('Origin', 'https://not-the-boat.example');
+
+    expect(res.status).toBe(403);
+    expect(asJson(res.body).error).toContain('another site');
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('refuses a cross-site image delete', async () => {
+    const res = await request(app())
+      .delete('/api/images/sha256%3Aaaa')
+      .set('Origin', 'https://not-the-boat.example');
+
+    expect(res.status).toBe(403);
+  });
+
   it('refuses when the browser says the request came from elsewhere', async () => {
     const res = await request(app())
       .post('/api/containers/mosquitto/kill')

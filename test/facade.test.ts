@@ -1406,6 +1406,151 @@ describe('facade container lifecycle', () => {
   });
 });
 
+describe('facade image writes', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+    restoreGlobalDispatcher();
+  });
+
+  const boat = () => agent.get('https://boat.test:9443');
+  const withEnvironment = () =>
+    boat()
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  const destructive = (registry = new InstanceRegistry(config)) =>
+    buildApp(registry, { control: control({ allowDestructive: true }) });
+
+  const pruneFilter = (dangling: string) =>
+    `/api/endpoints/1/docker/images/prune?filters=${encodeURIComponent(
+      JSON.stringify({ dangling: [dangling] }),
+    )}`;
+
+  it('refuses both image writes when control is disabled', async () => {
+    const app = buildApp(new InstanceRegistry(config), {
+      control: control({ allowPutControl: false, allowDestructive: true }),
+    });
+
+    const removed = await request(app).delete('/api/images/sha256%3Aaaa');
+    const pruned = await request(app).post('/api/images/prune');
+
+    expect(removed.status).toBe(403);
+    expect(pruned.status).toBe(403);
+    expect(asJson(pruned.body).error).toContain('Container control is disabled');
+    // Nothing reached Portainer: an unconsumed interceptor would remain.
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('refuses both image writes unless destructive operations are enabled', async () => {
+    const app = buildApp(new InstanceRegistry(config));
+
+    const removed = await request(app).delete('/api/images/sha256%3Aaaa');
+    const pruned = await request(app).post('/api/images/prune');
+
+    expect(removed.status).toBe(403);
+    expect(asJson(removed.body).error).toContain('Destructive operations are disabled');
+    expect(pruned.status).toBe(403);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('removes an image by id and reports what Docker removed', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .reply(200, [{ Untagged: 'influxdb:2.7' }, { Deleted: 'sha256:aaa' }]);
+
+    const res = await request(destructive()).delete('/api/images/sha256%3Aaaa');
+
+    expect(res.status).toBe(200);
+    expect(asJson(res.body).removed).toHaveLength(2);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('carries a registry tag through the route as one reference', async () => {
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/images/ghcr.io%2Fowner%2Fapp%3A1.2',
+        method: 'DELETE',
+      })
+      .reply(200, [{ Untagged: 'ghcr.io/owner/app:1.2' }]);
+
+    const res = await request(destructive()).delete(
+      `/api/images/${encodeURIComponent('ghcr.io/owner/app:1.2')}`,
+    );
+
+    expect(res.status).toBe(200);
+    expect(asJson(res.body).reference).toBe('ghcr.io/owner/app:1.2');
+  });
+
+  it('passes Docker’s refusal of an image in use straight through', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .reply(409, { message: 'conflict: unable to delete sha256:aaa (must be forced)' });
+
+    const res = await request(destructive()).delete('/api/images/sha256%3Aaaa');
+
+    // The facade never forces, so this refusal is the thing keeping the image
+    // Signal K runs from out of reach. It has to reach the operator intact.
+    expect(res.status).toBe(409);
+    expect(asJson(res.body).detail).toContain('must be forced');
+  });
+
+  it('prunes untagged layers by default', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: pruneFilter('true'), method: 'POST' })
+      .reply(200, { ImagesDeleted: [{ Deleted: 'sha256:old' }], SpaceReclaimed: 4096 });
+
+    const res = await request(destructive()).post('/api/images/prune');
+
+    expect(res.status).toBe(200);
+    expect(asJson(res.body)).toMatchObject({ all: false, deleted: 1, reclaimed: 4096 });
+  });
+
+  it('widens the prune only when asked explicitly', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: pruneFilter('false'), method: 'POST' })
+      .reply(200, { ImagesDeleted: null, SpaceReclaimed: 0 });
+
+    const res = await request(destructive()).post('/api/images/prune?all=true');
+
+    expect(res.status).toBe(200);
+    // Docker sends null rather than [] when it found nothing.
+    expect(asJson(res.body)).toMatchObject({ all: true, deleted: 0, reclaimed: 0 });
+  });
+
+  it('logs both writes for an operator reading back what happened', async () => {
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .reply(200, []);
+    boat()
+      .intercept({ path: pruneFilter('false'), method: 'POST' })
+      .reply(200, {});
+
+    const lines: string[] = [];
+    const app = buildApp(new InstanceRegistry(config), {
+      control: control({ allowDestructive: true }),
+      log: (message) => lines.push(message),
+    });
+
+    await request(app).delete('/api/images/sha256%3Aaaa');
+    await request(app).post('/api/images/prune?all=true');
+
+    expect(lines).toContain('image remove: sha256:aaa on default instance');
+    expect(lines).toContain('image prune --all: 0 removed on default instance');
+  });
+});
+
 describe('facade control surface', () => {
   // Its own agent: these routes ask nothing of Portainer, but building an
   // InstanceRegistry without one leaves them on whatever dispatcher the run

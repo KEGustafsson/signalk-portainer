@@ -2,6 +2,7 @@ import type { ReactElement } from 'react';
 import { useId } from 'react';
 import type {
   DockerContainer,
+  DockerDiskUsage,
   DockerImage,
   DockerNetwork,
   DockerNode,
@@ -14,6 +15,8 @@ import {
   actionState,
   actionVariant,
   actionsFor,
+  imageActionLabel,
+  imageActionState,
   isSelfRow,
   type ContainerAction,
   type ControlState,
@@ -24,6 +27,7 @@ import {
   formatAge,
   formatBytes,
   healthColour,
+  imageUsers,
   shortId,
   stateColour,
 } from './format';
@@ -435,29 +439,111 @@ function StackButtons({ row, actions }: { row: Stack; actions: StackActionsProps
 function gateReason(
   state: { enabled: boolean; reason?: string },
   busy: boolean,
-  subject: 'container' | 'stack',
+  subject: 'container' | 'stack' | 'image',
 ): string | undefined {
   if (!state.enabled) return state.reason ?? 'This action is not available';
   if (busy) return `Waiting for the last action on this ${subject} to finish`;
   return undefined;
 }
 
-export function ImagesTable({ rows }: { rows: DockerImage[] }): ReactElement {
+export interface ImageActionsProps {
+  control?: ControlState;
+  /** Id of the image a request is currently in flight for. */
+  busyId?: string;
+  onRemove: (image: DockerImage) => void;
+  /**
+   * Disk usage, read once when the tab opened. The only place the panel learns
+   * which images a container is holding: the image list Docker serves answers
+   * -1 for every row.
+   */
+  usage?: DockerDiskUsage;
+}
+
+export function ImagesTable({
+  rows,
+  actions,
+}: {
+  rows: DockerImage[];
+  /** Omitted entirely for a read-only panel; no column is rendered then. */
+  actions?: ImageActionsProps;
+}): ReactElement {
+  const headers = ['Tags', 'Id', 'Size', 'Created'];
+  if (actions) headers.push('Actions');
+
   return (
-    <Table headers={['Tags', 'Id', 'Size', 'Created']}>
+    <Table headers={headers}>
       {rows.length === 0 ? (
-        <EmptyRow columns={4} message="No images" />
+        <EmptyRow columns={headers.length} message="No images" />
       ) : (
         rows.map((row) => (
           <tr key={row.Id}>
-            <td className="small">{row.RepoTags?.join(', ') || '<untagged>'}</td>
+            <td className="small">
+              {row.RepoTags?.join(', ') || '<untagged>'}
+              <ImageUse actions={actions} image={row} />
+            </td>
             <td className="small text-muted">{shortId(row.Id)}</td>
             <td>{formatBytes(row.Size)}</td>
             <td>{formatAge(row.Created)}</td>
+            {actions ? (
+              <td>
+                <ImageButtons row={row} actions={actions} />
+              </td>
+            ) : null}
           </tr>
         ))
       )}
     </Table>
+  );
+}
+
+/**
+ * Whether a container is holding this image.
+ *
+ * Absent, rather than shown as "unused", until the disk-usage read has
+ * answered: an image marked free that Docker then refuses to delete is worse
+ * than a row that says nothing yet. It stays a badge and never a gate — Docker
+ * decides at the moment of the request, and this reading is from when the tab
+ * was opened.
+ */
+function ImageUse({
+  actions,
+  image,
+}: {
+  actions?: ImageActionsProps;
+  image: DockerImage;
+}): ReactElement | null {
+  if (!actions) return null;
+  const users = imageUsers(actions.usage, image.Id);
+  if (users === undefined) return null;
+  return users > 0 ? (
+    <span className="badge bg-secondary ms-2" title={`${users} container(s) are using it`}>
+      in use
+    </span>
+  ) : (
+    <span className="badge bg-light text-dark ms-2" title="No container is using it">
+      unused
+    </span>
+  );
+}
+
+function ImageButtons({
+  row,
+  actions,
+}: {
+  row: DockerImage;
+  actions: ImageActionsProps;
+}): ReactElement {
+  const busy = actions.busyId === row.Id;
+  const label = row.RepoTags?.[0] ?? shortId(row.Id);
+  return (
+    <div className="btn-group btn-group-sm" role="group" aria-label={`Actions for ${label}`}>
+      <GatedButton
+        className="btn btn-outline-danger"
+        label={imageActionLabel('remove')}
+        reason={gateReason(imageActionState(actions.control), busy, 'image')}
+        onPress={() => actions.onRemove(row)}
+      />
+    </div>
   );
 }
 
