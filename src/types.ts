@@ -152,7 +152,31 @@ export interface DockerImage {
   RepoDigests?: string[];
   Created: number;
   Size: number;
+  /**
+   * Bytes this image shares with another. Only /system/df computes it; the
+   * image list leaves it out entirely.
+   */
+  SharedSize?: number;
+  /**
+   * Containers referencing this image, stopped ones included. Docker computes
+   * it for /system/df alone and sends -1 from the image list, which is why the
+   * panel reads "in use" from the disk-usage answer rather than from the rows
+   * it polls.
+   */
   Containers?: number;
+}
+
+/** One line of what a removal or a prune did to an image. */
+export interface DockerImageRemoval {
+  /** A tag that was dropped; the image itself may survive under another. */
+  Untagged?: string;
+  /** An image id whose layers were actually deleted. */
+  Deleted?: string;
+}
+
+export interface DockerImagePrune {
+  ImagesDeleted?: DockerImageRemoval[] | null;
+  SpaceReclaimed?: number;
 }
 
 export interface DockerVolume {

@@ -174,6 +174,7 @@ class PortainerClient {
     logStream(id: string, o: LogOpts): AsyncIterable<LogFrame>;
     statsOnce(id: string): Promise<DockerStats>;   // NOT BUILT
     listImages / listVolumes / listNetworks / info / df(...);
+    removeImage / pruneImages(...);         // never forced; allowDestructive
     pullImage(...);                         // NOT BUILT
     listServices / listNodes(...);          // only when capabilities().swarm
   };
@@ -263,8 +264,10 @@ POST   /stacks/:id/:action                      start|stop|redeploy
 PUT    /stacks/:id                              update compose / env
 DELETE /stacks/:id                              guarded by allowDestructive
 GET    /images | /volumes | /networks | /df
+DELETE /images/:reference                       guarded by allowDestructive
+POST   /images/prune?all=                       guarded by allowDestructive
 POST   /images/pull                             NOT BUILT
-POST   /prune/:kind                             NOT BUILT — only stack prune exists
+POST   /prune/:kind                             NOT BUILT — images prune above, and stack prune
 GET    /swarm/services | /swarm/nodes           404 unless capabilities.swarm
 ```
 
@@ -404,14 +407,19 @@ process is a footgun.
   hostname == container id prefix). Refuse every stop/restart/remove targeting
   it unless `allowSelfManagement` is explicitly enabled, and surface it in the
   UI as a locked row rather than a failing button. The check matches on
-  container id, so it holds across every instance that can see this host.
+  container id, so it holds across every instance that can see this host. It
+  has nothing to say about images: Docker refuses to remove an image any
+  container references, which covers the image Signal K runs from without the
+  plugin having to discover which image that is.
 - **Destructive ops off by default.** Removing a container, deleting a stack,
   and pruning as part of a stack update or redeploy all require
   `allowDestructive`. The panel confirms them in a dialog that names the thing
   and says what happens to it — buttons and checkboxes, not the typed
   confirmation this line originally promised: the mistake worth catching is
-  acting on the wrong row, and a name to read catches that. Removing a volume
-  on its own and pruning as an operation of its own have **no route at all**.
+  acting on the wrong row, and a name to read catches that. Deleting an image
+  and pruning images need it too — the space they free costs whatever bandwidth
+  fetching them again takes, which offshore is none. Removing a volume on its
+  own, and pruning anything other than images, have **no route at all**.
 - **Volume removal is never implicit.** `removeVolumes` defaults to false
   everywhere; deleting a stack's data has to be asked for twice.
 - **Read-only mode.** `allowPutControl: false` + `allowDestructive: false`
@@ -435,6 +443,7 @@ process is a footgun.
 | **M5a** | Stacks write (server) | Client and facade: start/stop, update compose + env, git redeploy, create from string/repository, delete; stack-level self-protection; swarm variants when `capabilities.swarm`.                                    |
 | **M5b** | Stacks write (UI)     | Compose editor and environment editor in the panel, create dialog, redeploy and delete with confirmation.                                                                                                           |
 | **M6**  | Console               | WebSocket relay to `/api/websocket/exec` for an interactive shell.                                                                                                                                                  |
+| **M7**  | Image reclamation     | Image delete and prune behind `allowDestructive`, with the disk-usage summary the decision turns on. Volumes and networks stay read-only.                                                                           |
 
 Every milestone in this table is implemented, M6 in two parts: M6a the relay
 and the ticket handoff, M6b the terminal in the panel. None of it has been run

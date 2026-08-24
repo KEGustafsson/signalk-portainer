@@ -163,11 +163,11 @@ with exactly one environment selects it without being asked.
 
 Three independent switches, each enforced server-side however the panel behaves:
 
-| Setting                                      | Default | What it allows                                                     |
-| -------------------------------------------- | ------- | ------------------------------------------------------------------ |
-| Allow Signal K PUT control                   | on      | any mutation at all — lifecycle, stacks, the console               |
-| Allow destructive operations                 | **off** | removing containers and volumes, deleting stacks, pruning          |
-| Allow managing the Signal K container itself | **off** | acting on the container Signal K runs in, which can stop this page |
+| Setting                                      | Default | What it allows                                                                |
+| -------------------------------------------- | ------- | ----------------------------------------------------------------------------- |
+| Allow Signal K PUT control                   | on      | any mutation at all — lifecycle, stacks, the console                          |
+| Allow destructive operations                 | **off** | removing containers and volumes, deleting stacks, deleting and pruning images |
+| Allow managing the Signal K container itself | **off** | acting on the container Signal K runs in, which can stop this page            |
 
 ### 6. Choose what to publish
 
@@ -281,6 +281,38 @@ operations**, because pruning removes whatever the new file stopped naming.
 ![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stacks.png)
 
 ![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stack-editor.png)
+
+### Images
+
+The one inventory the panel will change, and the reason is disk. A season of
+redeploys on a Raspberry Pi fills an SD card with layers nothing can be deployed
+from, and a full card takes Signal K down with it. Above the table sit the image
+count, what the layers cost and what a prune would free — Docker's own figures,
+taken from `/system/df` rather than summed from the rows, because two images
+built on one base share those layers and adding both sizes counts them twice.
+That read is made when the tab is opened and again after a prune, not on the
+ten-second poll: it walks the layer store, which is seconds of work each time.
+
+**Reclaim space** deletes untagged layers, which nothing could deploy from. A
+checkbox widens it to every image no container is using — off by default,
+because that set includes the previous tag of anything recently updated, and
+getting one back means pulling it again over whatever connection the boat has.
+A row's **Delete** removes one image by id, and says first if a container is
+holding it or several tags point at it. Both need **Allow destructive
+operations**.
+
+Nothing is forced. Docker refuses to remove an image any container references,
+stopped ones included, and that refusal is what keeps the image Signal K itself
+runs from out of reach — the plugin never has to work out which one that is. An
+image carrying several tags is refused for the same kind of reason: deleting it
+by id would take every tag with it, so the tags are dropped in Portainer first.
+
+**Volumes and networks stay read-only.** A deleted volume is the one loss
+nothing here can undo — no restart brings the data back — and a network detached
+from a running container leaves it reporting `running` while being unreachable,
+with a shell on the host as the way out. An image is the one of the three that
+can be fetched again, which is why it is the one worth freeing space from.
+Portainer's own UI remains the place for the other two.
 
 ## Signal K integration
 
@@ -400,6 +432,8 @@ enabled instance (`/instances` and `/health` span them all, and
 | `PUT /stacks/:id`                          | deploy a new compose file and environment (`prune` needs destructive; refused for a git-backed stack) |
 | `DELETE /stacks/:id`                       | delete — Portainer CE cannot remove a stack's volumes with it                                         |
 | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                                              |
+| `DELETE /images/:reference`                | remove one image by id or tag — never forced, so Docker still refuses one in use                      |
+| `POST /images/prune`                       | reclaim space (`?all=true` widens it from untagged layers to every unused image)                      |
 | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                                      |
 | `GET /control`                             | what the UI may offer, and whether self-protection is active                                          |
 | `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                                           |
@@ -500,7 +534,8 @@ offers:
   K PUT control** is set.
 - **Destructive disabled** — removal additionally requires **Allow destructive
   operations**. `removeVolumes` defaults to false, so a container's data is
-  never destroyed by implication.
+  never destroyed by implication, and an image prune stays narrow — untagged
+  layers only — unless `?all=true` asks for the wide one.
 - **Self-protection** — the plugin identifies the container it runs in and
   refuses to start, stop, restart, kill or remove it, and refuses to stop,
   update, redeploy or delete the _stack_ that contains it. Creating a stack whose

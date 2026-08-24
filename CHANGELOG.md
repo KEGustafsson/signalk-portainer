@@ -7,6 +7,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- A **Behind a reverse proxy** section in the README: what nginx, Caddy and
+  Traefik have to forward for the same-site check, the console's WebSocket
+  upgrade and the live log stream, with a worked nginx `location` block.
+- **Images can be deleted and pruned from the panel.** The Images tab now
+  carries a per-row Delete and a Reclaim space button, both behind **Allow
+  destructive operations**. A prune removes untagged layers by default; a
+  checkbox widens it to every image no container is using, which is the set
+  that includes the previous tag of anything recently updated.
+- The Images tab reports what the images cost and what a prune would free,
+  using Docker's own `/system/df` arithmetic rather than a sum of the row
+  sizes — two images built on one base share those layers, and adding both
+  counts them twice. The read is made when the tab opens and after a prune,
+  deliberately not on the ten-second poll.
+- `DELETE /images/:reference` and `POST /images/prune` on the facade, both
+  requiring control and destructive. Neither forces: Docker's refusal to
+  remove an image a container references is what keeps the image Signal K runs
+  from out of reach, and forcing would step over it.
+
+Volumes and networks stay read-only. A deleted volume is the one loss nothing
+in the panel can undo, and a detached network leaves a container reporting
+`running` while being unreachable.
+
 ### Fixed
 
 - Every write is no longer refused with **403 Refusing a request from another
@@ -19,12 +43,6 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   address as ours, reading `X-Forwarded-Proto`, `X-Forwarded-Host`,
   `X-Forwarded-Port` and `Forwarded`. A cross-site write is still refused, and a
   refusal now names both addresses in the plugin's log.
-
-### Added
-
-- A **Behind a reverse proxy** section in the README: what nginx, Caddy and
-  Traefik have to forward for the same-site check, the console's WebSocket
-  upgrade and the live log stream, with a worked nginx `location` block.
 
 ## [0.1.1] - 2026-08-23
 
