@@ -48,7 +48,7 @@ To install from a checkout instead:
 
 ```bash
 npm install && npm run build && npm pack
-cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.1.tgz
+cd ~/.signalk && npm install /path/to/signalk-portainer-0.1.2.tgz
 ```
 
 ## Running Portainer
