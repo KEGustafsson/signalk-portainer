@@ -88,17 +88,21 @@ export function shortId(id: string | undefined, length = 12): string {
 }
 
 /**
- * What a prune could free, by the arithmetic `docker system df` uses.
+ * What a prune could free.
  *
  * Not the sum of the unused images: two images built from the same base share
  * those layers on disk, and adding both sizes counts the shared bytes twice —
  * on a Pi that reads as gigabytes about to come back, and then a prune frees a
  * few hundred megabytes and looks broken.
  *
- * So it is done the other way round, as the Docker CLI does: total layer bytes
- * less the bytes the images in use are holding on their own. An image whose
- * shared size Docker declined to compute is left out of the subtraction, which
- * understates what is reclaimable rather than promising space that is in use.
+ * So it is done the other way round: total layer bytes less what the images in
+ * use are holding. That is their whole size, shared base included — a layer a
+ * running container needs stays on disk however many other images also point
+ * at it, so counting it as reclaimable promises back space a prune cannot
+ * touch. Two images in use off one base have that base subtracted twice, which
+ * understates what is reclaimable — the safe direction to be wrong in. An
+ * image whose size Docker declined to measure is left out, which is not, and
+ * is the best that can be done with a figure that was never reported.
  */
 export function reclaimableImageBytes(usage: DockerDiskUsage | undefined): number | undefined {
   const total = usage?.LayersSize;
@@ -109,10 +113,8 @@ export function reclaimableImageBytes(usage: DockerDiskUsage | undefined): numbe
     // -1 is Docker saying it has not counted, not saying zero.
     if (!image || typeof image.Containers !== 'number' || image.Containers <= 0) continue;
     const size = image.Size;
-    const shared = image.SharedSize;
-    if (typeof size !== 'number' || !Number.isFinite(size)) continue;
-    if (typeof shared !== 'number' || !Number.isFinite(shared) || shared < 0) continue;
-    used += size - shared;
+    if (typeof size !== 'number' || !Number.isFinite(size) || size < 0) continue;
+    used += size;
   }
 
   // Clamped: the two numbers come from separate walks of the layer store, and

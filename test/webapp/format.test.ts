@@ -123,10 +123,11 @@ describe('reclaimableImageBytes', () => {
     ],
   };
 
-  it('does not double-count the layers two images share', () => {
+  it('does not offer back the base layer the running image still holds', () => {
     // Naively summing the unused image gives 500 — most of which is the base
     // the running one still needs, and none of which a prune would free.
-    expect(reclaimableImageBytes(shared)).toBe(500);
+    // Removing the unused image frees its own 100 MB and nothing else.
+    expect(reclaimableImageBytes(shared)).toBe(100);
   });
 
   it('counts everything as reclaimable when no container holds anything', () => {
@@ -138,13 +139,25 @@ describe('reclaimableImageBytes', () => {
     ).toBe(600);
   });
 
-  it('leaves an image Docker did not measure out of the subtraction', () => {
-    // Understating what is reclaimable is the safe direction: the other way
-    // promises space that is in use.
+  it('still counts an image whose shared size Docker did not measure', () => {
+    // -1 shared is Docker declining to say how much of the 500 MB is common
+    // with something else. It does not make the 500 MB reclaimable: a
+    // container is holding it either way.
     expect(
       reclaimableImageBytes({
         LayersSize: 600,
         Images: [{ Id: 'sha256:a', Created: 1, Size: 500, SharedSize: -1, Containers: 2 }],
+      }),
+    ).toBe(100);
+  });
+
+  it('leaves an image Docker did not size at all out of the subtraction', () => {
+    // Nothing better is available than trusting the total: an unmeasured size
+    // cannot be subtracted, so this is the one case that overstates.
+    expect(
+      reclaimableImageBytes({
+        LayersSize: 600,
+        Images: [{ Id: 'sha256:a', Created: 1, Size: -1, SharedSize: -1, Containers: 2 }],
       }),
     ).toBe(600);
   });

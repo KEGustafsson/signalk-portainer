@@ -264,15 +264,24 @@ describe('PortainerClient docker read surface', () => {
       })
       .reply(200, { SpaceReclaimed: 1 });
 
+    pool
+      .intercept({ path: '/api/endpoints/1/docker/system/df', method: 'GET' })
+      .reply(200, { LayersSize: 1024, Images: [] })
+      .times(2);
+
     const client = createClient(agent);
 
     await client.docker.listImages();
+    await client.docker.diskUsage();
     // Served from the cache: a second interceptor would still be pending.
     await client.docker.listImages();
+    await client.docker.diskUsage();
     await client.docker.pruneImages();
     // Re-read rather than served the pre-prune snapshot, which is the whole
-    // point of a table that is meant to confirm what just happened.
+    // point of a table that is meant to confirm what just happened. The disk
+    // usage is the figure the prune was pressed for, so it goes the same way.
     await client.docker.listImages();
+    await client.docker.diskUsage();
 
     expect(agent.pendingInterceptors()).toHaveLength(0);
   });
