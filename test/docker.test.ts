@@ -2,7 +2,14 @@ import type { MockAgent } from 'undici';
 import { logQuery, DEFAULT_LOG_TAIL, MAX_LOG_TAIL } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
-import { BASE_URL, createClient, createMockAgent, restoreGlobalDispatcher } from './support';
+import {
+  BASE_URL,
+  createClient,
+  createMockAgent,
+  expectAllConsumed,
+  expectNotRequested,
+  restoreGlobalDispatcher,
+} from './support';
 
 describe('PortainerClient docker read surface', () => {
   let agent: MockAgent;
@@ -58,7 +65,7 @@ describe('PortainerClient docker read surface', () => {
     await client.docker.inspectContainer('c1f0e2a3b4c5');
 
     // One list interceptor consumed by two calls; two inspects consumed by two.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('drops the container list after a mutation but keeps the environment', async () => {
@@ -81,7 +88,7 @@ describe('PortainerClient docker read surface', () => {
     // Served from Portainer again rather than from the pre-stop snapshot.
     await client.docker.listContainers();
 
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('waits out the grace period it asked Docker for', async () => {
@@ -206,7 +213,7 @@ describe('PortainerClient docker read surface', () => {
       { Untagged: 'ghcr.io/owner/app:1.2' },
       { Deleted: 'sha256:aaa' },
     ]);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('never forces an image removal, so Docker still refuses one in use', async () => {
@@ -264,7 +271,7 @@ describe('PortainerClient docker read surface', () => {
     await expect(client.docker.pruneImages({ all: true })).resolves.toMatchObject({
       ImagesDeleted: null,
     });
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('drops the cached image list and disk usage after a prune', async () => {
@@ -302,7 +309,7 @@ describe('PortainerClient docker read surface', () => {
     await client.docker.listImages();
     await client.docker.diskUsage();
 
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('maps a proxy failure to an actionable PortainerError', async () => {
@@ -373,7 +380,12 @@ describe('PortainerClient stacks', () => {
   });
 
   it('refuses a stack belonging to another environment', async () => {
-    interceptOwnership();
+    // The file read is registered so that its staying unconsumed is the
+    // assertion: without the ownership check the client would fetch it from
+    // whichever environment it is bound to.
+    interceptOwnership()
+      .intercept({ path: '/api/stacks/9/file', method: 'GET' })
+      .reply(200, { StackFileContent: 'services:\n  elsewhere:\n' });
 
     const client = createClient(agent);
     // Fixture stack 9 has EndpointId 4; this client is bound to environment 1.
@@ -382,8 +394,8 @@ describe('PortainerClient stacks', () => {
     expect(error).toBeInstanceOf(PortainerError);
     expect((error as PortainerError).status).toBe(404);
     expect((error as PortainerError).message).toMatch(/does not belong to this environment/);
-    // The file was never requested: an unconsumed interceptor would remain.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    // The file was never requested: its interceptor is still pending.
+    expectNotRequested(agent, '/api/stacks/9/file');
   });
 });
 
@@ -467,7 +479,7 @@ describe('PortainerClient event stream', () => {
     const collected = [];
     for await (const event of events) collected.push(event);
     expect(collected).toEqual([{ Type: 'container', Action: 'start', Actor: { ID: 'abc' } }]);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('skips a line that is not an event rather than ending the subscription', async () => {
