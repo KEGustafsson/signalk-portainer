@@ -521,6 +521,11 @@ describe('facade stack writes', () => {
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('name is required');
       expectNotRequested(agent, '/api/stacks/create/standalone/string?endpointId=1');
+      // The name is read before anything is asked of Portainer, so none of the
+      // three reads a create would start with happened either.
+      expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
+      expectNotRequested(agent, '/api/endpoints/1/docker/info');
+      expectNotRequested(agent, '/api/system/status');
     });
 
     it('refuses a create that names neither a file nor a repository', async () => {

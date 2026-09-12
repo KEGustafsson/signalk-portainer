@@ -710,6 +710,8 @@ describe('facade log streaming', () => {
     expect(res.status).toBe(429);
     expect(asJson(res.body).hint).toContain('already following this container');
     expectNotRequested(agent, streamPath);
+    // And the refusal came before the environment was even resolved.
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   /** A follow stream that fails, either before or after the first line. */
@@ -1179,6 +1181,9 @@ describe('facade container lifecycle', () => {
       expect(asJson(res.body).error).toContain('running Signal K');
       expectNotRequested(agent, `/api/endpoints/1/docker/containers/${SELF_ID}/${action}`);
     }
+    // Registered once and still unconsumed after all four: the guard answers
+    // from the id it already holds, without resolving the environment first.
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   it('recognises itself from the short id the UI actually sends', async () => {
@@ -1421,6 +1426,7 @@ describe('facade container lifecycle', () => {
       agent,
       '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
     );
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   it('refuses removal unless destructive operations are enabled', async () => {
@@ -1443,6 +1449,7 @@ describe('facade container lifecycle', () => {
       agent,
       '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
     );
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   it('removes a container without its volumes by default', async () => {
@@ -1545,6 +1552,7 @@ describe('facade image writes', () => {
     expect(asJson(pruned.body).error).toContain('Container control is disabled');
     expectNotRequested(agent, '/api/endpoints/1/docker/images/sha256:aaa');
     expectNotRequested(agent, pruneFilter('true'));
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   it('refuses both image writes unless destructive operations are enabled', async () => {
@@ -1567,6 +1575,7 @@ describe('facade image writes', () => {
     expect(pruned.status).toBe(403);
     expectNotRequested(agent, '/api/endpoints/1/docker/images/sha256:aaa');
     expectNotRequested(agent, pruneFilter('true'));
+    expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
   });
 
   it('removes an image by id and reports what Docker removed', async () => {
