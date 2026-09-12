@@ -131,7 +131,6 @@ export interface StackRedeploy {
   pullImage?: boolean;
   /** Credentials for a private repository, when the stack needs them again. */
   authentication?: { username: string; password: string };
-  tlsSkipVerify?: boolean;
 }
 
 export interface StackFromString {
@@ -531,22 +530,26 @@ export class PortainerClient {
      * word of it: Docker answers a pull with 200 the moment it starts, and a
      * failure — no such tag, no route to the registry — arrives inside the
      * stream as `{"error": …}` rather than as a status.
+     *
+     * Read a line at a time rather than buffered whole. Docker emits a line
+     * per layer per tick, so a multi-layer image over a boat's uplink is a
+     * stream with no bound on its length — and only the newest line is worth
+     * anything once the one before it has been read.
      */
     const readPullProgress = async (
       response: Response,
       method: string,
       path: string,
     ): Promise<ImagePullResult> => {
-      const text = await this.readText(response, method, path);
       let status = '';
-      for (const line of text.split('\n')) {
+      const take = (line: string): void => {
         const trimmed = line.trim();
-        if (!trimmed) continue;
+        if (!trimmed) return;
         let entry: { status?: unknown; error?: unknown; errorDetail?: { message?: unknown } };
         try {
           entry = JSON.parse(trimmed) as typeof entry;
         } catch {
-          continue;
+          return;
         }
         const failure =
           typeof entry.errorDetail?.message === 'string'
@@ -565,6 +568,42 @@ export class PortainerClient {
           });
         }
         if (typeof entry.status === 'string') status = entry.status;
+      };
+
+      const body = response.body;
+      if (!body) return { status };
+      const reader = body.getReader();
+      const decoder = new TextDecoder();
+      let held = '';
+      // A line longer than any progress line Docker writes is not one, and
+      // holding it would put the bound back where this took it from. It is
+      // dropped as far as the next newline instead.
+      let overlong = false;
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) held += decoder.decode(value, { stream: true });
+          for (let at = held.indexOf('\n'); at !== -1; at = held.indexOf('\n')) {
+            const line = held.slice(0, at);
+            held = held.slice(at + 1);
+            if (!overlong) take(line);
+            overlong = false;
+          }
+          if (held.length > MAX_PULL_LINE_BYTES) {
+            held = '';
+            overlong = true;
+          }
+        }
+        held += decoder.decode();
+        if (!overlong) take(held);
+      } catch (cause) {
+        // A failure Docker reported inside the stream is the answer, not a
+        // transport fault, and must reach the caller as it was written.
+        if (cause instanceof PortainerError) throw cause;
+        throw PortainerError.fromTransport(cause, method, path, this.baseUrl);
+      } finally {
+        await reader.cancel().catch(() => undefined);
       }
       return { status };
     };
@@ -761,7 +800,10 @@ export class PortainerClient {
       // as one name, and Portainer's proxy refuses a path that carries an
       // encoded separator outright. The panel sends an id, which has none — a
       // slashed tag only arrives from a direct API caller.
-      removeImage: (reference) =>
+      // `async` for the sake of a reference this refuses: the encoder throws,
+      // and a lifecycle method that returns a promise everywhere else must
+      // not throw past the caller's await on one input in four.
+      removeImage: async (reference) =>
         mutateJson<DockerImageRemoval[]>(
           'DELETE',
           `/images/${encodeImageReference(reference)}`,
@@ -1328,6 +1370,12 @@ export class PortainerClient {
    * again until it settles, within the same write budget a synchronous deploy
    * had, and a stack that settles in error carries Portainer's reason.
    *
+   * `startedAt` is when the write was sent, not when it was answered: the
+   * budget covers the write and the settling together. Measured from the
+   * answer instead, one stack write could hold its caller for twice the
+   * configured budget — ten minutes at the default — which is not the budget
+   * the operator set.
+   *
    * Older Portainers never answer with the deploying status, so they pay one
    * check and nothing more.
    */
@@ -1335,6 +1383,7 @@ export class PortainerClient {
     id: number,
     answered: unknown,
     path: string,
+    startedAt: number,
   ): Promise<Stack | undefined> {
     // Only what Portainer said. A version that answers a write with nothing,
     // or with a body that is not a stack, has told us nothing about a
@@ -1342,7 +1391,7 @@ export class PortainerClient {
     // would be a request per write for no answer.
     const first = asStack(answered);
     if (!first) return undefined;
-    const deadline = performance.now() + this.writeTimeoutMs;
+    const deadline = startedAt + this.writeTimeoutMs;
     let current = first;
     while (current.Status === StackStatus.Deploying) {
       if (performance.now() > deadline) {
@@ -1414,6 +1463,7 @@ export class PortainerClient {
       });
     }
     const path = `/api/stacks/${id}`;
+    const startedAt = performance.now();
     const answered = await this.stackWrite('PUT', `${path}?${await this.endpointQuery()}`, {
       StackFileContent: update.content,
       Env: pairs(update.env ?? stack.Env ?? []),
@@ -1424,7 +1474,7 @@ export class PortainerClient {
       // releases that only know it.
       RepullImageAndRedeploy: update.pullImage === true,
     });
-    await this.awaitStackSettled(id, answered, path);
+    await this.awaitStackSettled(id, answered, path, startedAt);
     // Portainer's update handler clears AutoUpdate, and the request has no
     // field that could have kept it. Reported rather than swallowed: a webhook
     // that stops firing is otherwise discovered by it not firing.
@@ -1450,10 +1500,13 @@ export class PortainerClient {
     }
     const path = `/api/stacks/${id}/git/redeploy`;
     // Credentials the stack was created with are asked for again by name.
-    // Portainer keeps them, but before 2.44 it reuses them only when the
+    // Portainer keeps them, but through 2.42 it reuses them only when the
     // request says authentication is wanted and sends no password of its own
     // — so a redeploy that stayed silent about them cloned anonymously, and
-    // every private repository failed with "unable to clone".
+    // every private repository failed with "unable to clone". A blank password
+    // is the documented way to say "keep the stored one", on every release
+    // from 2.17 to the Sources model of 2.43, which starts from the stored
+    // credentials and only lets a non-empty password replace them.
     const stored = stack.GitConfig.Authentication ?? undefined;
     const authentication = options.authentication
       ? {
@@ -1461,14 +1514,9 @@ export class PortainerClient {
           RepositoryPassword: options.authentication.password,
         }
       : stored
-        ? {
-            RepositoryUsername: stored.Username ?? '',
-            RepositoryPassword: '',
-            ...(typeof stored.GitCredentialID === 'number' && stored.GitCredentialID > 0
-              ? { RepositoryGitCredentialID: stored.GitCredentialID }
-              : {}),
-          }
+        ? { RepositoryUsername: stored.Username ?? '', RepositoryPassword: '' }
         : undefined;
+    const startedAt = performance.now();
     const answered = await this.stackWrite('PUT', `${path}?${await this.endpointQuery()}`, {
       RepositoryReferenceName: stack.GitConfig.ReferenceName ?? '',
       RepositoryAuthentication: authentication !== undefined,
@@ -1478,7 +1526,7 @@ export class PortainerClient {
       PullImage: options.pullImage === true,
       RepullImageAndRedeploy: options.pullImage === true,
     });
-    await this.awaitStackSettled(id, answered, path);
+    await this.awaitStackSettled(id, answered, path, startedAt);
   }
 
   /**
@@ -1491,6 +1539,7 @@ export class PortainerClient {
   async createStackFromString(stack: StackFromString): Promise<Stack | undefined> {
     const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/string');
     const path = `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/string`;
+    const startedAt = performance.now();
     return this.createdStack(
       await this.stackWrite('POST', `${path}?${await this.endpointQuery()}`, {
         Name: stack.name,
@@ -1499,6 +1548,7 @@ export class PortainerClient {
         Env: pairs(stack.env ?? []),
       }),
       path,
+      startedAt,
     );
   }
 
@@ -1507,16 +1557,21 @@ export class PortainerClient {
    * that answers with no stack — older ones answered with the whole stack,
    * and that is what is relied on — is left as it answered.
    */
-  private async createdStack(answered: unknown, path: string): Promise<Stack | undefined> {
+  private async createdStack(
+    answered: unknown,
+    path: string,
+    startedAt: number,
+  ): Promise<Stack | undefined> {
     const created = asStack(answered);
     if (!created) return undefined;
-    return (await this.awaitStackSettled(created.Id, created, path)) ?? created;
+    return (await this.awaitStackSettled(created.Id, created, path, startedAt)) ?? created;
   }
 
   /** A new stack whose compose file lives in a git repository. */
   async createStackFromRepository(stack: StackFromRepository): Promise<Stack | undefined> {
     const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/repository');
     const path = `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/repository`;
+    const startedAt = performance.now();
     return this.createdStack(
       await this.stackWrite('POST', `${path}?${await this.endpointQuery()}`, {
         Name: stack.name,
@@ -1535,6 +1590,7 @@ export class PortainerClient {
         TLSSkipVerify: stack.tlsSkipVerify === true,
       }),
       path,
+      startedAt,
     );
   }
 
@@ -1861,6 +1917,12 @@ function multiplexedByContentType(response: Response): boolean | undefined {
 /** The most a one-shot log read may hold: `tail` bounds lines, this bounds bytes. */
 const MAX_LOG_BYTES = 16 * 1024 * 1024;
 
+/**
+ * The most of one pull-progress line that is held before it is given up on.
+ * Docker's are a few hundred bytes; only one is ever held at a time.
+ */
+const MAX_PULL_LINE_BYTES = 64 * 1024;
+
 /** How often a deploying stack is asked whether it has settled. */
 const STACK_SETTLE_POLL_MS = 2_000;
 
@@ -1958,10 +2020,22 @@ export function splitImageReference(reference: string): { name: string; tag?: st
  * have read them as part of the name rather than as path anyway.
  */
 function encodeImageReference(reference: string): string {
-  return reference
-    .split('/')
-    .map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':'))
-    .join('/');
+  const segments = reference.split('/');
+  // The slashes are kept as slashes, so a `..` among them is a path segment
+  // the URL parser will act on: `images/../../../stacks/3` resolves to
+  // `/api/stacks/3`, and the DELETE meant for an image deletes a stack
+  // instead, past every guard the stack routes have. Docker has no image
+  // whose name contains such a segment, so refusing them costs nothing.
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new PortainerError({
+      status: 400,
+      method: 'DELETE',
+      path: '/images',
+      message: `"${reference}" is not an image reference`,
+      hint: 'an image is named by its id, or by repository/name with an optional tag',
+    });
+  }
+  return segments.map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':')).join('/');
 }
 
 /**

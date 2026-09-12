@@ -138,6 +138,37 @@ describe('Watchdog', () => {
     expect(alarm?.value.method).toEqual(['visual']);
   });
 
+  it('takes the sound back when an exited container is paused instead', () => {
+    // Both states are alarms, so a watchdog that only remembered the state
+    // published nothing for the change — and the chartplotter went on
+    // sounding for a container the operator had since paused on purpose.
+    const watchdog = watching();
+
+    const exited = watchdog
+      .evaluate('boat', up([container({ Names: ['/ais-logger'], State: 'exited' })]))
+      .find((entry) => entry.path.endsWith('containers.ais_logger'));
+    expect(exited?.value.method).toEqual(['visual', 'sound']);
+
+    const paused = watchdog
+      .evaluate('boat', up([container({ Names: ['/ais-logger'], State: 'paused' })]))
+      .find((entry) => entry.path.endsWith('containers.ais_logger'));
+    expect(paused?.value.state).toBe('alarm');
+    expect(paused?.value.method).toEqual(['visual']);
+    expect(paused?.value.message).toContain('paused');
+  });
+
+  it('says nothing a second time about a container that has not changed', () => {
+    const watchdog = watching();
+    const exited = up([container({ Names: ['/ais-logger'], State: 'exited' })]);
+
+    expect(
+      watchdog.evaluate('boat', exited).find((e) => e.path.endsWith('containers.ais_logger')),
+    ).toBeDefined();
+    expect(
+      watchdog.evaluate('boat', exited).find((e) => e.path.endsWith('containers.ais_logger')),
+    ).toBeUndefined();
+  });
+
   it('gives a restarting container a poll to settle before alarming', () => {
     const watchdog = watching();
     const restarting = up([container({ Names: ['/ais-logger'], State: 'restarting' })]);

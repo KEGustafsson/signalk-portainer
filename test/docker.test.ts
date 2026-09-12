@@ -225,6 +225,23 @@ describe('PortainerClient docker read surface', () => {
     expect((error as PortainerError).status).toBe(409);
   });
 
+  it('refuses an image reference that could climb out of the docker proxy', async () => {
+    // `/images/../../../stacks/3` is `/api/stacks/3` once the URL is parsed,
+    // so a DELETE meant for an image would have deleted a stack — past the
+    // ownership guard, the audit and the destructive gate the stack routes
+    // have. There is no such image, so there is nothing to intercept: the
+    // refusal happens before a request is built.
+    withEnvironment();
+    const client = createClient(agent);
+
+    for (const reference of ['../../../stacks/3', 'ghcr.io/..', './app', 'ghcr.io//app']) {
+      const error = await client.docker.removeImage(reference).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PortainerError);
+      expect((error as PortainerError).status).toBe(400);
+      expect((error as PortainerError).message).toMatch(/is not an image reference/);
+    }
+  });
+
   it('prunes untagged layers by default and every unused image only on request', async () => {
     withEnvironment();
     const pool = agent.get(BASE_URL);

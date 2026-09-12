@@ -230,6 +230,15 @@ describe('envProblem', () => {
     expect(envProblem(rows(['2FAST', '']), 0)).toMatch(/Letters, digits/);
   });
 
+  it('refuses a value with no name rather than dropping it silently', () => {
+    // `envForRequest` keeps only named rows, so this one would be deployed
+    // without the variable the operator typed a value for, and nothing would
+    // have said so.
+    expect(envProblem(rows(['', 'Europe/Helsinki']), 0)).toMatch(/needs a name/);
+    expect(envProblem(rows(['  ', 'Europe/Helsinki']), 0)).toMatch(/needs a name/);
+    expect(envForRequest(rows(['', 'Europe/Helsinki']))).toEqual([]);
+  });
+
   it('refuses the same variable twice, since only one of them would survive', () => {
     expect(envProblem(rows(['TZ', 'a'], ['TZ', 'b']), 1)).toMatch(/twice/);
     expect(envProblem(rows(['TZ', 'a'], ['TZ', 'b']), 0)).toBeUndefined();

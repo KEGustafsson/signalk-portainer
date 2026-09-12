@@ -180,8 +180,13 @@ async function accept(
   const backlog: unknown[] = [];
   let backlogBytes = 0;
   const queue = (data: unknown): void => {
-    if (backlog.length >= MAX_BACKLOG_MESSAGES || backlogBytes >= MAX_BACKLOG_BYTES) return;
-    backlogBytes += messageSize(data);
+    // The incoming message is measured before it is kept, not after: a limit
+    // that only looks at what is already held lets one message of any size
+    // through, which is the whole of the bound this exists to put on an
+    // unauthenticated socket.
+    const size = messageSize(data);
+    if (backlog.length >= MAX_BACKLOG_MESSAGES || size > MAX_BACKLOG_BYTES - backlogBytes) return;
+    backlogBytes += size;
     backlog.push(data);
   };
   browser.on('message', queue);

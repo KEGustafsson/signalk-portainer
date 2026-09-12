@@ -534,7 +534,15 @@ function Panel(): ReactElement {
 
     function schedule(after: number): void {
       if (stopped) return;
-      timer = setTimeout(() => void tick(), after);
+      // Whatever was pending is dropped first. A tab becoming visible while a
+      // read was in flight scheduled one tick, and the read finishing
+      // scheduled another; only the second was ever cancellable, so each such
+      // switch left another chain polling and the backoff counted for nothing.
+      if (timer) clearTimeout(timer);
+      timer = setTimeout(() => {
+        timer = undefined;
+        void tick();
+      }, after);
     }
 
     void (async () => {

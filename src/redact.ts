@@ -8,15 +8,23 @@ const TOKEN_PATTERNS: readonly RegExp[] = [
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_.+/=-]*/g,
   // Credentials embedded in a URL — `https://user:secret@host` — which a
   // transport failure would otherwise quote back at the operator in its hint,
-  // and a git repository address for a stack carries as often as not.
-  /(\b[a-z][a-z0-9+.-]*:\/\/)([^/@\s:]+):([^/@\s]+)@/gi,
+  // and a git repository address for a stack carries as often as not. The
+  // password is optional because the common form for a forge token is
+  // `https://<token>@host` with no colon at all, and that whole userinfo is
+  // the secret rather than half of it.
+  /(\b[a-z][a-z0-9+.-]*:\/\/)([^/@\s:]+)(?::([^/@\s]+))?@/gi,
 ];
 
-/** How each pattern is replaced; the URL one keeps the scheme and the user. */
+/**
+ * How each pattern is replaced. The URL one keeps the scheme, and keeps the
+ * user only where there is a password to take its place — userinfo with no
+ * password is a token, and naming it would be publishing it.
+ */
 const REPLACEMENTS: readonly (string | ((...groups: string[]) => string))[] = [
   '[redacted]',
   '[redacted]',
-  (_match: string, scheme: string, user: string) => `${scheme}${user}:[redacted]@`,
+  (_match: string, scheme: string, user: string, password?: string) =>
+    password === undefined ? `${scheme}[redacted]@` : `${scheme}${user}:[redacted]@`,
 ];
 
 /**

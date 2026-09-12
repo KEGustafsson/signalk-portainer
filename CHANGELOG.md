@@ -97,6 +97,42 @@ the Portainer and Docker calls the plugin was missing.
   id; `?instance=` given twice is refused rather than falling back to the
   default; a JWT's own expiry is honoured; caches and timers use a monotonic
   clock; credentials in a URL are redacted; `start()` is idempotent.
+- **An image reference can no longer climb out of the Docker proxy.** The
+  slashes in `ghcr.io/owner/app` are kept as slashes so Docker reads the name
+  whole, which made `..` among them a path segment the URL parser acted on:
+  `DELETE /images/../../../stacks/3` resolved to `/api/stacks/3` and deleted a
+  stack, past the ownership guard and the audit that route has. Empty, `.` and
+  `..` segments are refused.
+- **A console cannot be made to hold a message of any size.** The backlog
+  kept for what is typed before the shell exists measured only what it was
+  already holding, so the first message through — on a socket whose ticket had
+  not been checked yet — was kept whatever its size.
+- **Backpressure holds back whichever side is outrunning the other.** One
+  drain timer belonged to the direction that congested first; the other could
+  not pause its sender and ran to the hard limit, closing a console that flow
+  control would have recovered.
+- **A watchdog alarm that changes is published again.** Deduplicating on the
+  alarm state alone held back everything that changes while an alarm stays an
+  alarm — a container that went from exited to paused kept the sound it no
+  longer wanted, and one that went from stopped to removed went on saying it
+  was stopped.
+- **A stack write and the deploy it waits for share one budget.** The settle
+  poll started its deadline when the write was answered, so a single deploy
+  could hold its caller for twice the configured write timeout.
+- **A URL carrying a token rather than a user and password is redacted.** The
+  forge form is `https://<token>@host`, with no colon for the pattern to find.
+- **A value typed against a blank name is refused.** The row was dropped on its
+  way to the request, so the stack deployed without a variable the operator had
+  filled in and nothing said why.
+- **A press of Select counts once.** The button sits inside a row that answers
+  clicks of its own, and the press reached both — two switch requests for the
+  same environment.
+- **One polling timer, not several.** A tab becoming visible while a read was
+  in flight left a second polling chain running, and the backoff counted for
+  nothing.
+- A pull's progress stream is read a line at a time rather than buffered
+  whole, and a redeploy no longer sends a git credential id Portainer's
+  redeploy route has never had a field for.
 
 ## [0.1.2] - 2026-08-24
 

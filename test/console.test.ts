@@ -180,6 +180,24 @@ describe('openConsole', () => {
     expect(upstream.sent).toEqual(['whoami\n']);
   });
 
+  it('holds what was typed before the shell existed, and no more than that', async () => {
+    // The 101 is written before the handler runs, so the terminal is focused
+    // and accepting keystrokes while Portainer is still being asked for the
+    // socket. They are kept — but one message that is larger than the whole
+    // backlog allowance is a way to spend the server's memory on a socket
+    // that has not been authorised yet, so it is measured before it is kept.
+    const { endpoint, tickets, upstream } = setup();
+    const browser = new FakeSocket();
+    endpoint.connection?.(browser, { url: `/console?ticket=${tickets.mint(grant)}` });
+
+    browser.emit('message', 'ls\n');
+    browser.emit('message', 'x'.repeat(64 * 1024 + 1));
+    browser.emit('message', 'pwd\n');
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(upstream.sent).toEqual(['ls\n', 'pwd\n']);
+  });
+
   it('refuses a socket with no ticket', async () => {
     // The cookie rides along on an upgrade and CORS does not stop one, so the
     // ticket is the only thing that authorises this.

@@ -37,6 +37,24 @@ describe('redactValue', () => {
     expect(redactValue({ error: 'rejected ptr_abc123' })).toEqual({ error: 'rejected [redacted]' });
   });
 
+  it('takes the credentials out of a URL, whichever form they are in', () => {
+    // A git repository address carries these as often as not, and a transport
+    // failure quotes the address back at the operator in its hint. The
+    // token-only form — no colon, no password — is what a forge hands out,
+    // and there the whole userinfo is the secret rather than half of it.
+    expect(
+      redactValue({
+        url: 'https://deploy:s3cr3t@git.example/boat.git',
+        repository: 'https://ghp_AAAABBBBCCCC@git.example/boat.git',
+        plain: 'https://git.example/boat.git',
+      }),
+    ).toEqual({
+      url: 'https://deploy:[redacted]@git.example/boat.git',
+      repository: 'https://[redacted]@git.example/boat.git',
+      plain: 'https://git.example/boat.git',
+    });
+  });
+
   it('matches secret keys regardless of separators or casing', () => {
     expect(
       redactValue({

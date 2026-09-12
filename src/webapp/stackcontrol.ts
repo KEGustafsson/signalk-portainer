@@ -201,8 +201,12 @@ export function envProblem(rows: readonly EnvVar[], index: number): string | und
   const row = rows[index];
   if (!row) return undefined;
   const name = row.name.trim();
-  // An untouched blank row is not a mistake; `envForRequest` drops it.
-  if (name.length === 0) return undefined;
+  // An untouched blank row is not a mistake; `envForRequest` drops it. A row
+  // with a value and no name is a different thing: dropping that one silently
+  // deploys the stack without a variable the operator typed a value for.
+  if (name.length === 0) {
+    return row.value.length === 0 ? undefined : 'A value needs a name';
+  }
   if (!ENV_NAME.test(name)) {
     return 'Letters, digits and underscore only, and not starting with a digit';
   }

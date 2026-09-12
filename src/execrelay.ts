@@ -111,14 +111,19 @@ export function relay(
   let ended = false;
   let idle: ReturnType<typeof setTimeout> | undefined;
   let heartbeat: ReturnType<typeof setInterval> | undefined;
-  let drain: ReturnType<typeof setInterval> | undefined;
+  // One per direction, keyed by the socket being written to. A single timer
+  // belonged to whichever direction congested first, and the other could then
+  // never pause its sender: it ran to the hard limit and closed a console that
+  // flow control would have recovered.
+  const drains = new Map<RelaySocket, ReturnType<typeof setInterval>>();
 
   const finish = (reason: string, code?: number): void => {
     if (ended) return;
     ended = true;
     if (idle) clearTimeout(idle);
     if (heartbeat) clearInterval(heartbeat);
-    if (drain) clearInterval(drain);
+    for (const timer of drains.values()) clearInterval(timer);
+    drains.clear();
     // Both, always, whichever one reported first. The code is always sent:
     // `ws` drops the reason when the code is undefined, so the peer saw a bare
     // 1005 and the panel's handling of the reason never ran.
@@ -149,10 +154,10 @@ export function relay(
       finish('the other end could not keep up', RELAY_CLOSE.refused);
       return;
     }
-    if (drain || queued <= BACKPRESSURE_HIGH_BYTES || !can(from, 'pause')) return;
+    if (drains.has(to) || queued <= BACKPRESSURE_HIGH_BYTES || !can(from, 'pause')) return;
 
     invoke(from, 'pause');
-    drain = setInterval(() => {
+    const drain = setInterval(() => {
       if (ended) return;
       const left = to.bufferedAmount ?? 0;
       if (left > BACKPRESSURE_LIMIT_BYTES) {
@@ -160,10 +165,11 @@ export function relay(
         return;
       }
       if (left > BACKPRESSURE_LOW_BYTES) return;
-      if (drain) clearInterval(drain);
-      drain = undefined;
+      clearInterval(drain);
+      drains.delete(to);
       invoke(from, 'resume');
     }, BACKPRESSURE_POLL_MS);
+    drains.set(to, drain);
     drain.unref?.();
   };
 

@@ -34,10 +34,12 @@ protected by Signal K's own authentication, and on top of that:
 ## Requirements
 
 - Signal K server running on Node.js 22 or newer.
-- Portainer CE **2.17 or newer**, reachable from the Signal K server. Older
-  releases have no `/api/system/status`; the plugin falls back to the route it
-  replaced, so 2.x before 2.17 works but reports no Portainer version. Edge
-  environments report their own health from 2.18.1.
+- Portainer CE, reachable from the Signal K server. Every release of 2.x is
+  supported; **2.17 or newer** is what the version probe needs, because older
+  ones have no `/api/system/status` — the plugin falls back to the route it
+  replaced, so those work in full but report no Portainer version and cannot
+  say whether an update is waiting. Edge environments report their own health
+  from 2.18.1.
 
 Node 20 platforms — Venus OS / Cerbo GX among them — are out of scope.
 

@@ -63,6 +63,14 @@ export class Watchdog {
   /** Last state published per path, so an alarm is raised once, not per poll. */
   private readonly states = new Map<string, AlarmState>();
   /**
+   * What was last published for a path, as the whole notification rather than
+   * its state. Deduplicating on the state alone held back everything that
+   * changes while an alarm stays an alarm: a container that went from exited
+   * to paused kept the sound method it no longer wanted, and one that went
+   * from stopped to removed went on saying it was stopped.
+   */
+  private readonly published = new Map<string, string>();
+  /**
    * The path each configured watch currently publishes to.
    *
    * A watch written as an id prefix resolves to the container's key while the
@@ -161,6 +169,7 @@ export class Watchdog {
           `Container ${entry.container} is now reported under a different key`,
         );
         this.states.delete(previous);
+        this.published.delete(previous);
       }
       this.paths.set(identity, path);
 
@@ -228,6 +237,7 @@ export class Watchdog {
       });
     }
     this.states.clear();
+    this.published.clear();
     return notifications;
   }
 
@@ -238,8 +248,11 @@ export class Watchdog {
     message: string,
     method?: string[],
   ): void {
-    if (this.states.get(path) === state) return;
+    const value = notification(state, message, method);
+    const signature = JSON.stringify(value);
+    if (this.published.get(path) === signature) return;
     this.states.set(path, state);
-    into.push({ path, value: notification(state, message, method) });
+    this.published.set(path, signature);
+    into.push({ path, value });
   }
 }

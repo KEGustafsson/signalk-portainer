@@ -131,7 +131,11 @@ export function GatedButton({
       // Kept for the pointer: a tooltip is still the fastest way to read this
       // with a mouse. It is no longer the only way.
       title={reason}
-      onClick={() => {
+      onClick={(event) => {
+        // Without this a button inside a row that answers clicks of its own —
+        // the environment table — has the row answer the same click, and the
+        // same environment is chosen twice.
+        event.stopPropagation();
         if (!inert) onPress();
       }}
     >

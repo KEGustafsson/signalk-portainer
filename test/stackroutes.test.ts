@@ -136,20 +136,25 @@ describe('facade stack writes', () => {
       expect(res.status).toBe(403);
     });
 
-    it('refuses a name compose would not accept as a project', async () => {
-      // Uppercase and dots are what Portainer's own form refuses; what
-      // happens to them afterwards depends on the version, so they are
-      // refused here rather than deployed under a name nobody typed.
-      withEnvironment();
-      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+    // Uppercase and dots are what Portainer's own form refuses; what happens
+    // to them afterwards depends on the version, so they are refused here
+    // rather than deployed under a name nobody typed. One case each, because
+    // a name carrying both would pass a validator that had only kept one of
+    // the two rules.
+    it.each([['My.Stack'], ['my.stack'], ['MyStack']])(
+      'refuses "%s", which compose would not accept as a project',
+      async (name) => {
+        withEnvironment();
+        withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
 
-      const res = await request(app({ self: selfContainer }))
-        .post('/api/stacks')
-        .send({ name: 'My.Stack', content: 'services: {}' });
+        const res = await request(app({ self: selfContainer }))
+          .post('/api/stacks')
+          .send({ name, content: 'services: {}' });
 
-      expect(res.status).toBe(400);
-      expect(asJson(res.body).error).toMatch(/lowercase/);
-    });
+        expect(res.status).toBe(400);
+        expect(asJson(res.body).error).toMatch(/lowercase/);
+      },
+    );
 
     const withCreate = (name: string) => {
       boat()

@@ -1902,13 +1902,21 @@ describe('AppPanel recovers rather than dead-ends', () => {
 
     // The ais-logger request settles; the influxdb one has not.
     const aisRequest = [...pending.entries()].find(([url]) => url.includes('d2e1f0a9b8c7'));
-    act(() => aisRequest?.[1]());
+    // Asserted rather than reached for optionally: a lookup that found
+    // nothing would otherwise resolve nothing and leave both still waiting,
+    // which is exactly what the last expectation below is looking for.
+    expect(aisRequest).toBeDefined();
+    act(() => {
+      aisRequest![1]();
+    });
 
+    // The one that finished is live again, the one still open is not.
     await waitFor(() =>
-      expect(influx().getByRole('button', { name: 'Pause' })).toHaveAttribute(
-        'aria-disabled',
-        'true',
-      ),
+      expect(ais().getByRole('button', { name: 'Start' })).not.toHaveAttribute('aria-disabled'),
+    );
+    expect(influx().getByRole('button', { name: 'Pause' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
     );
   });
 });
