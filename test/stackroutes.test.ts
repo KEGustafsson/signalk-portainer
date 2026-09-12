@@ -556,6 +556,26 @@ describe('facade stack writes', () => {
       expect(asJson(res.body).error).toContain('larger than 512kb');
       expect(agent.pendingInterceptors()).toHaveLength(0);
     });
+
+    it('still refuses one the server parsed before the plugin saw it', async () => {
+      // The Signal K server runs its own JSON parser over every route, with
+      // a limit of its own — ten megabytes by default. body-parser will not
+      // read a body twice, so the limit above was a no-op in production: an
+      // oversized compose file arrived fully parsed, and the route that
+      // documents a 512 kb ceiling had none.
+      const host = express();
+      host.use(express.json({ limit: '10mb' }));
+      host.use(app());
+
+      const res = await request(host)
+        .put('/api/stacks/3')
+        .set('content-type', 'application/json')
+        .send(JSON.stringify({ content: 'x'.repeat(600 * 1024) }));
+
+      expect(res.status).toBe(413);
+      expect(asJson(res.body).error).toContain('larger than 512kb');
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
   });
 
   describe('audit', () => {

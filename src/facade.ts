@@ -476,16 +476,13 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     });
   };
   const body = (req: Request, res: Response, next: (cause?: unknown) => void): void => {
-    // Declared length first, before anything is read: it is what a client
-    // says it is about to send, and refusing on it costs nothing.
-    const declared = Number(req.get('content-length'));
-    if (Number.isFinite(declared) && declared > MAX_BODY_BYTES) {
-      tooLargeBody(res);
-      return;
-    }
-    // Already parsed by the host — the Signal K server does this for every
-    // route — so measure what it handed over, since body-parser will not
-    // read it a second time.
+    // A body the host already parsed. The Signal K server runs its own JSON
+    // parser over every route before a plugin's router sees one, with a
+    // larger limit of its own, and body-parser will not read a body twice —
+    // so the limit below was never reached in production, only in tests that
+    // mount this router on a bare Express app. Measured rather than refused
+    // on the declared length: answering before the client has finished
+    // sending breaks the connection under it, and the answer is then lost.
     if (req.body !== undefined && (req as { _body?: boolean })._body) {
       if (Buffer.byteLength(JSON.stringify(req.body) ?? '') > MAX_BODY_BYTES) {
         tooLargeBody(res);
