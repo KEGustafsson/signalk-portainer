@@ -16,6 +16,7 @@ import { ConfirmDialog, type ConfirmRequest } from './ConfirmDialog';
 import { ConsoleDialog } from './ConsoleDialog';
 import { ImageDeleteDialog } from './ImageDeleteDialog';
 import { ImagePruneDialog } from './ImagePruneDialog';
+import { ImagePullDialog, type RegistryOption } from './ImagePullDialog';
 import { PanelBoundary } from './PanelBoundary';
 import { LogViewer } from './LogViewer';
 import { StackConfirmDialog, type ConfirmableStackAction } from './StackConfirmDialog';
@@ -27,6 +28,7 @@ import {
   actionRequest,
   imageActionLabel,
   imageActionState,
+  imagePullState,
   imageRequest,
   needsConfirmation,
   normalizeControl,
@@ -73,6 +75,7 @@ const POLL_BACKOFF_CEILING_MS = 60_000;
  * can collide with this.
  */
 const PRUNE_BUSY_KEY = 'images:prune';
+const PULL_BUSY_KEY = 'images:pull';
 
 interface InstanceSummary {
   name: string;
@@ -223,6 +226,20 @@ function Panel(): ReactElement {
   const [usage, setUsage] = useState<DockerDiskUsage | undefined>(undefined);
   const [deletingImage, setDeletingImage] = useState<DockerImage | undefined>(undefined);
   const [pruning, setPruning] = useState(false);
+  /**
+   * The pull dialog, and the registries it offers.
+   *
+   * Read when the dialog opens rather than on the poll: registries change
+   * when an operator adds one, which is not something worth a request every
+   * ten seconds on a boat's link. A failure is carried rather than thrown —
+   * an anonymous pull still works without the list.
+   */
+  const [pulling, setPulling] = useState(false);
+  const [registries, setRegistries] = useState<RegistryOption[]>([]);
+  const [registriesError, setRegistriesError] = useState<string | undefined>(undefined);
+  const [pullResult, setPullResult] = useState<
+    { ok: true; message: string } | { ok: false; error: ApiError } | undefined
+  >(undefined);
   // Kept apart from `error`: the poll clears that one on its next success, and
   // a refused action is exactly what the operator still needs to read.
   const [actionResult, setActionResult] = useState<
@@ -707,6 +724,73 @@ function Panel(): ReactElement {
     [instance, runImage],
   );
 
+  /**
+   * Opens the pull dialog and reads the registries it offers.
+   *
+   * The list is not required: an anonymous pull is the common case and works
+   * without it, so a failure to read it is shown inside the dialog rather
+   * than stopping it from opening.
+   */
+  const startPull = useCallback((): void => {
+    setPullResult(undefined);
+    setRegistriesError(undefined);
+    setPulling(true);
+    const startedOn = instance;
+    void apiGet<{ registries?: unknown }>('/registries', instance)
+      .then((body) => {
+        if (!stillOn(startedOn)) return;
+        setRegistries(registryOptions(body.registries));
+      })
+      .catch((cause: unknown) => {
+        if (!stillOn(startedOn)) return;
+        setRegistries([]);
+        setRegistriesError(asApiError(cause).message);
+      });
+  }, [instance, stillOn]);
+
+  /**
+   * Fetches an image, optionally through one of Portainer's registries.
+   *
+   * The dialog stays open on either outcome: a success names what Docker
+   * reported and the operator may want another, and a failure — a tag that
+   * does not exist, a registry that refused — is worth reading beside the box
+   * that produced it.
+   */
+  const pullImage = useCallback(
+    (request: { reference: string; registryId?: number }): void => {
+      const startedOn = instance;
+      startBusy(PULL_BUSY_KEY);
+      setPullResult(undefined);
+      void (async () => {
+        try {
+          const body = await apiSend<{ status?: unknown }>(
+            'POST',
+            '/images/pull',
+            startedOn,
+            undefined,
+            request,
+          );
+          if (!stillOn(startedOn)) return;
+          const status = typeof body?.status === 'string' ? body.status : '';
+          setPullResult({
+            ok: true,
+            message: status ? `${request.reference}: ${status}` : `${request.reference}: fetched`,
+          });
+          await load();
+          await loadUsage();
+        } catch (cause) {
+          if (!stillOn(startedOn)) return;
+          const failure = asApiError(cause);
+          setPullResult({ ok: false, error: failure });
+          if (failure.status === 403) void loadControl();
+        } finally {
+          if (stillOn(startedOn)) endBusy(PULL_BUSY_KEY);
+        }
+      })();
+    },
+    [endBusy, instance, load, loadControl, loadUsage, startBusy, stillOn],
+  );
+
   const pruneImages = useCallback(
     (options: { all: boolean }): void => {
       const { method, path } = imageRequest('prune', options);
@@ -868,6 +952,12 @@ function Panel(): ReactElement {
     // and the prune dialog quotes a figure that is about to stop being true.
     setDeletingImage(undefined);
     setPruning(false);
+    // The registries belong to the environment that offered them, and an id
+    // from one Portainer names something else on the next.
+    setPulling(false);
+    setRegistries([]);
+    setRegistriesError(undefined);
+    setPullResult(undefined);
     setUsage(undefined);
     // These hold a container id too, and a result about a Portainer the
     // operator has left says nothing about the one they are looking at.
@@ -1225,6 +1315,7 @@ function Panel(): ReactElement {
               setActionResult(undefined);
               setPruning(true);
             }}
+            onPull={startPull}
             onNewStack={() => {
               setStackResult(undefined);
               setEditing({ kind: 'new' });
@@ -1303,6 +1394,17 @@ function Panel(): ReactElement {
         />
       ) : null}
 
+      {pulling ? (
+        <ImagePullDialog
+          registries={registries}
+          {...(registriesError === undefined ? {} : { registriesError })}
+          busy={busyIds.has(PULL_BUSY_KEY)}
+          {...(pullResult === undefined ? {} : { result: pullResult })}
+          onCancel={() => setPulling(false)}
+          onConfirm={pullImage}
+        />
+      ) : null}
+
       {pruning ? (
         <ImagePruneDialog
           reclaimable={reclaimableImageBytes(usage)}
@@ -1349,6 +1451,7 @@ function TabBody({
   stackActions,
   imageActions,
   onPrune,
+  onPull,
   onNewStack,
 }: {
   tab: TabId;
@@ -1361,6 +1464,7 @@ function TabBody({
   stackActions: StackActionsProps;
   imageActions: ImageActionsProps;
   onPrune: () => void;
+  onPull: () => void;
   onNewStack: () => void;
 }): ReactElement {
   switch (tab) {
@@ -1383,7 +1487,14 @@ function TabBody({
         </div>
       );
     case 'images':
-      return <ImagesTab rows={rowsOf(payload.images)} actions={imageActions} onPrune={onPrune} />;
+      return (
+        <ImagesTab
+          rows={rowsOf(payload.images)}
+          actions={imageActions}
+          onPrune={onPrune}
+          onPull={onPull}
+        />
+      );
     case 'volumes':
       return <VolumesTable rows={rowsOf(payload.volumes)} />;
     case 'networks':
@@ -1411,14 +1522,19 @@ function ImagesTab({
   rows,
   actions,
   onPrune,
+  onPull,
 }: {
   rows: DockerImage[];
   actions: ImageActionsProps;
   onPrune: () => void;
+  onPull: () => void;
 }): ReactElement {
   const total = actions.usage?.LayersSize;
   const reclaimable = reclaimableImageBytes(actions.usage);
   const gate = imageActionState(actions.control);
+  // Fetching is gated on control alone, where deleting and pruning also need
+  // destructive: a pull takes nothing away.
+  const pull = imagePullState(actions.control);
 
   return (
     <div>
@@ -1428,16 +1544,47 @@ function ImagesTab({
           {typeof total === 'number' ? ` · ${formatBytes(total)} on disk` : ''}
           {reclaimable === undefined ? '' : ` · ${formatBytes(reclaimable)} reclaimable`}
         </span>
-        <GatedButton
-          className="btn btn-sm btn-outline-danger"
-          label={imageActionLabel('prune')}
-          {...(gate.enabled ? {} : { reason: gate.reason })}
-          onPress={onPrune}
-        />
+        <div className="d-flex gap-2">
+          <GatedButton
+            className="btn btn-sm btn-outline-primary"
+            label="Fetch image"
+            {...(pull.enabled ? {} : { reason: pull.reason })}
+            onPress={onPull}
+          />
+          <GatedButton
+            className="btn btn-sm btn-outline-danger"
+            label={imageActionLabel('prune')}
+            {...(gate.enabled ? {} : { reason: gate.reason })}
+            onPress={onPrune}
+          />
+        </div>
       </div>
       <ImagesTable rows={rows} actions={actions} />
     </div>
   );
+}
+
+/**
+ * The registries the facade offered, made safe to render.
+ *
+ * `apiGet` casts whatever came back. A registry with no numeric id could not
+ * be pulled through anyway, and a body that is not a list would throw from
+ * `.map` during render — inside someone else's admin UI, which takes their
+ * tree down and not just this panel.
+ */
+function registryOptions(value: unknown): RegistryOption[] {
+  if (!Array.isArray(value)) return [];
+  const rows: RegistryOption[] = [];
+  for (const entry of value as Partial<RegistryOption>[]) {
+    if (typeof entry?.id !== 'number') continue;
+    rows.push({
+      id: entry.id,
+      name: typeof entry.name === 'string' && entry.name ? entry.name : `Registry ${entry.id}`,
+      ...(typeof entry.url === 'string' ? { url: entry.url } : {}),
+      authenticated: entry.authenticated === true,
+    });
+  }
+  return rows;
 }
 
 /**

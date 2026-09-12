@@ -7,6 +7,8 @@ import {
   actionsFor,
   imageActionLabel,
   imageActionState,
+  imagePullState,
+  imageReferenceProblem,
   imageRequest,
   isSelfRow,
   needsConfirmation,
@@ -292,6 +294,29 @@ describe('image actions', () => {
       path: '/images/prune?all=false',
     });
     expect(imageRequest('prune', { all: true }).path).toBe('/images/prune?all=true');
+  });
+
+  it('gates fetching on control alone, since a pull takes nothing away', () => {
+    expect(imagePullState(undefined).reason).toContain('Waiting for the plugin');
+    expect(imagePullState(control({ allowPutControl: false })).reason).toContain(
+      'Container control is disabled',
+    );
+    // Deleting and pruning need destructive; fetching does not — the old
+    // image stays until something prunes it, so the only cost is bandwidth.
+    expect(imagePullState(control({ allowDestructive: false })).enabled).toBe(true);
+  });
+
+  it('refuses a reference Docker would not take, before the round trip', () => {
+    expect(imageReferenceProblem('')).toBeUndefined();
+    expect(imageReferenceProblem('nginx')).toBeUndefined();
+    expect(imageReferenceProblem('ghcr.io/owner/app:1.4')).toBeUndefined();
+    expect(imageReferenceProblem('registry.lan:5000/app')).toBeUndefined();
+    expect(imageReferenceProblem(`app@sha256:${'a'.repeat(64)}`)).toBeUndefined();
+
+    expect(imageReferenceProblem('ghcr.io/owner/app 1.4')).toMatch(/optional :tag/);
+    expect(imageReferenceProblem('../../etc/passwd')).toMatch(/optional :tag/);
+    expect(imageReferenceProblem('UPPER/case')).toMatch(/optional :tag/);
+    expect(imageReferenceProblem('a'.repeat(256))).toMatch(/Too long/);
   });
 
   it('labels both actions in the operator’s words', () => {

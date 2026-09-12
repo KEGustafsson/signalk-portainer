@@ -469,7 +469,8 @@ enabled instance (`/instances` and `/health` span them all, and
 | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                                              |
 | `DELETE /images/:reference`                | remove one image by id or tag — never forced, so Docker still refuses one in use                      |
 | `POST /images/prune`                       | reclaim space (`?all=true` widens it from untagged layers to every unused image)                      |
-| `POST /images/pull`                        | fetch an image: body `{ reference }`, e.g. `ghcr.io/owner/app:1.2`                                    |
+| `POST /images/pull`                        | fetch an image: body `{ reference }`, plus `{ registryId }` for a private one                         |
+| `GET /registries`                          | the registries this environment may pull from, and whether Portainer holds credentials for each       |
 | `GET /containers/:id/stats`                | one reading of CPU, memory, network and block I/O — Docker samples twice, so it takes about a second  |
 | `GET /containers/:id/top`                  | the processes running inside a container                                                              |
 | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                                      |
@@ -647,6 +648,22 @@ Portainer before 2.42 also ignores **prune** on a compose stack: the field did
 not exist in the update those versions accept, so services the new file no
 longer names keep running. The answer says so rather than leaving it to be
 found later. Swarm stacks prune on every version.
+
+### Pulling from a private registry
+
+A pull needs no credential from this plugin, even for a private registry.
+Portainer's Docker proxy intercepts the pull, reads the registry id out of the
+request and substitutes credentials from its own store before Docker sees it —
+so the plugin names a registry and never handles a registry password. The
+**Fetch image** button on the Images tab offers whichever registries the
+selected environment may use, with _None — pull anonymously_ as the default.
+
+That list comes from `GET /endpoints/{id}/registries`, which is scoped to the
+environment and needs only an authenticated credential. Portainer's global
+`GET /registries` is administrator-only and is deliberately not used: the
+README recommends a scoped token, and this way one works. A registry Portainer
+holds no credentials for is marked as such in the picker, since choosing it
+changes nothing about the pull.
 
 ### Who may write
 

@@ -9,6 +9,29 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **A private registry can be pulled from.** `POST /images/pull` now takes a
+  `registryId`, and the Images tab has a **Fetch image** button with a registry
+  picker behind it — the pull that the previous release added could only reach
+  a registry that needed no login, which is to say it worked for Docker Hub and
+  failed for anything of the operator's own.
+
+  No credential passes through the plugin. Portainer's Docker proxy intercepts
+  `/images/create`, reads the registry id out of the `X-Registry-Auth` header
+  and replaces the whole header with credentials from its own store before
+  Docker sees the request, so the plugin sends a reference and never a secret.
+  The worst a wrong id can do is fail to authenticate.
+
+  `GET /registries` offers the list the picker needs, from Portainer's
+  environment-scoped route rather than its global one: the global list is
+  administrator-only and answers 403 for the scoped token this README
+  recommends, and its own error message says to use the environment route
+  instead. A registry Portainer holds no credentials for is marked as such,
+  because choosing it changes nothing. Anonymous stays the default, and a
+  registry list that cannot be read is reported inside the dialog rather than
+  stopping the anonymous pull that needs no list at all.
+
+### Added
+
 - **Container changes arrive as they happen.** The plugin subscribes to
   Docker's event stream through Portainer's proxy — one idle connection per
   instance — and reads that instance the moment a container starts, dies,

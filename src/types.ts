@@ -217,6 +217,33 @@ export interface DockerContainerTop {
 }
 
 /**
+ * A registry Portainer holds credentials for, as far as this plugin reads it.
+ *
+ * Deliberately without `Password`: Portainer hides it on the way out, and the
+ * plugin never needs it. A pull names the registry by id and Portainer's own
+ * proxy substitutes the credentials — see `pullImage`.
+ */
+export interface PortainerRegistry {
+  Id: number;
+  Name?: string;
+  /** Host and optional port, e.g. `ghcr.io` or `registry.lan:5000`. */
+  URL?: string;
+  /** 1 Quay, 2 Azure, 3 Custom, 4 GitLab, 5 ProGet, 6 Docker Hub, 7 ECR. */
+  Type?: number;
+  /** False for a public registry Portainer merely knows the address of. */
+  Authentication?: boolean;
+}
+
+/** A registry as the panel needs it: enough to name it and nothing more. */
+export interface RegistryChoice {
+  id: number;
+  name: string;
+  url?: string;
+  /** Whether Portainer holds credentials for it. */
+  authenticated: boolean;
+}
+
+/**
  * One entry from Docker's event stream, narrowed to what this plugin reads.
  *
  * Docker sends a great deal more per event — the image, the labels, the
