@@ -7,7 +7,13 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { asJson, createMockAgent, restoreGlobalDispatcher } from './support';
+import {
+  asJson,
+  createMockAgent,
+  expectAllConsumed,
+  expectNotRequested,
+  restoreGlobalDispatcher,
+} from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -263,12 +269,20 @@ describe('facade stack writes', () => {
     });
 
     it('refuses an action it does not have', async () => {
-      const res = await request(app()).post('/api/stacks/3/destroy');
+      // The redeploy is registered so that its staying unconsumed is what
+      // this asserts: an unknown action reaching the handler falls into the
+      // redeploy branch, and this stack is the git-backed one it would have
+      // deployed.
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/5/git/redeploy?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[2]);
+
+      const res = await request(app()).post('/api/stacks/5/destroy');
 
       expect(res.status).toBe(400);
       expect(asJson(res.body).hint).toContain('start, stop, redeploy');
-      // Nothing was asked of Portainer.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/5/git/redeploy?endpointId=1');
     });
 
     it('refuses a stack id that is not a number', async () => {
@@ -327,11 +341,18 @@ describe('facade stack writes', () => {
     });
 
     it('refuses an update with no file in it', async () => {
+      // The deploy a body with no compose file in it would otherwise have
+      // been sent as, registered here so it can be asserted unconsumed.
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[0]);
+
       const res = await request(app()).put('/api/stacks/3').send({ env: [] });
 
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('content is required');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/3?endpointId=1');
     });
 
     it('refuses an environment variable with no name', async () => {
@@ -376,7 +397,7 @@ describe('facade stack writes', () => {
       // Registered at /api/status, it never matched: the probe threw on every
       // create and the client swallowed it, so these tests were exercising the
       // failure path without saying so.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectAllConsumed(agent);
     });
 
     it('creates from a repository, mapping every field the route accepts', async () => {
@@ -481,13 +502,30 @@ describe('facade stack writes', () => {
     });
 
     it('refuses a name Docker would not accept', async () => {
+      // The create this name would have been deployed under.
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
+        .reply(200, { Id: 11, Name: '../etc', Type: 2, EndpointId: 1 });
+
       const res = await request(app())
         .post('/api/stacks')
         .send({ name: '../etc', content: 'services:\n' });
 
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('name is required');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/create/standalone/string?endpointId=1');
+      // The name is read before anything is asked of Portainer, so none of the
+      // three reads a create would start with happened either.
+      expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
+      expectNotRequested(agent, '/api/endpoints/1/docker/info');
+      expectNotRequested(agent, '/api/system/status');
     });
 
     it('refuses a create that names neither a file nor a repository', async () => {
@@ -510,11 +548,15 @@ describe('facade stack writes', () => {
 
   describe('delete', () => {
     it('is refused while destructive operations are off', async () => {
+      // The delete the gate stands in front of.
+      withStacks();
+      boat().intercept({ path: '/api/stacks/3?endpointId=1', method: 'DELETE' }).reply(204, '');
+
       const res = await request(app()).delete('/api/stacks/3');
 
       expect(res.status).toBe(403);
       expect(asJson(res.body).error).toContain('Destructive operations are disabled');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/3?endpointId=1');
     });
 
     it('never sends a volume option Portainer would ignore', async () => {
@@ -547,6 +589,11 @@ describe('facade stack writes', () => {
 
     it('answers malformed JSON in the same shape as everything else', async () => {
       // Express would answer this itself, with an HTML page.
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[0]);
+
       const res = await request(app())
         .put('/api/stacks/3')
         .set('content-type', 'application/json')
@@ -555,10 +602,15 @@ describe('facade stack writes', () => {
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('not valid JSON');
       expect(asJson(res.body).hint).toBeTruthy();
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/3?endpointId=1');
     });
 
     it('answers an oversized body as JSON too, and never reads it', async () => {
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[0]);
+
       const res = await request(app())
         .put('/api/stacks/3')
         .set('content-type', 'application/json')
@@ -566,7 +618,7 @@ describe('facade stack writes', () => {
 
       expect(res.status).toBe(413);
       expect(asJson(res.body).error).toContain('larger than 512kb');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/3?endpointId=1');
     });
 
     it('still refuses one the server parsed before the plugin saw it', async () => {
@@ -575,6 +627,11 @@ describe('facade stack writes', () => {
       // read a body twice, so the limit above was a no-op in production: an
       // oversized compose file arrived fully parsed, and the route that
       // documents a 512 kb ceiling had none.
+      withStacks();
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[0]);
+
       const host = express();
       host.use(express.json({ limit: '10mb' }));
       host.use(app());
@@ -586,7 +643,7 @@ describe('facade stack writes', () => {
 
       expect(res.status).toBe(413);
       expect(asJson(res.body).error).toContain('larger than 512kb');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/stacks/3?endpointId=1');
     });
   });
 
@@ -634,6 +691,31 @@ describe('facade stack writes', () => {
   describe('guards', () => {
     it('refuses every write while control is disabled', async () => {
       const off = app({ control: control({ allowPutControl: false }) });
+      // Every write the four requests below would make with the gate open,
+      // so that each one being left over is what this asserts.
+      withStacks();
+      // A stack write retires the cached list, so with the gate open each of
+      // these requests would resolve ownership through a fresh read of it.
+      boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks).times(3);
+      boat()
+        .intercept({ path: '/api/stacks/3', method: 'GET' })
+        .reply(200, fixtures.stacks[0])
+        .times(2);
+      boat()
+        .intercept({ path: '/api/stacks/3/stop?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
+      boat()
+        .intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' })
+        .reply(200, fixtures.stacks[0]);
+      boat()
+        .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
+        .reply(200, fixtures.standaloneInfo);
+      boat()
+        .intercept({ path: '/api/system/status', method: 'GET' })
+        .reply(200, { Version: '2.21.0' });
+      boat()
+        .intercept({ path: '/api/stacks/create/standalone/string?endpointId=1', method: 'POST' })
+        .reply(200, { Id: 11, Name: 'x', Type: 2, EndpointId: 1 });
 
       for (const send of [
         () => request(off).post('/api/stacks/3/stop'),
@@ -644,7 +726,13 @@ describe('facade stack writes', () => {
         const res = await send();
         expect(res.status).toBe(403);
       }
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      for (const path of [
+        '/api/stacks/3/stop?endpointId=1',
+        '/api/stacks/3?endpointId=1',
+        '/api/stacks/create/standalone/string?endpointId=1',
+      ]) {
+        expectNotRequested(agent, path);
+      }
     });
 
     it('refuses to stop the stack the Signal K container is in', async () => {

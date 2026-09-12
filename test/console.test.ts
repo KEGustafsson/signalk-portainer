@@ -204,6 +204,10 @@ describe('openConsole', () => {
     const { connect, upstream } = setup();
 
     const browser = await connect();
+    // Typed at the refused socket: without a message to forward, an upstream
+    // that saw nothing proves only that nothing was said.
+    browser.emit('message', 'ls\n');
+    await new Promise((resolve) => setImmediate(resolve));
 
     expect(browser.closed?.code).toBe(RELAY_CLOSE.unauthorized);
     expect(upstream.sent).toHaveLength(0);

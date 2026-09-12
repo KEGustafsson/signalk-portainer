@@ -11,7 +11,12 @@ import {
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { createMockAgent, restoreGlobalDispatcher } from './support';
+import {
+  createMockAgent,
+  expectAllConsumed,
+  expectNotRequested,
+  restoreGlobalDispatcher,
+} from './support';
 
 const SELF_ID = 'a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2';
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
@@ -26,6 +31,10 @@ const selfContainer: SelfContainer = {
 const instances = normalizeConfig({
   instances: [{ name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' }],
 }).instances;
+
+/** The environment read a Docker call makes before the call itself. */
+const ENVIRONMENTS = '/api/endpoints?excludeSnapshots=true';
+const stopPath = (id: string) => `/api/endpoints/1/docker/containers/${id}/stop`;
 
 const control = (overrides: Partial<PluginConfig['control']> = {}): PluginConfig['control'] => ({
   allowPutControl: true,
@@ -104,8 +113,28 @@ describe('PutHandlers', () => {
   const interceptEnvironment = () =>
     agent
       .get('https://boat.test:9443')
-      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .intercept({ path: ENVIRONMENTS, method: 'GET' })
       .reply(200, [fixtures.localEnvironment]);
+
+  /**
+   * The stop a refusal has to prevent, registered so that finding it untouched
+   * afterwards means something: an agent with nothing on it has nothing left
+   * over either. The environment read goes with it, because a guard that fired
+   * a moment too late would already have made that one.
+   */
+  const interceptStop = (id: string) => {
+    interceptEnvironment();
+    agent
+      .get('https://boat.test:9443')
+      .intercept({ path: stopPath(id), method: 'POST' })
+      .reply(204, '');
+  };
+
+  /** Neither half of that stop happened. */
+  const expectNoStop = (id: string) => {
+    expectNotRequested(agent, ENVIRONMENTS);
+    expectNotRequested(agent, stopPath(id));
+  };
 
   describe('the PUT allowlist at write time', () => {
     it('refuses a container dropped from the allowlist after its handler was given out', async () => {
@@ -239,7 +268,7 @@ describe('PutHandlers', () => {
       const result = await put(handlerFor({ registry: new InstanceRegistry(instances) }), value);
 
       expect(result).toMatchObject({ state: 'COMPLETED', statusCode: 200 });
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectAllConsumed(agent);
     });
 
     it('accepts the value whatever its case', async () => {
@@ -261,11 +290,14 @@ describe('PutHandlers', () => {
     });
 
     it('refuses a value it does not understand, without contacting Portainer', async () => {
+      // The stop an unrecognised value would become if it were guessed at.
+      interceptStop('c1f0e2a3b4c5');
+
       const result = await put(handlerFor(), 'obliterate');
 
       expect(result).toMatchObject({ state: 'FAILED', statusCode: 400 });
       expect(result.message).toContain('running, stopped, restart');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNoStop('c1f0e2a3b4c5');
     });
 
     it('refuses when control is disabled after the handler was registered', async () => {
@@ -285,16 +317,19 @@ describe('PutHandlers', () => {
       );
       puts.register('boat', ['influx'], 'system.docker');
       const handler = registered.at(-1)?.handler as ActionHandler;
+      interceptStop('c1f0e2a3b4c5');
 
       live = control({ allowPutControl: false });
       const result = await put(handler, 'stopped');
 
       expect(result).toMatchObject({ state: 'FAILED', statusCode: 403 });
       // And nothing was sent to Portainer.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNoStop('c1f0e2a3b4c5');
     });
 
     it('refuses to act on the container running Signal K', async () => {
+      interceptStop(SELF_ID);
+
       const result = await put(
         handlerFor(
           {
@@ -308,8 +343,7 @@ describe('PutHandlers', () => {
 
       expect(result).toMatchObject({ state: 'FAILED', statusCode: 403 });
       expect(result.message).toContain('running Signal K');
-      // Nothing was sent: no interceptor was registered at all.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNoStop(SELF_ID);
     });
 
     it('allows the Signal K container once self-management is enabled', async () => {
@@ -348,6 +382,9 @@ describe('PutHandlers', () => {
       // A poll refreshes the lookup table while a PUT is on its way, and the
       // two lookups used to collapse into "The plugin is not running" — a
       // statement about the plugin, for a plugin running perfectly well.
+      // The stop a second lookup skipped in favour of the first one's answer
+      // would send to a container that is no longer there.
+      interceptStop('c1f0e2a3b4c5');
       let lookups = 0;
       const handler = handlerFor({
         lookup: () => {
@@ -361,7 +398,7 @@ describe('PutHandlers', () => {
       expect(result).toMatchObject({ state: 'FAILED', statusCode: 404 });
       expect(result.message).toContain('No container is currently known for influx on boat');
       expect(result.message).not.toContain('not running');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNoStop('c1f0e2a3b4c5');
     });
 
     it('says the plugin is not running only when it really is not', async () => {

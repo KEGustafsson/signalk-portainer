@@ -4,7 +4,8 @@ import { normalizeConfig } from '../src/config';
 import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
-import { asJson, createMockAgent, restoreGlobalDispatcher } from './support';
+import * as fixtures from './fixtures';
+import { asJson, createMockAgent, expectNotRequested, restoreGlobalDispatcher } from './support';
 import type { MockAgent } from 'undici';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
@@ -39,6 +40,15 @@ const config = normalizeConfig({
   instances: [{ name: 'boat', host: 'boat.test', apiKey: 'ptr_boat' }],
 }).instances;
 
+/** The environment read every Docker call has to make before the call itself. */
+const ENVIRONMENTS = '/api/endpoints?excludeSnapshots=true';
+const DOCKER = '/api/endpoints/1/docker';
+const STOP = `${DOCKER}/containers/mosquitto/stop`;
+// `?all=true` asks for every unused image, which Docker takes as dangling=false.
+const PRUNE = `${DOCKER}/images/prune?filters=${encodeURIComponent(
+  JSON.stringify({ dangling: ['false'] }),
+)}`;
+
 describe('requests from another site', () => {
   let agent: MockAgent;
 
@@ -54,18 +64,28 @@ describe('requests from another site', () => {
 
   const app = () => buildApp(new InstanceRegistry(config));
 
+  const boat = () => agent.get('https://boat.test:9443');
+  const withEnvironment = () =>
+    boat().intercept({ path: ENVIRONMENTS, method: 'GET' }).reply(200, [fixtures.localEnvironment]);
+
   it('refuses a cross-site stop before it reaches Portainer', async () => {
     // The attack this exists for: a page the operator visits on marina wifi
     // posts to their own Signal K. No body means no preflight, so the browser
     // sends it with the session cookie attached and only hides the answer.
+    // Both halves of the stop are registered so that finding them untouched
+    // afterwards means something — an agent with nothing on it has nothing left
+    // over either — and the environment read catches a guard that fired late.
+    withEnvironment();
+    boat().intercept({ path: STOP, method: 'POST' }).reply(204, '');
+
     const res = await request(app())
       .post('/api/containers/mosquitto/stop')
       .set('Origin', 'https://not-the-boat.example');
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('another site');
-    // Nothing was asked of Portainer: no interceptor was ever registered.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, ENVIRONMENTS);
+    expectNotRequested(agent, STOP);
   });
 
   it('refuses a cross-site delete', async () => {
@@ -80,13 +100,17 @@ describe('requests from another site', () => {
     // Same shape as the stop above, and the same reason it gets through the
     // browser without a preflight: a POST with no body is a simple request.
     // What it destroys here is disk state rather than a running service.
+    withEnvironment();
+    boat().intercept({ path: PRUNE, method: 'POST' }).reply(200, { ImagesDeleted: [] });
+
     const res = await request(app())
       .post('/api/images/prune?all=true')
       .set('Origin', 'https://not-the-boat.example');
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('another site');
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, ENVIRONMENTS);
+    expectNotRequested(agent, PRUNE);
   });
 
   it('refuses a cross-site image delete', async () => {

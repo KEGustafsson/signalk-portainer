@@ -224,6 +224,17 @@ describe('ConsoleDialog', () => {
 
     await act(() => Promise.resolve(terminal.resize({ cols: 80, rows: 24 })));
 
+    // The 404 has been answered and handled before the absence is asserted:
+    // without waiting for the round trip, a banner raised a microtask later
+    // would go unnoticed and this would pass whatever the dialog did.
+    await waitFor(() =>
+      expect(fetchMock.mock.calls.some((call) => String(call[0]).includes('/console/resize'))).toBe(
+        true,
+      ),
+    );
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
     expect(screen.getByText('Connected')).toBeInTheDocument();
   });
