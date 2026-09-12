@@ -29,6 +29,12 @@ describe('PortainerClient stack writes', () => {
       .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
       .reply(200, [fixtures.localEnvironment]);
     pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    // The writes that echo a record back to preserve it read the stack itself
+    // as well, rather than trust a list cached for fifteen seconds. Registered
+    // for every fixture stack, and an unused interceptor is not an error.
+    for (const stack of fixtures.stacks) {
+      pool.intercept({ path: `/api/stacks/${stack.Id}`, method: 'GET' }).reply(200, stack);
+    }
     // Only a create needs it, but an unused interceptor is not an error.
     pool
       .intercept({ path: '/api/endpoints/1/docker/info', method: 'GET' })
@@ -189,9 +195,11 @@ describe('PortainerClient stack writes', () => {
     pool
       .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
       .reply(200, [fixtures.localEnvironment]);
-    pool
-      .intercept({ path: '/api/stacks', method: 'GET' })
-      .reply(200, [{ ...fixtures.stacks[0], AutoUpdate: { Webhook: 'abc-123' } }]);
+    const held = { ...fixtures.stacks[0], AutoUpdate: { Webhook: 'abc-123' } };
+    pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, [held]);
+    // The update reads the stack itself for the environment it echoes back, so
+    // that is where the auto-update it is about to lose is read from too.
+    pool.intercept({ path: '/api/stacks/3', method: 'GET' }).reply(200, held);
     pool.intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' }).reply(200, {});
 
     const client = createClient(agent);
@@ -494,6 +502,67 @@ describe('PortainerClient stack writes', () => {
     expect(body.RepositoryAuthentication).toBe(false);
   });
 
+  it('updates with the environment the stack has now, not the cached one', async () => {
+    // The environment is echoed back to preserve it, which is the whole point
+    // of reading it — so reading a copy up to fifteen seconds old would have
+    // this request revert a variable changed in Portainer's own UI meanwhile.
+    // The write does retire that cache, but only after sending.
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    pool
+      .intercept({ path: '/api/stacks/3', method: 'GET' })
+      .reply(200, { ...fixtures.stacks[0], Env: [{ name: 'TZ', value: 'UTC' }] });
+    let body: Record<string, unknown> = {};
+    pool.intercept({ path: '/api/stacks/3?endpointId=1', method: 'PUT' }).reply(200, (opts) => {
+      body = jsonBody(opts.body);
+      return {};
+    });
+
+    await createClient(agent).updateStack(3, { content: 'services:\n' });
+
+    expect(body.Env).toEqual([{ name: 'TZ', value: 'UTC' }]);
+  });
+
+  it('redeploys against the branch and credentials the stack has now', async () => {
+    // Same hazard on the redeploy: the branch, the environment and the stored
+    // credentials are all sent back to keep them, so all three have to be read
+    // as they are rather than as the list last saw them.
+    const pool = agent.get(BASE_URL);
+    pool
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    pool.intercept({ path: '/api/stacks/5', method: 'GET' }).reply(200, {
+      ...fixtures.stacks[2],
+      Env: [{ name: 'MMSI', value: '230123456' }],
+      GitConfig: {
+        URL: 'https://example.test/boat/stacks',
+        ReferenceName: 'refs/heads/winter',
+        Authentication: { Username: 'deploy', GitCredentialID: 4 },
+      },
+    });
+    let body: Record<string, unknown> = {};
+    pool
+      .intercept({ path: '/api/stacks/5/git/redeploy?endpointId=1', method: 'PUT' })
+      .reply(200, (opts) => {
+        body = jsonBody(opts.body);
+        return {};
+      });
+
+    await createClient(agent).redeployStack(5);
+
+    expect(body.RepositoryReferenceName).toBe('refs/heads/winter');
+    expect(body.Env).toEqual([{ name: 'MMSI', value: '230123456' }]);
+    // Stored credentials asked for by name with a blank password, which is how
+    // this API is told to keep the one it holds.
+    expect(body.RepositoryAuthentication).toBe(true);
+    expect(body.RepositoryUsername).toBe('deploy');
+    expect(body.RepositoryPassword).toBe('');
+  });
+
   it('refuses to redeploy a stack that has no repository', async () => {
     withStacks();
 
@@ -529,8 +598,14 @@ describe('PortainerClient stack writes', () => {
       expect(error).toBeInstanceOf(PortainerError);
       expect((error as PortainerError).status).toBe(404);
     }
-    // Nothing was ever asked of the stack itself.
-    expect(pendingPaths(agent).filter((path) => path.includes('stacks/9'))).toHaveLength(0);
+    // Nothing was ever asked of the stack itself. The per-stack interceptor is
+    // registered and must still be *unconsumed*: a stack in another
+    // environment is refused from the list alone, so the fresh read the
+    // echoing writes make is never reached. Asserted this way round because
+    // the filter finding nothing would pass whether or not the read happened.
+    expect(pendingPaths(agent).filter((path) => path === '/api/stacks/9').length).toBeGreaterThan(
+      0,
+    );
   });
 
   it('creates a standalone stack on a daemon that is not a swarm', async () => {

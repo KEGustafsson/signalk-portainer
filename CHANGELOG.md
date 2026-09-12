@@ -7,6 +7,26 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stack write no longer reverts what it was meant to preserve.** Portainer's
+  update and redeploy routes rewrite a stack's environment — and the redeploy
+  its branch and stored git credentials too — from whatever the request
+  carries, with no field meaning "leave that alone". So the plugin reads those
+  fields off the stack and sends them back unchanged. It was reading them from
+  the stack list, which is cached for fifteen seconds: the write retires that
+  cache, but only after sending, so a variable or a branch changed in
+  Portainer's own UI moments earlier was reverted by the very payload written
+  to keep it. Both now read the stack itself. The ownership refusal still comes
+  from the cached list, since that is what can name the stacks the environment
+  does have.
+
+  Two tests were also asserting nothing. One checked that a stack in another
+  environment is never read by filtering for interceptors that had never been
+  registered; the other proved the self-management guard skips the container
+  list the same way. Both now register what must not be requested and assert it
+  went unconsumed.
+
 ### Added
 
 - **A git stack's auto-update can be seen and changed.** `PUT
