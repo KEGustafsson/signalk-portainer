@@ -9,6 +9,37 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ### Added
 
+- **A git stack's auto-update can be seen and changed.** `PUT
+/stacks/:id/autoupdate`, and an **Auto-update** action on every stack
+  deployed from a repository. The plugin could already read whether Portainer
+  was redeploying a stack by itself and could change none of it: the schedule
+  and the webhook were set when the stack was created and were untouchable
+  afterwards.
+
+  The dialog offers both triggers — a schedule that re-reads the repository,
+  and a URL that redeploys when something calls it — either, both or neither,
+  with the webhook URL shown in full so it can be pasted where it fires from.
+  Turning both off turns auto-update off, which the button says rather than
+  leaving it to be discovered: Portainer replaces the whole record and accepts
+  none that carries neither trigger, so there is no request that changes one
+  and leaves the other alone.
+
+  Two guards that are not Portainer's. A polling interval shorter than a
+  minute is refused, because each poll is a git fetch over the boat's link and
+  Portainer's scheduler applies no floor of its own — it polls at whatever Go's
+  duration parser returns, `0s` included. And turning auto-update _on_ for the
+  stack holding the Signal K container is refused unless self-management is
+  enabled, since that schedules the plugin's own restart at a time git chooses;
+  turning it off is never refused, being the cure for exactly that.
+
+  The route behind this rewrites more than auto-update. On every Portainer from
+  2.19 to the current one it assigns the tracked branch, the environment, the
+  TLS setting, the swarm prune option and the stored git credentials straight
+  from the payload, with no field meaning "leave that alone" — so a request
+  naming only auto-update would blank the branch, drop every environment
+  variable and delete the credentials the stack clones with. Each is read off
+  the stack and sent back unchanged.
+
 - **A private registry can be pulled from.** `POST /images/pull` now takes a
   `registryId`, and the Images tab has a **Fetch image** button with a registry
   picker behind it — the pull that the previous release added could only reach

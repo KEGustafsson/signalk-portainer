@@ -9,7 +9,7 @@
 import type { Stack } from '../types';
 import type { ControlState } from './control';
 
-export const STACK_ACTIONS = ['edit', 'start', 'stop', 'redeploy', 'delete'] as const;
+export const STACK_ACTIONS = ['edit', 'start', 'stop', 'redeploy', 'autoupdate', 'delete'] as const;
 export type StackAction = (typeof STACK_ACTIONS)[number];
 
 const LABELS: Record<StackAction, string> = {
@@ -17,6 +17,7 @@ const LABELS: Record<StackAction, string> = {
   start: 'Start',
   stop: 'Stop',
   redeploy: 'Redeploy',
+  autoupdate: 'Auto-update',
   delete: 'Delete',
 };
 
@@ -49,7 +50,11 @@ export function isFromGit(stack: Stack): boolean {
 export function stackActionsFor(stack: Stack): StackAction[] {
   const actions: StackAction[] = ['edit'];
   if (stack.Type !== KUBERNETES) actions.push(isActive(stack) ? 'stop' : 'start');
-  if (isFromGit(stack)) actions.push('redeploy');
+  // Both only for a git stack: there is nothing to redeploy from otherwise,
+  // and auto-update is Portainer re-reading the repository, which a stack
+  // without one cannot do. Portainer accepts the setting on its git create
+  // routes and nowhere else.
+  if (isFromGit(stack)) actions.push('redeploy', 'autoupdate');
   actions.push('delete');
   return actions;
 }
@@ -100,7 +105,71 @@ export function stackActionState(
   if (action === 'redeploy' && !isFromGit(stack)) {
     return { enabled: false, reason: 'this stack has no repository to redeploy from' };
   }
+  if (action === 'autoupdate' && !isFromGit(stack)) {
+    return {
+      enabled: false,
+      reason: 'auto-update re-reads the stack’s repository, and this stack has none',
+    };
+  }
   return { enabled: true };
+}
+
+/** Auto-update as the stack reports it, or undefined when it has none. */
+export interface AutoUpdateState {
+  interval?: string;
+  webhook?: string;
+  pullImage: boolean;
+  force: boolean;
+}
+
+/** What the stack currently has, in the shape the dialog edits. */
+export function autoUpdateOf(stack: Stack | undefined): AutoUpdateState {
+  const held = stack?.AutoUpdate ?? undefined;
+  return {
+    ...(typeof held?.Interval === 'string' && held.Interval !== ''
+      ? { interval: held.Interval }
+      : {}),
+    ...(typeof held?.Webhook === 'string' && held.Webhook !== '' ? { webhook: held.Webhook } : {}),
+    pullImage: held?.ForcePullImage === true,
+    force: held?.ForceUpdate === true,
+  };
+}
+
+/**
+ * Where a webhook fires.
+ *
+ * Portainer's route, not the plugin's: the operator pastes this into GitHub or
+ * whatever else pushes to the repository, and the request goes straight to
+ * Portainer without Signal K in the path. Built in one place because the
+ * dialog shows it both for a webhook that already exists and for one just
+ * created, and two copies of a URL drift into one that does not work.
+ */
+export function webhookUrl(baseUrl: string | undefined, webhook: string): string | undefined {
+  const base = (baseUrl ?? '').replace(/\/+$/, '');
+  if (base === '') return undefined;
+  return `${base}/api/stacks/webhooks/${webhook}`;
+}
+
+/**
+ * Why an interval will not be accepted, or undefined when it will.
+ *
+ * The same grammar and the same floor the facade applies, so a typo is caught
+ * under the box that produced it rather than as a 400 after the press. Go's
+ * duration units, narrowed to the three worth offering: Portainer hands the
+ * string to `time.ParseDuration`, and its scheduler polls at whatever comes
+ * out — `0s` included.
+ */
+export function intervalProblem(interval: string): string | undefined {
+  const trimmed = interval.trim();
+  if (trimmed === '') return undefined;
+  if (!/^(?:\d+h)?(?:\d+m)?(?:\d+s)?$/.test(trimmed)) {
+    return 'Hours, minutes and seconds, like 30m, 2h or 1h30m';
+  }
+  const unit = (suffix: string): number =>
+    Number(new RegExp(`(\\d+)${suffix}`).exec(trimmed)?.[1] ?? 0);
+  const seconds = (unit('h') * 60 + unit('m')) * 60 + unit('s');
+  if (seconds < 60) return 'A poll is a git fetch over this link; a minute is the shortest allowed';
+  return undefined;
 }
 
 /** One environment variable as the editor holds it. */

@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import { Agent, getGlobalDispatcher, fetch as undiciFetch, type Dispatcher } from 'undici';
 import { TtlCache, TTL } from './cache';
@@ -100,6 +101,22 @@ function pairs(env: readonly StackEnvVar[]): { name: string; value: string }[] {
     .map((entry) => ({ name: entry.name, value: String(entry.value ?? '') }));
 }
 
+/**
+ * A polling interval in milliseconds, or undefined when it is not one.
+ *
+ * Portainer stores the string and hands it to Go's `time.ParseDuration`, so
+ * the grammar has to be Go's. Only hours, minutes and seconds are taken: the
+ * smaller units Go also knows are every one of them shorter than the floor
+ * below, and a duration that cannot be read is refused rather than rounded, so
+ * an operator who typed one thing is never quietly given another.
+ */
+function intervalMs(interval: string): number | undefined {
+  if (!/^(?:\d+h)?(?:\d+m)?(?:\d+s)?$/.test(interval) || interval === '') return undefined;
+  const unit = (suffix: string): number =>
+    Number(new RegExp(`(\\d+)${suffix}`).exec(interval)?.[1] ?? 0);
+  return ((unit('h') * 60 + unit('m')) * 60 + unit('s')) * 1_000;
+}
+
 /** One `NAME=value` pair as Portainer carries it. */
 export interface StackEnvVar {
   name: string;
@@ -129,6 +146,45 @@ export interface StackUpdateResult {
 }
 
 /** A redeploy of a stack whose file lives in git; the file comes from there. */
+/**
+ * What auto-update should look like after the write.
+ *
+ * Absent fields are off, not unchanged: Portainer's route replaces the whole
+ * `AutoUpdate` record, so there is nothing here that could mean "leave that
+ * part alone" — the caller says what the stack should end up with.
+ */
+export interface StackAutoUpdate {
+  /** How often to poll the repository. Absent means do not poll. */
+  interval?: string;
+  /** Whether Portainer should hold a webhook URL that redeploys this stack. */
+  webhook?: boolean;
+  /** Re-pull the images, rather than only re-reading the compose file. */
+  pullImage?: boolean;
+  /** Redeploy on every poll, even when the repository has not moved. */
+  force?: boolean;
+}
+
+/** Auto-update as it stands after the write, for the panel to show. */
+export interface StackAutoUpdateState {
+  /** Absent when nothing polls. */
+  interval?: string;
+  /** The webhook id, when Portainer holds one. The URL is built from it. */
+  webhook?: string;
+  pullImage: boolean;
+  force: boolean;
+}
+
+/**
+ * The shortest polling interval this plugin will set.
+ *
+ * Portainer's scheduler takes whatever `time.ParseDuration` accepts and never
+ * looks at the value, so `0s` — and a negative duration — start a job that
+ * fetches the repository as fast as the link allows. On a boat that is the
+ * difference between a background task and a bill, and Portainer's own UI
+ * offers nothing shorter than a minute either.
+ */
+const MIN_AUTO_UPDATE_MS = 60_000;
+
 export interface StackRedeploy {
   prune?: boolean;
   pullImage?: boolean;
@@ -1595,6 +1651,99 @@ export class PortainerClient {
     // field that could have kept it. Reported rather than swallowed: a webhook
     // that stops firing is otherwise discovered by it not firing.
     return { autoUpdateRemoved: Boolean(stack.AutoUpdate?.Webhook ?? stack.AutoUpdate?.Interval) };
+  }
+
+  /**
+   * Sets, changes or turns off a git stack's auto-update.
+   *
+   * Only a git-backed stack can have one. Portainer accepts `AutoUpdate` on
+   * its git create routes and nowhere else, and the route that changes it
+   * afterwards refuses a stack with no repository config — with a 500 about
+   * its own datastore, so the refusal is made here instead.
+   *
+   * That route rewrites a good deal more than auto-update. On every release
+   * from 2.19 to the current one it assigns `ReferenceName`, `TLSSkipVerify`,
+   * `Env`, the swarm prune option and the git credentials straight from the
+   * payload, with no field meaning "leave that alone". A request that talked
+   * only about auto-update would therefore blank the branch the stack tracks,
+   * drop every environment variable it runs with, and delete the credentials
+   * it clones with. Each is read off the stack and sent back unchanged; the
+   * password is sent blank, which is how this API has always been told to keep
+   * the one it holds.
+   */
+  async stackAutoUpdate(id: number, settings: StackAutoUpdate): Promise<StackAutoUpdateState> {
+    const path = `/api/stacks/${id}/git`;
+    const stack = await this.ownStack(id, 'POST', path);
+    if (!stack.GitConfig?.URL) {
+      throw new PortainerError({
+        status: 400,
+        method: 'POST',
+        path,
+        message: `Stack ${stack.Name} was not deployed from a repository`,
+        hint: 'auto-update redeploys from git, so only a git-backed stack can have it',
+      });
+    }
+
+    const interval = settings.interval?.trim() ?? '';
+    if (interval !== '') {
+      const every = intervalMs(interval);
+      if (every === undefined) {
+        throw new PortainerError({
+          status: 400,
+          method: 'POST',
+          path,
+          message: `"${interval}" is not an interval`,
+          hint: 'hours, minutes and seconds, like 30m, 2h or 1h30m',
+        });
+      }
+      if (every < MIN_AUTO_UPDATE_MS) {
+        throw new PortainerError({
+          status: 400,
+          method: 'POST',
+          path,
+          message: `Polling every ${interval} is too often`,
+          hint: 'a poll is a git fetch over this link; a minute is the shortest allowed',
+        });
+      }
+    }
+
+    // Kept rather than reissued: the URL is already configured wherever it
+    // fires from, and turning polling on is no reason to break it. A new one
+    // is minted only when the stack has none.
+    const webhook =
+      settings.webhook === true ? (stack.AutoUpdate?.Webhook ?? randomUUID()) : undefined;
+    const wanted = interval !== '' || webhook !== undefined;
+    const autoUpdate = wanted
+      ? {
+          ...(interval === '' ? {} : { Interval: interval }),
+          ...(webhook === undefined ? {} : { Webhook: webhook }),
+          ForceUpdate: settings.force === true,
+          ForcePullImage: settings.pullImage === true,
+        }
+      : null;
+
+    const stored = stack.GitConfig.Authentication ?? undefined;
+    await this.stackWrite('POST', `${path}?${await this.endpointQuery()}`, {
+      AutoUpdate: autoUpdate,
+      Env: pairs(stack.Env ?? []),
+      RepositoryReferenceName: stack.GitConfig.ReferenceName ?? '',
+      TLSSkipVerify: stack.GitConfig.TLSSkipVerify === true,
+      // Swarm rewrites the stack's own prune option from this; compose ignores
+      // it. Either way it is the stack's current setting, not a new one.
+      Prune: stack.Option?.Prune === true,
+      RepositoryAuthentication: stored !== undefined,
+      ...(stored ? { RepositoryUsername: stored.Username ?? '', RepositoryPassword: '' } : {}),
+    });
+
+    // No wait for the stack to settle, unlike the deploying writes: this one
+    // stores settings and restarts the polling job. Nothing is redeployed, so
+    // there is no container state to arrive.
+    return {
+      ...(interval === '' ? {} : { interval }),
+      ...(webhook === undefined ? {} : { webhook }),
+      pullImage: settings.pullImage === true,
+      force: settings.force === true,
+    };
   }
 
   /**

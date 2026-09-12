@@ -214,6 +214,220 @@ describe('PortainerClient stack writes', () => {
     });
   });
 
+  describe('auto-update', () => {
+    /** A git stack with everything the route would overwrite if not echoed. */
+    const gitStack = {
+      Id: 5,
+      Name: 'from-git',
+      Type: 2,
+      EndpointId: 1,
+      Status: 1,
+      Env: [
+        { name: 'TZ', value: 'Europe/Helsinki' },
+        { name: 'MMSI', value: '230123456' },
+      ],
+      GitConfig: {
+        URL: 'https://example.test/boat/stacks',
+        ReferenceName: 'refs/heads/main',
+        TLSSkipVerify: true,
+        Authentication: { Username: 'deploy', GitCredentialID: 4 },
+      },
+    };
+
+    /** The stack list, with the git stack in the shape a test wants it. */
+    const withGitStack = (overrides: Record<string, unknown> = {}) => {
+      const pool = agent.get(BASE_URL);
+      pool
+        .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+        .reply(200, [fixtures.localEnvironment]);
+      pool
+        .intercept({ path: '/api/stacks', method: 'GET' })
+        .reply(200, [{ ...gitStack, ...overrides }]);
+      return pool;
+    };
+
+    /** Captures the body the write sent. */
+    const capture = (pool: ReturnType<typeof withGitStack>) => {
+      const sent: { body?: Record<string, unknown> } = {};
+      pool
+        .intercept({ path: '/api/stacks/5/git?endpointId=1', method: 'POST' })
+        .reply(200, (opts) => {
+          sent.body = jsonBody(opts.body);
+          return {};
+        });
+      return sent;
+    };
+
+    it('does not destroy the rest of the stack on the way past', async () => {
+      // The route this uses assigns the branch, the environment, the TLS
+      // setting and the git credentials straight from the payload, with no
+      // field that means "leave that alone". A request that talked only about
+      // auto-update would blank the branch, drop both variables and delete the
+      // credentials the stack clones with — so every one of them goes back
+      // exactly as it came, and the password blank, which is how this API is
+      // told to keep the one it holds.
+      const pool = withGitStack();
+      const sent = capture(pool);
+
+      await createClient(agent).stackAutoUpdate(5, { interval: '30m' });
+
+      expect(sent.body).toEqual({
+        AutoUpdate: { Interval: '30m', ForceUpdate: false, ForcePullImage: false },
+        Env: [
+          { name: 'TZ', value: 'Europe/Helsinki' },
+          { name: 'MMSI', value: '230123456' },
+        ],
+        RepositoryReferenceName: 'refs/heads/main',
+        TLSSkipVerify: true,
+        Prune: false,
+        RepositoryAuthentication: true,
+        RepositoryUsername: 'deploy',
+        RepositoryPassword: '',
+      });
+    });
+
+    it('sends the swarm prune option back as it found it', async () => {
+      // Swarm rewrites the stack's own option from this field; a stack pruning
+      // on redeploy would otherwise stop doing so the moment anyone touched
+      // its schedule.
+      const pool = withGitStack({ Type: 1, Option: { Prune: true } });
+      const sent = capture(pool);
+
+      await createClient(agent).stackAutoUpdate(5, { interval: '1h' });
+
+      expect(sent.body?.Prune).toBe(true);
+    });
+
+    it('says nothing about credentials for a repository that needs none', async () => {
+      const pool = withGitStack({
+        GitConfig: { URL: 'https://example.test/boat/stacks', ReferenceName: 'refs/heads/main' },
+      });
+      const sent = capture(pool);
+
+      await createClient(agent).stackAutoUpdate(5, { interval: '1h' });
+
+      // Not `false` with empty strings beside it: the route reads the flag and
+      // clears what it holds either way, and a public repository has nothing
+      // to keep.
+      expect(sent.body?.RepositoryAuthentication).toBe(false);
+      expect(sent.body).not.toHaveProperty('RepositoryUsername');
+      expect(sent.body?.TLSSkipVerify).toBe(false);
+    });
+
+    it('mints a webhook id and hands back the one it used', async () => {
+      const pool = withGitStack();
+      const sent = capture(pool);
+
+      const state = await createClient(agent).stackAutoUpdate(5, { webhook: true });
+
+      const asked = sent.body?.AutoUpdate as Record<string, unknown>;
+      // Portainer refuses anything that is not a UUID, and generates none of
+      // its own — the id is the client's to make.
+      expect(String(asked.Webhook)).toMatch(
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/,
+      );
+      expect(asked).not.toHaveProperty('Interval');
+      expect(state.webhook).toBe(asked.Webhook);
+      expect(state.interval).toBeUndefined();
+    });
+
+    it('keeps a webhook the stack already has rather than reissuing it', async () => {
+      // The URL is already configured wherever it fires from. Turning polling
+      // on as well is no reason to break it.
+      const held = '05de31a2-79fa-4644-9c12-faa67e5c49f0';
+      const pool = withGitStack({ AutoUpdate: { Webhook: held } });
+      const sent = capture(pool);
+
+      const state = await createClient(agent).stackAutoUpdate(5, {
+        webhook: true,
+        interval: '2h',
+        pullImage: true,
+      });
+
+      expect(sent.body?.AutoUpdate).toEqual({
+        Interval: '2h',
+        Webhook: held,
+        ForceUpdate: false,
+        ForcePullImage: true,
+      });
+      expect(state).toEqual({ interval: '2h', webhook: held, pullImage: true, force: false });
+    });
+
+    it('turns auto-update off with a null, which is what the route reads', async () => {
+      const pool = withGitStack({ AutoUpdate: { Interval: '5m', JobID: '12' } });
+      const sent = capture(pool);
+
+      const state = await createClient(agent).stackAutoUpdate(5, {});
+
+      // Not an empty object: Portainer refuses a record carrying neither a
+      // webhook nor an interval, and null is what it reads as "none".
+      expect(sent.body?.AutoUpdate).toBeNull();
+      expect(state).toEqual({ pullImage: false, force: false });
+    });
+
+    it('refuses a stack that has no repository, rather than passing it on', async () => {
+      // Portainer answers this with a 500 about its own datastore, and only a
+      // git stack can carry the setting in the first place: its create routes
+      // accept it on the repository ones and nowhere else.
+      const pool = agent.get(BASE_URL);
+      pool
+        .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+        .reply(200, [fixtures.localEnvironment]);
+      pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+
+      const error = await createClient(agent)
+        .stackAutoUpdate(3, { interval: '1h' })
+        .catch((cause: unknown) => cause);
+
+      expect(error).toBeInstanceOf(PortainerError);
+      expect((error as PortainerError).status).toBe(400);
+      expect((error as PortainerError).message).toMatch(/not deployed from a repository/);
+      expect(pendingPaths(agent).filter((path) => path.includes('/git'))).toHaveLength(0);
+    });
+
+    it('refuses an interval Portainer would take but nobody meant', async () => {
+      // `time.ParseDuration` reads every one of these, and Portainer's
+      // scheduler never looks at the value — `0s` starts a job that fetches
+      // the repository as fast as the link allows. On a boat that is a bill.
+      const client = createClient(agent);
+      for (const interval of ['0s', '30s', '59s', '0m']) {
+        withGitStack();
+        const error = await client
+          .stackAutoUpdate(5, { interval })
+          .catch((cause: unknown) => cause);
+
+        expect(error).toBeInstanceOf(PortainerError);
+        expect((error as PortainerError).status).toBe(400);
+        expect((error as PortainerError).message).toMatch(/too often/);
+      }
+    });
+
+    it('refuses an interval that is not a duration at all', async () => {
+      const client = createClient(agent);
+      // The last two are Go durations this deliberately does not take: a day
+      // is not a unit `time.ParseDuration` knows, and milliseconds are all
+      // below the floor anyway.
+      for (const interval of ['soon', '30', '5x', '30m1h', '1d', '1000ms']) {
+        withGitStack();
+        const error = await client
+          .stackAutoUpdate(5, { interval })
+          .catch((cause: unknown) => cause);
+
+        expect(error).toBeInstanceOf(PortainerError);
+        expect((error as PortainerError).message).toMatch(/is not an interval/);
+      }
+    });
+
+    it('takes the compound durations Go writes', async () => {
+      const pool = withGitStack();
+      const sent = capture(pool);
+
+      await createClient(agent).stackAutoUpdate(5, { interval: '1h30m' });
+
+      expect((sent.body?.AutoUpdate as Record<string, unknown>).Interval).toBe('1h30m');
+    });
+  });
+
   it('redeploys a git stack from the reference it was deployed from', async () => {
     const pool = withStacks();
     let body: Record<string, unknown> = {};

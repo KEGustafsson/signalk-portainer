@@ -285,6 +285,10 @@ any auto-update Portainer had on it, and the answer says so. `prune` is always
 sent explicitly and defaults to off; turning it on needs **Allow destructive
 operations**, because pruning removes whatever the new file stopped naming.
 
+A stack deployed from a repository also carries an **Auto-update** action, which
+is Portainer redeploying that stack without the panel involved. See
+[Auto-update on a git stack](#auto-update-on-a-git-stack).
+
 ![The Stacks tab: three stacks with their status, type and source — one of them from a git repository, which is the one offering Redeploy](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stacks.png)
 
 ![The stack editor open on a compose file, its environment variables listed below it, toggles for pruning and re-pulling, and a Deploy button disabled beside the words "No changes"](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/panel-stack-editor.png)
@@ -465,6 +469,7 @@ enabled instance (`/instances` and `/health` span them all, and
 | `POST /stacks`                             | create from `content` or from `repositoryUrl`                                                         |
 | `POST /stacks/:id/:action`                 | `start` · `stop` · `redeploy` (`?prune=` needs destructive, `?pullImage=`)                            |
 | `PUT /stacks/:id`                          | deploy a new compose file and environment (`prune` needs destructive; refused for a git-backed stack) |
+| `PUT /stacks/:id/autoupdate`               | set, change or turn off a git stack's auto-update (`{ interval, webhook, pullImage, force }`)         |
 | `DELETE /stacks/:id`                       | delete — Portainer CE cannot remove a stack's volumes with it                                         |
 | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                                              |
 | `DELETE /images/:reference`                | remove one image by id or tag — never forced, so Docker still refuses one in use                      |
@@ -508,6 +513,15 @@ containers are updated by redeploying the stack instead.
 a JSON body: `{ prune, pullImage, username, password }`. The credentials are for
 a private repository whose stored ones need replacing — a token belongs in no URL.
 A redeploy that sends none reuses what Portainer stored with the stack.
+
+`PUT /stacks/:id/autoupdate` takes `{ interval, webhook, pullImage, force }` and
+is the only way to change a stack's auto-update. Every field is optional and
+every absent field means **off**, because Portainer replaces the whole record
+rather than merging into it: there is no request that changes the interval and
+leaves the webhook alone. An empty body is therefore how auto-update is turned
+off. `interval` is a duration in hours, minutes and seconds — `30m`, `2h`,
+`1h30m` — and `webhook: true` keeps the URL the stack already has, or has
+Portainer issue one. The answer carries the state the stack ended up with.
 
 A stack write now waits for the deploy to finish. Portainer 2.42 and newer answer
 an update or a redeploy immediately and do the work in the background (2.44 for a
@@ -664,6 +678,45 @@ environment and needs only an authenticated credential. Portainer's global
 README recommends a scoped token, and this way one works. A registry Portainer
 holds no credentials for is marked as such in the picker, since choosing it
 changes nothing about the pull.
+
+### Auto-update on a git stack
+
+A stack deployed from a repository can be redeployed by Portainer itself,
+without the panel, the plugin or anyone on board being involved. There are two
+independent triggers and a stack may have either, both or neither:
+
+- a **schedule**, which has Portainer re-read the repository every so often and
+  redeploy if the commit moved, and
+- a **webhook**, a URL on Portainer that redeploys the stack whenever something
+  calls it — typically a git host, on push.
+
+The schedule is the one that costs. Each check is a git fetch made from the
+boat, so its interval is a bandwidth decision rather than a freshness one: on a
+satellite or cellular link a stack polling every minute is a bill, and there is
+usually no reason to look more than a few times a day. A minute is the shortest
+this plugin will set. Portainer's own scheduler applies no floor at all — it
+passes the string to Go's duration parser and polls at whatever comes out, `0s`
+included, which is a fetch as fast as the link allows.
+
+Turning auto-update **on** for the stack that holds the Signal K container is
+refused, like every other way of disrupting it, unless **Allow managing the
+Signal K container itself** is on: an unattended redeploy of that stack is the
+plugin being restarted at a time git chooses. Turning it **off** is never
+refused, since that is the cure.
+
+The webhook URL is Portainer's own — `/api/stacks/webhooks/{id}` on the address
+the plugin is configured to reach it at — so whatever calls it talks to
+Portainer directly, with Signal K nowhere in the path. It carries no credential
+of its own: anyone who has the URL can redeploy that stack, which is worth
+bearing in mind before it goes anywhere. Turning the webhook off and on again
+issues a new one and retires the old.
+
+One thing the API cannot do is put back an auto-update that Portainer itself
+removed. Portainer clears the setting on any file-based update of a stack, and
+accepts it only on a git-backed one — so a stack that has lost its repository
+config has nowhere for the setting to live, and the only route that could set
+it refuses that stack. The plugin refuses a file deploy over a git stack for
+this reason among others.
 
 ### Who may write
 
