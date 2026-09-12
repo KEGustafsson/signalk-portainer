@@ -9,7 +9,13 @@ import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
 import type { SelfContainer } from '../src/self';
 import * as fixtures from './fixtures';
-import { asJson, type JsonBody, createMockAgent, restoreGlobalDispatcher } from './support';
+import {
+  asJson,
+  type JsonBody,
+  createMockAgent,
+  expectNotRequested,
+  restoreGlobalDispatcher,
+} from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -85,18 +91,32 @@ describe('facade console', () => {
   });
 
   const boat = () => agent.get('https://boat.test:9443');
+  /** The environment read a Docker call makes before the call itself. */
+  const ENVIRONMENTS = '/api/endpoints?excludeSnapshots=true';
   const withEnvironment = () =>
-    boat()
-      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
-      .reply(200, [fixtures.localEnvironment]);
+    boat().intercept({ path: ENVIRONMENTS, method: 'GET' }).reply(200, [fixtures.localEnvironment]);
 
   const CONTAINER = 'c1f0e2a3b4c5d6e7f8a9b0c1';
+  const execPath = (id: string) => `/api/endpoints/1/docker/containers/${id}/exec`;
+
+  /**
+   * Neither half of the exec creation happened.
+   *
+   * Its callers register both halves first, which is what makes finding them
+   * untouched mean something: an agent with nothing on it has nothing left over
+   * either. The environment read is in here because a guard that fired a moment
+   * too late would already have made that one.
+   */
+  const expectNoExec = (id: string) => {
+    expectNotRequested(agent, ENVIRONMENTS);
+    expectNotRequested(agent, execPath(id));
+  };
 
   /** Docker's answer to the exec creation. */
   const withExec = (capture?: (body: Record<string, unknown>) => void) =>
     boat()
       .intercept({
-        path: `/api/endpoints/1/docker/containers/${CONTAINER}/exec`,
+        path: execPath(CONTAINER),
         method: 'POST',
         body: (value: string) => {
           capture?.(JSON.parse(value) as Record<string, unknown>);
@@ -140,12 +160,15 @@ describe('facade console', () => {
   it('takes a command only as a list of strings', async () => {
     // A command assembled from text and handed to a shell is how a request
     // becomes an injection; Docker takes argv, so there is no shell in between.
+    withEnvironment();
+    withExec();
+
     for (const command of ['rm -rf /', [], ['ok', 42], ['']]) {
       const res = await request(app()).post(`/api/containers/${CONTAINER}/exec`).send({ command });
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('non-empty list of strings');
     }
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNoExec(CONTAINER);
   });
 
   it('bounds how many arguments a command may have', async () => {
@@ -158,13 +181,16 @@ describe('facade console', () => {
   });
 
   it('is refused while control is disabled', async () => {
+    withEnvironment();
+    withExec();
+
     const res = await request(app({ control: control({ allowPutControl: false }) }))
       .post(`/api/containers/${CONTAINER}/exec`)
       .send({});
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('Container control is disabled');
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNoExec(CONTAINER);
   });
 
   it('blames the configuration, not the server, when control is off', async () => {
@@ -188,19 +214,23 @@ describe('facade console', () => {
     expect(asJson<{ console: JsonBody }>(control_.body).console.reason).toContain(
       'disabled in the plugin configuration',
     );
-    expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
   it('refuses a shell in the Signal K container', async () => {
     // A shell there can stop Signal K as surely as the stop button can, and
     // with less to say about it afterwards.
+    withEnvironment();
+    boat()
+      .intercept({ path: execPath(SELF_ID), method: 'POST' })
+      .reply(200, { Id: 'exec-1' });
+
     const res = await request(app({ self: selfContainer }))
       .post(`/api/containers/${SELF_ID}/exec`)
       .send({});
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('running Signal K');
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNoExec(SELF_ID);
   });
 
   it('is absent entirely when the server cannot serve a WebSocket', async () => {
@@ -212,7 +242,6 @@ describe('facade console', () => {
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('not available');
-    expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
   it('reports the console in the control surface', async () => {
@@ -340,6 +369,12 @@ describe('facade console', () => {
         request(app({ consoleSessions: sessions }))
           .post('/api/console/resize')
           .send(body);
+      // What the first of these would become once past the check: the client
+      // clamps each dimension to at least 1, so zero columns reaches Docker as
+      // a one-column terminal rather than being refused.
+      withEnvironment();
+      const refused = `${resizePath}?h=24&w=1`;
+      boat().intercept({ path: refused, method: 'POST' }).reply(200, '');
 
       expect((await send({ session: 'session-1', cols: 0, rows: 24 })).status).toBe(400);
       expect((await send({ session: 'session-1', cols: 80, rows: -1 })).status).toBe(400);
@@ -347,7 +382,8 @@ describe('facade console', () => {
       expect((await send({ session: 'session-1', cols: '80', rows: 24 })).status).toBe(400);
       expect((await send({ session: 'session-1', rows: 24 })).status).toBe(400);
       // Nothing reached Portainer: every one of those was refused here.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, ENVIRONMENTS);
+      expectNotRequested(agent, refused);
     });
 
     it('refuses a size larger than any real window', async () => {

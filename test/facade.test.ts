@@ -12,7 +12,14 @@ import type { LogFrame } from '../src/logframes';
 import { InstanceRegistry, UnknownInstanceError } from '../src/registry';
 import { StreamLimiter } from '../src/streamlimit';
 import * as fixtures from './fixtures';
-import { asJson, type JsonBody, createMockAgent, restoreGlobalDispatcher } from './support';
+import {
+  asJson,
+  type JsonBody,
+  createMockAgent,
+  expectAllConsumed,
+  expectNotRequested,
+  restoreGlobalDispatcher,
+} from './support';
 
 const noSelf: SelfContainer = { inContainer: false, source: 'none', identified: false };
 
@@ -263,12 +270,17 @@ describe('facade read routes', () => {
         // `Number()` accepted all of these: true selected environment 1, null
         // selected 0, and "2" selected a real Docker host the caller never
         // named.
+        //
+        // The list a coerced id would be checked against is registered here so
+        // that it going unfetched is what the assertion rests on: an empty
+        // pending set says nothing when nothing was registered.
+        twoEnvironments();
+
         const res = await request(app()).put('/api/environment').send({ id });
 
         expect(res.status).toBe(400);
         expect(asJson(res.body).error).toContain('not a number');
-        // Nothing was asked of Portainer: no environment list was fetched.
-        expect(agent.pendingInterceptors()).toHaveLength(0);
+        expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
       },
     );
 
@@ -368,13 +380,19 @@ describe('facade read routes', () => {
   it('404s a stack file belonging to another environment', async () => {
     withEnvironment();
     boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    // The read the ownership check must prevent, registered so that it being
+    // left over is the assertion — the reads the check itself makes would be
+    // consumed whether or not it still works.
+    boat()
+      .intercept({ path: '/api/stacks/9/file', method: 'GET' })
+      .reply(200, { StackFileContent: 'services: {}' });
 
     // Fixture stack 9 lives in EndpointId 4; this instance is bound to 1.
     const res = await request(app()).get('/api/stacks/9/file');
 
     expect(res.status).toBe(404);
     expect(asJson(res.body).error).toMatch(/does not belong to this environment/);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/stacks/9/file');
   });
 
   it('rejects a non-numeric stack id before reaching Portainer', async () => {
@@ -390,11 +408,17 @@ describe('facade read routes', () => {
       // `Number()` reads "0x3" as 3 and "1e1" as 10, so a request naming one
       // stack acted on a different one. This route also used to accept 0 and
       // negative ids, which every other stack route refuses.
+      //
+      // Reading the file starts by resolving this environment, so that list is
+      // the first thing a coerced id would ask Portainer for: registered here
+      // so the refusal is asserted as it going unasked.
+      withEnvironment();
+
       const res = await request(app()).get(`/api/stacks/${encodeURIComponent(id)}/file`);
 
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toContain('not a number');
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expectNotRequested(agent, '/api/endpoints?excludeSnapshots=true');
     },
   );
 
@@ -505,7 +529,7 @@ describe('facade logs', () => {
       { stream: 'stdout', text: 'listening' },
       { stream: 'stderr', text: 'warning' },
     ]);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('passes tail, since and timestamps through to Docker', async () => {
@@ -522,7 +546,7 @@ describe('facade logs', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('ignores a tail that is not a usable number', async () => {
@@ -539,7 +563,7 @@ describe('facade logs', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it("reads a TTY container's unframed output", async () => {
@@ -673,6 +697,11 @@ describe('facade log streaming', () => {
     // Room overall, but this container already has its one stream.
     const limiter = new StreamLimiter({ total: 5, perTarget: 1 });
     limiter.acquire('boat/abc123def456');
+    // The follow the ceiling must prevent, with the environment lookup that
+    // precedes it, registered so that the refusal is asserted as this stream
+    // going unopened.
+    withEnvironment();
+    boat().intercept({ path: streamPath, method: 'GET' }).reply(200, frame(1, 'x\n'));
 
     const res = await request(buildApp(new InstanceRegistry(config), { streams: limiter })).get(
       '/api/containers/abc123def456/logs/stream',
@@ -680,8 +709,7 @@ describe('facade log streaming', () => {
 
     expect(res.status).toBe(429);
     expect(asJson(res.body).hint).toContain('already following this container');
-    // Nothing was asked of Portainer: the refusal happens before the request.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, streamPath);
   });
 
   /** A follow stream that fails, either before or after the first line. */
@@ -1074,7 +1102,7 @@ describe('facade container lifecycle', () => {
 
     expect(res.status).toBe(200);
     expect(asJson(res.body)).toMatchObject({ action, ok: true });
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it.each([
@@ -1131,14 +1159,26 @@ describe('facade container lifecycle', () => {
 
   it('refuses every action on the container running Signal K', async () => {
     const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
+    const actions = ['start', 'stop', 'restart', 'kill'];
+    // Every mutation the guard must prevent, registered — with the environment
+    // lookup that precedes them — so that each one being left over is the
+    // assertion. Without them the pending set is empty either way.
+    withEnvironment();
+    for (const action of actions) {
+      boat()
+        .intercept({
+          path: `/api/endpoints/1/docker/containers/${SELF_ID}/${action}`,
+          method: 'POST',
+        })
+        .reply(204, '');
+    }
 
-    for (const action of ['start', 'stop', 'restart', 'kill']) {
+    for (const action of actions) {
       const res = await request(app).post(`/api/containers/${SELF_ID}/${action}`);
       expect(res.status).toBe(403);
       expect(asJson(res.body).error).toContain('running Signal K');
+      expectNotRequested(agent, `/api/endpoints/1/docker/containers/${SELF_ID}/${action}`);
     }
-    // Nothing was sent to Portainer: no interceptor was registered at all.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
   });
 
   it('recognises itself from the short id the UI actually sends', async () => {
@@ -1180,7 +1220,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).post('/api/containers/ffffffffffff/stop');
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('acts on the id it resolved, not on the name it was given', async () => {
@@ -1199,7 +1239,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).post('/api/containers/web/kill');
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('removes the container it resolved, not the reference it was given', async () => {
@@ -1220,7 +1260,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).delete('/api/containers/web');
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('refuses a mutation when the inspect says nothing about which container it is', async () => {
@@ -1232,14 +1272,18 @@ describe('facade container lifecycle', () => {
     boat()
       .intercept({ path: '/api/endpoints/1/docker/containers/web/json', method: 'GET' })
       .reply(200, {});
+    // The stop the refusal must prevent, registered so that it going unmade is
+    // the assertion: the inspect above is consumed either way.
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/web/stop', method: 'POST' })
+      .reply(204, '');
 
     const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
     const res = await request(app).post('/api/containers/web/stop');
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('did not say which container');
-    // Nothing was stopped: no interceptor for the mutation was ever needed.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/endpoints/1/docker/containers/web/stop');
   });
 
   // Docker resolves a name wherever an id goes, so a guard that only compares
@@ -1247,19 +1291,32 @@ describe('facade container lifecycle', () => {
   it('refuses a mutation that names the Signal K container instead of its id', async () => {
     withEnvironment();
     withInspect('signalk-server', SELF_ID);
+    // The stop that would follow the inspect, registered so that the refusal
+    // is asserted as this going unrequested rather than as the inspect the
+    // guard makes anyway being consumed.
+    boat()
+      .intercept({ path: `/api/endpoints/1/docker/containers/${SELF_ID}/stop`, method: 'POST' })
+      .reply(204, '');
 
     const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
     const res = await request(app).post('/api/containers/signalk-server/stop');
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('running Signal K');
-    // The inspect was the only call: no stop reached the proxy.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, `/api/endpoints/1/docker/containers/${SELF_ID}/stop`);
   });
 
   it('refuses removal that names the Signal K container', async () => {
     withEnvironment();
     withInspect('signalk_signalk_1', SELF_ID);
+    // As above: the removal is registered so that it being left over is what
+    // says the guard held.
+    boat()
+      .intercept({
+        path: `/api/endpoints/1/docker/containers/${SELF_ID}?force=false&v=false`,
+        method: 'DELETE',
+      })
+      .reply(204, '');
 
     const app = buildApp(new InstanceRegistry(config), {
       self: selfContainer,
@@ -1268,7 +1325,7 @@ describe('facade container lifecycle', () => {
     const res = await request(app).delete('/api/containers/signalk_signalk_1');
 
     expect(res.status).toBe(403);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, `/api/endpoints/1/docker/containers/${SELF_ID}?force=false&v=false`);
   });
 
   it('does not mutate a reference it could not resolve', async () => {
@@ -1276,12 +1333,17 @@ describe('facade container lifecycle', () => {
     boat()
       .intercept({ path: '/api/endpoints/1/docker/containers/ghost/json', method: 'GET' })
       .reply(404, { message: 'No such container: ghost' });
+    // The stop a swallowed inspect failure would let through, registered so
+    // that it staying unrequested is the assertion.
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/ghost/stop', method: 'POST' })
+      .reply(204, '');
 
     const app = buildApp(new InstanceRegistry(config), { self: selfContainer });
     const res = await request(app).post('/api/containers/ghost/stop');
 
     expect(res.status).toBe(404);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/endpoints/1/docker/containers/ghost/stop');
   });
 
   it('skips the resolving inspect when self-protection cannot apply', async () => {
@@ -1297,7 +1359,7 @@ describe('facade container lifecycle', () => {
     );
 
     expect(res.status).toBe(200);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('logs each accepted mutation with what the reference resolved to', async () => {
@@ -1335,6 +1397,18 @@ describe('facade container lifecycle', () => {
     const app = buildApp(new InstanceRegistry(config), {
       control: control({ allowPutControl: false }),
     });
+    // Both mutations, and the environment lookup they would start with,
+    // registered so that the refusals are asserted as these going unmade.
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/containers/abc123def456/stop', method: 'POST' })
+      .reply(204, '');
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
+        method: 'DELETE',
+      })
+      .reply(204, '');
 
     const stop = await request(app).post('/api/containers/abc123def456/stop');
     const remove = await request(app).delete('/api/containers/abc123def456');
@@ -1342,16 +1416,33 @@ describe('facade container lifecycle', () => {
     expect(stop.status).toBe(403);
     expect(asJson(stop.body).error).toContain('Container control is disabled');
     expect(remove.status).toBe(403);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/endpoints/1/docker/containers/abc123def456/stop');
+    expectNotRequested(
+      agent,
+      '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
+    );
   });
 
   it('refuses removal unless destructive operations are enabled', async () => {
     const app = buildApp(new InstanceRegistry(config));
+    // The removal the opt-in gates, registered so that the refusal is asserted
+    // as Docker never being asked to remove anything.
+    withEnvironment();
+    boat()
+      .intercept({
+        path: '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
+        method: 'DELETE',
+      })
+      .reply(204, '');
+
     const res = await request(app).delete('/api/containers/abc123def456');
 
     expect(res.status).toBe(403);
     expect(asJson(res.body).error).toContain('Destructive operations are disabled');
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(
+      agent,
+      '/api/endpoints/1/docker/containers/abc123def456?force=false&v=false',
+    );
   });
 
   it('removes a container without its volumes by default', async () => {
@@ -1370,7 +1461,7 @@ describe('facade container lifecycle', () => {
 
     expect(res.status).toBe(200);
     expect(asJson(res.body).removeVolumes).toBe(false);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('removes volumes only when asked explicitly', async () => {
@@ -1436,6 +1527,15 @@ describe('facade image writes', () => {
     const app = buildApp(new InstanceRegistry(config), {
       control: control({ allowPutControl: false, allowDestructive: true }),
     });
+    // Both writes, and the environment lookup they would start with,
+    // registered so that an unconsumed interceptor really does remain.
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
+      .reply(200, []);
+    boat()
+      .intercept({ path: pruneFilter('true'), method: 'POST' })
+      .reply(200, {});
 
     const removed = await request(app).delete('/api/images/sha256%3Aaaa');
     const pruned = await request(app).post('/api/images/prune');
@@ -1443,12 +1543,21 @@ describe('facade image writes', () => {
     expect(removed.status).toBe(403);
     expect(pruned.status).toBe(403);
     expect(asJson(pruned.body).error).toContain('Container control is disabled');
-    // Nothing reached Portainer: an unconsumed interceptor would remain.
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/endpoints/1/docker/images/sha256:aaa');
+    expectNotRequested(agent, pruneFilter('true'));
   });
 
   it('refuses both image writes unless destructive operations are enabled', async () => {
     const app = buildApp(new InstanceRegistry(config));
+    // As above: the two writes the opt-in gates are registered so that the
+    // refusals are asserted as Docker never being asked for either.
+    withEnvironment();
+    boat()
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
+      .reply(200, []);
+    boat()
+      .intercept({ path: pruneFilter('true'), method: 'POST' })
+      .reply(200, {});
 
     const removed = await request(app).delete('/api/images/sha256%3Aaaa');
     const pruned = await request(app).post('/api/images/prune');
@@ -1456,7 +1565,8 @@ describe('facade image writes', () => {
     expect(removed.status).toBe(403);
     expect(asJson(removed.body).error).toContain('Destructive operations are disabled');
     expect(pruned.status).toBe(403);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectNotRequested(agent, '/api/endpoints/1/docker/images/sha256:aaa');
+    expectNotRequested(agent, pruneFilter('true'));
   });
 
   it('removes an image by id and reports what Docker removed', async () => {
@@ -1469,7 +1579,7 @@ describe('facade image writes', () => {
 
     expect(res.status).toBe(200);
     expect(asJson(res.body).removed).toHaveLength(2);
-    expect(agent.pendingInterceptors()).toHaveLength(0);
+    expectAllConsumed(agent);
   });
 
   it('carries a registry tag through the route as one reference', async () => {
