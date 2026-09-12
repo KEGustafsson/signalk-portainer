@@ -1,5 +1,6 @@
 /**
  * @jest-environment jsdom
+ * @jest-environment-options {"url": "http://boat.local:3000"}
  */
 import { act, render, screen, waitFor } from '@testing-library/react';
 import userEvent from '@testing-library/user-event';
@@ -117,10 +118,6 @@ describe('ConsoleDialog', () => {
       return Promise.resolve(answer(ticketBody));
     });
     (globalThis as { fetch: unknown }).fetch = fetchMock;
-    Object.defineProperty(window, 'location', {
-      value: { protocol: 'http:', host: 'boat.local:3000' },
-      writable: true,
-    });
   });
 
   const show = (props: Partial<Parameters<typeof ConsoleDialog>[0]> = {}) =>
