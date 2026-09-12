@@ -5,6 +5,7 @@ import type {
   PortainerClient,
   StackEnvVar,
   StackFromRepository,
+  StackAutoUpdate,
   StackFromString,
   StackRedeploy,
   StackUpdate,
@@ -654,6 +655,35 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
 
       audit(deps, req, action, String(id), undefined, 'stack');
       return { id, action, ok: true, ...(warning ? { warning } : {}) };
+    }),
+  );
+
+  router.put(
+    '/api/stacks/:id/autoupdate',
+    body,
+    withClient(deps, async (req, client) => {
+      const path = '/api/stacks/:id/autoupdate';
+      const id = stackId(req, 'PUT', path);
+      requireControlEnabled(deps);
+
+      const settings = readAutoUpdate(req, path);
+      const enabling = settings.interval !== undefined || settings.webhook === true;
+      // Only on the way on. Auto-update means Portainer redeploying the stack
+      // with nobody watching, and on the stack that contains Signal K that is
+      // the plugin being restarted mid-request at a time of git's choosing.
+      // Turning it off is the cure for exactly that, so it is never refused.
+      if (enabling) await requireStackNotSelf(deps, client, id, 'enable auto-update on');
+
+      const state = await client.stackAutoUpdate(id, settings);
+      audit(
+        deps,
+        req,
+        enabling ? `auto-update ${settings.interval ?? 'webhook'}` : 'auto-update off',
+        String(id),
+        undefined,
+        'stack',
+      );
+      return { id, action: 'autoupdate', ok: true, autoUpdate: state };
     }),
   );
 
@@ -1646,6 +1676,52 @@ function readRedeploy(req: Request): StackRedeploy & { prune: boolean; pullImage
     prune: req.query.prune === 'true' || payload.prune === true,
     pullImage: req.query.pullImage === 'true' || payload.pullImage === true,
     ...(authentication ? { authentication } : {}),
+  };
+}
+
+/**
+ * Auto-update settings out of an untrusted body.
+ *
+ * Every field is optional and every absent field means off, because the route
+ * behind this replaces the whole record rather than merging into it — there is
+ * no request that could mean "change the interval and leave the webhook as it
+ * is". An empty body is therefore how auto-update is turned off, which is
+ * worth saying out loud rather than leaving to be discovered.
+ *
+ * The interval's grammar and its floor are the client's to judge: both come
+ * from what Portainer does with the string, not from what a request may carry.
+ */
+function readAutoUpdate(req: Request, path: string): StackAutoUpdate {
+  const payload = (req.body ?? {}) as {
+    interval?: unknown;
+    webhook?: unknown;
+    pullImage?: unknown;
+    force?: unknown;
+  };
+  const flag = (name: 'webhook' | 'pullImage' | 'force'): boolean => {
+    const value = payload[name];
+    if (value !== undefined && typeof value !== 'boolean') {
+      throw badRequest('PUT', path, `${name} must be true or false`);
+    }
+    return value === true;
+  };
+  const asked = flag('webhook');
+  const pullImage = flag('pullImage');
+  const force = flag('force');
+  if (payload.interval !== undefined && typeof payload.interval !== 'string') {
+    throw badRequest(
+      'PUT',
+      path,
+      'interval must be a string',
+      'send { "interval": "30m" }, or leave it out not to poll',
+    );
+  }
+  const interval = typeof payload.interval === 'string' ? payload.interval.trim() : '';
+  return {
+    ...(interval === '' ? {} : { interval }),
+    ...(asked ? { webhook: true } : {}),
+    pullImage,
+    force,
   };
 }
 

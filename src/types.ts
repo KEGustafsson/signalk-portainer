@@ -390,7 +390,19 @@ export interface Stack {
     Authentication?: { Username?: string; GitCredentialID?: number } | null;
   } | null;
   /** Portainer's own polling or webhook redeploy, if the stack has one. */
-  AutoUpdate?: { Interval?: string; Webhook?: string; ForcePullImage?: boolean } | null;
+  AutoUpdate?: {
+    Interval?: string;
+    Webhook?: string;
+    /** Portainer's own handle on the polling job; not ours to set. */
+    JobID?: string;
+    ForceUpdate?: boolean;
+    ForcePullImage?: boolean;
+  } | null;
+  /**
+   * Swarm-only, and only `Prune`. Held here because the route that changes
+   * auto-update rewrites it from its own payload, so it has to be echoed back.
+   */
+  Option?: { Prune?: boolean } | null;
   /** What a background deploy reported, newest last. */
   DeploymentStatus?: { Type?: number; Message?: string; Timestamp?: number }[] | null;
 }

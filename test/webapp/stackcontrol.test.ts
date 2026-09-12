@@ -1,11 +1,13 @@
 import type { Stack } from '../../src/types';
 import type { ControlState } from '../../src/webapp/control';
 import {
+  autoUpdateOf,
   envForRequest,
   envOf,
   envProblem,
   envProblems,
   hasChanges,
+  intervalProblem,
   isActive,
   isFromGit,
   nameProblem,
@@ -14,6 +16,7 @@ import {
   stackActionLabel,
   stackActionState,
   stackActionsFor,
+  webhookUrl,
 } from '../../src/webapp/stackcontrol';
 
 const stack = (overrides: Partial<Stack> = {}): Stack => ({
@@ -266,5 +269,115 @@ describe('labels and state helpers', () => {
     expect(isFromGit(stack())).toBe(false);
     expect(isFromGit(stack({ GitConfig: { URL: 'https://x.test' } }))).toBe(true);
     expect(isFromGit(stack({ GitConfig: null }))).toBe(false);
+  });
+});
+
+describe('auto-update', () => {
+  const git = { URL: 'https://example.test/boat/stacks', ReferenceName: 'refs/heads/main' };
+
+  it('is offered only for a stack with a repository', () => {
+    // Portainer accepts the setting on its git create routes and nowhere
+    // else, and the route that changes it refuses a stack with no repository
+    // config — so a file-based stack has nothing to offer.
+    expect(stackActionsFor(stack())).not.toContain('autoupdate');
+    expect(stackActionsFor(stack({ GitConfig: git }))).toContain('autoupdate');
+  });
+
+  it('needs control, but is not destructive', () => {
+    // Nothing is deleted by a schedule. What it changes is who deploys the
+    // stack, which is exactly what control governs.
+    expect(
+      stackActionState(control({ allowPutControl: false }), stack({ GitConfig: git }), 'autoupdate')
+        .enabled,
+    ).toBe(false);
+    expect(
+      stackActionState(
+        control({ allowDestructive: false }),
+        stack({ GitConfig: git }),
+        'autoupdate',
+      ).enabled,
+    ).toBe(true);
+  });
+
+  it('says why a file-based stack cannot have it', () => {
+    const state = stackActionState(control(), stack(), 'autoupdate');
+    expect(state.enabled).toBe(false);
+    expect(state.reason).toMatch(/repository/);
+  });
+
+  it('is named in the row', () => {
+    expect(stackActionLabel('autoupdate')).toBe('Auto-update');
+  });
+
+  describe('autoUpdateOf', () => {
+    it('reads what the stack reports', () => {
+      expect(
+        autoUpdateOf(
+          stack({
+            AutoUpdate: { Interval: '30m', Webhook: 'abc', ForcePullImage: true, JobID: '4' },
+          }),
+        ),
+      ).toEqual({ interval: '30m', webhook: 'abc', pullImage: true, force: false });
+    });
+
+    it('reads a stack with none as off rather than as unknown', () => {
+      // Portainer sends `null` for a stack that has none, and an empty string
+      // for a trigger it is not using — neither is a setting.
+      expect(autoUpdateOf(stack({ AutoUpdate: null }))).toEqual({ pullImage: false, force: false });
+      expect(autoUpdateOf(stack({ AutoUpdate: { Interval: '', Webhook: '' } }))).toEqual({
+        pullImage: false,
+        force: false,
+      });
+      expect(autoUpdateOf(undefined)).toEqual({ pullImage: false, force: false });
+    });
+  });
+
+  describe('webhookUrl', () => {
+    it('names Portainer’s own route, which the plugin is not in', () => {
+      // Whatever pushes to the repository calls this directly; Signal K is
+      // not in the path, so the URL has to be Portainer's.
+      expect(webhookUrl('https://boat.test:9443', 'abc-123')).toBe(
+        'https://boat.test:9443/api/stacks/webhooks/abc-123',
+      );
+    });
+
+    it('does not double the separator on a configured trailing slash', () => {
+      expect(webhookUrl('https://boat.test:9443/', 'abc')).toBe(
+        'https://boat.test:9443/api/stacks/webhooks/abc',
+      );
+    });
+
+    it('gives nothing at all rather than a URL missing its host', () => {
+      expect(webhookUrl(undefined, 'abc')).toBeUndefined();
+      expect(webhookUrl('', 'abc')).toBeUndefined();
+    });
+  });
+
+  describe('intervalProblem', () => {
+    it('takes the durations Go writes', () => {
+      for (const interval of ['1m', '30m', '2h', '1h30m', '90s', '2h15m30s']) {
+        expect(intervalProblem(interval)).toBeUndefined();
+      }
+    });
+
+    it('refuses one shorter than a minute', () => {
+      // Portainer hands the string to `time.ParseDuration` and polls at
+      // whatever comes out, without looking at it: `0s` is a git fetch as
+      // fast as the link allows.
+      for (const interval of ['0s', '30s', '59s', '0m', '0h']) {
+        expect(intervalProblem(interval)).toMatch(/shortest allowed/);
+      }
+    });
+
+    it('refuses what is not a duration, including units Go has but this does not', () => {
+      for (const interval of ['soon', '30', '5x', '30m1h', '1d', '1000ms', '-5m']) {
+        expect(intervalProblem(interval)).toMatch(/Hours, minutes and seconds/);
+      }
+    });
+
+    it('says nothing about an empty box, which is not yet a mistake', () => {
+      expect(intervalProblem('')).toBeUndefined();
+      expect(intervalProblem('   ')).toBeUndefined();
+    });
   });
 });

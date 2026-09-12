@@ -1264,6 +1264,292 @@ describe('AppPanel container actions', () => {
       expect(within(git).getByRole('button', { name: 'Redeploy' })).toBeEnabled();
     });
 
+    it('schedules auto-update on a git stack, and shows where a webhook fires', async () => {
+      // The plugin could read a stack's auto-update and change none of it.
+      // Portainer's only route for that is the git one, and it replaces the
+      // whole record — so the dialog sends the state the stack should end up
+      // with, and the reply is where a newly created webhook URL first shows.
+      let saved = false;
+      const base = stackFetch({
+        '/instances': {
+          instances: [{ name: 'boat', isDefault: true, baseUrl: 'https://boat.test:9443' }],
+        },
+      });
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/autoupdate')) {
+          saved = true;
+          return Promise.resolve(
+            asResponse({
+              ok: true,
+              status: 200,
+              json: () =>
+                Promise.resolve({
+                  id: 5,
+                  action: 'autoupdate',
+                  ok: true,
+                  autoUpdate: {
+                    interval: '2h',
+                    webhook: 'abc-123',
+                    pullImage: false,
+                    force: false,
+                  },
+                }),
+            }),
+          );
+        }
+        if (saved && input.includes('/stacks') && !input.includes('/autoupdate')) {
+          return Promise.resolve(
+            asResponse({
+              ok: true,
+              status: 200,
+              json: () =>
+                Promise.resolve({
+                  stacks: [
+                    { Id: 3, Name: 'signalk', Type: 2, EndpointId: 1, Status: 1 },
+                    {
+                      Id: 5,
+                      Name: 'from-git',
+                      Type: 2,
+                      EndpointId: 1,
+                      Status: 1,
+                      GitConfig: { URL: 'https://example.test/stacks' },
+                      AutoUpdate: { Interval: '2h', Webhook: 'abc-123' },
+                    },
+                  ],
+                }),
+            }),
+          );
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Check the repository on a schedule/));
+      const every = within(dialog).getByLabelText('Every');
+      await user.clear(every);
+      await user.type(every, '2h');
+      await user.click(within(dialog).getByLabelText(/Redeploy when a URL is called/));
+      await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+      await waitFor(() => {
+        const sent = fetchMock.mock.calls.find((call) => String(call[0]).includes('/autoupdate'));
+        expect(sent?.[1]?.method).toBe('PUT');
+        expect(sentBody(sent)).toEqual({
+          interval: '2h',
+          webhook: true,
+          pullImage: false,
+          force: false,
+        });
+      });
+
+      // Portainer's own route, with Signal K nowhere in it: whatever pushes to
+      // the repository calls this directly.
+      expect(
+        await within(dialog).findByText('https://boat.test:9443/api/stacks/webhooks/abc-123'),
+      ).toBeInTheDocument();
+    });
+
+    it('will not save a schedule with no interval in it', async () => {
+      // The facade reads an empty interval as "do not poll", so saving with
+      // the box cleared would turn auto-update off rather than schedule it —
+      // the opposite of what ticking the box asked for.
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Check the repository on a schedule/));
+      await user.clear(within(dialog).getByLabelText('Every'));
+
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+    });
+
+    it('says when a webhook URL will travel in cleartext', async () => {
+      // Not hidden — a LAN Portainer on http is supported, the URL is on
+      // Portainer's own page anyway, and hiding it would leave the operator
+      // no way to read the thing they need. Said plainly instead: this URL is
+      // the whole credential.
+      const fetchMock = stackFetch({
+        '/instances': {
+          instances: [{ name: 'boat', isDefault: true, baseUrl: 'http://boat.test:9000' }],
+        },
+        '/stacks': {
+          stacks: [
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+              AutoUpdate: { Webhook: 'abc-123' },
+            },
+          ],
+        },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await showContainers();
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
+      const row = await screen.findByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(
+        within(dialog).getByText('http://boat.test:9000/api/stacks/webhooks/abc-123'),
+      ).toBeInTheDocument();
+      expect(within(dialog).getByText(/travels in cleartext/)).toBeInTheDocument();
+    });
+
+    it('does not report one stack’s save inside another stack’s dialog', async () => {
+      // The dialog can be closed while its save is still in flight, and the
+      // next one opened is the same Portainer — so the instance guard passes
+      // and the first result would appear under a stack it says nothing about.
+      let release: (() => void) | undefined;
+      const base = stackFetch({
+        '/stacks': {
+          stacks: [
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+            },
+            {
+              Id: 6,
+              Name: 'other-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/other' },
+            },
+          ],
+        },
+      });
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/autoupdate')) {
+          return new Promise((resolve) => {
+            release = () =>
+              resolve(
+                asResponse({
+                  ok: true,
+                  status: 200,
+                  json: () => Promise.resolve({ id: 5, action: 'autoupdate', ok: true }),
+                }),
+              );
+          });
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await showContainers();
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
+      await screen.findByRole('group', { name: 'Actions for from-git' });
+
+      const git = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(git).getByRole('button', { name: 'Auto-update' }));
+      let dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Redeploy when a URL is called/));
+      await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+      // Closed mid-save, then a different stack's dialog opened.
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Actions for other-git' })).getByRole('button', {
+          name: 'Auto-update',
+        }),
+      );
+      dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/Auto-update other-git/)).toBeInTheDocument();
+
+      release?.();
+      // Waited on positively: the shared busy mark clearing is what proves the
+      // first save has finished, so the absence below is a real absence rather
+      // than an assertion made before the answer could arrive.
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument(),
+      );
+      expect(within(dialog).queryByText(/from-git: auto-update/)).not.toBeInTheDocument();
+    });
+
+    it('will not send an interval Portainer would poll at but nobody meant', async () => {
+      // `0s` parses, and Portainer's scheduler polls at whatever it is given
+      // without looking — a git fetch as fast as the link allows.
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Check the repository on a schedule/));
+      const every = within(dialog).getByLabelText('Every');
+      await user.clear(every);
+      await user.type(every, '30s');
+
+      expect(within(dialog).getByText(/shortest allowed/)).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+    });
+
+    it('offers turning it off, and says that is what saving will do', async () => {
+      // An empty record is not a setting Portainer accepts, so there is no
+      // request that means "keep the webhook and drop the schedule". Both off
+      // is how it goes off, which the button says rather than leaving it to be
+      // discovered.
+      const fetchMock = stackFetch({
+        '/stacks': {
+          stacks: [
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+              AutoUpdate: { Interval: '1h' },
+            },
+          ],
+        },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await showContainers();
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
+      const row = await screen.findByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      // It opened holding what the stack already has, rather than blank.
+      expect(within(dialog).getByLabelText('Every')).toHaveValue('1h');
+
+      await user.click(within(dialog).getByLabelText(/Check the repository on a schedule/));
+      expect(within(dialog).getByText(/turns auto-update off/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Turn off' }));
+
+      await waitFor(() => {
+        const sent = fetchMock.mock.calls.find((call) => String(call[0]).includes('/autoupdate'));
+        expect(sentBody(sent)).toEqual({});
+      });
+    });
+
     it('stops a stack and re-reads immediately', async () => {
       const fetchMock = stackFetch();
       global.fetch = fetchMock as unknown as typeof fetch;

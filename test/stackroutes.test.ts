@@ -725,4 +725,117 @@ describe('facade stack writes', () => {
       expect(lines.join('\n')).toContain('refused');
     });
   });
+  describe('auto-update on a git stack', () => {
+    const withGitStack = (overrides: Record<string, unknown> = {}) => {
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/stacks', method: 'GET' })
+        .reply(200, [{ ...fixtures.stacks[2], ...overrides }]);
+      // The write reads the stack itself as well, rather than trust a list
+      // cached for fifteen seconds with the record it has to echo back.
+      boat()
+        .intercept({ path: '/api/stacks/5', method: 'GET' })
+        .reply(200, { ...fixtures.stacks[2], ...overrides });
+    };
+
+    const withWrite = () => {
+      const sent: { body?: Record<string, unknown> } = {};
+      boat()
+        .intercept({ path: '/api/stacks/5/git?endpointId=1', method: 'POST' })
+        .reply(200, (opts) => {
+          // Only a string is parsed: undici types the body as a stream too,
+          // and stringifying one of those yields "[object Object]".
+          if (typeof opts.body === 'string') {
+            sent.body = JSON.parse(opts.body) as Record<string, unknown>;
+          }
+          return {};
+        });
+      return sent;
+    };
+
+    it('sets a polling interval and answers with what the stack now has', async () => {
+      withGitStack();
+      const sent = withWrite();
+
+      const res = await request(app())
+        .put('/api/stacks/5/autoupdate')
+        .send({ interval: '30m', pullImage: true });
+
+      expect(res.status).toBe(200);
+      expect(asJson(res.body).autoUpdate).toEqual({
+        interval: '30m',
+        pullImage: true,
+        force: false,
+      });
+      expect((sent.body?.AutoUpdate as Record<string, unknown>).Interval).toBe('30m');
+    });
+
+    it('turns it off on an empty body, and says so in the audit', async () => {
+      // There is no request that could mean "leave the webhook and change the
+      // interval": the route replaces the whole record. So an empty body is
+      // how it is turned off, and the log says which of the two happened.
+      const lines: string[] = [];
+      withGitStack({ AutoUpdate: { Interval: '1h', JobID: '7' } });
+      withWrite();
+
+      const res = await request(app({ log: (m) => lines.push(m) }))
+        .put('/api/stacks/5/autoupdate')
+        .send({});
+
+      expect(res.status).toBe(200);
+      expect(asJson(res.body).autoUpdate).toEqual({ pullImage: false, force: false });
+      expect(lines.join('\n')).toContain('auto-update off');
+    });
+
+    it('refuses to schedule an unattended redeploy of Signal K’s own stack', async () => {
+      // Auto-update is Portainer redeploying with nobody watching. On the
+      // stack that holds Signal K that is the plugin being restarted at a
+      // time git chooses, which is the one case the operator cannot recover
+      // from through this panel.
+      withEnvironment();
+      boat()
+        .intercept({ path: '/api/stacks', method: 'GET' })
+        .reply(200, [{ ...fixtures.stacks[2], Name: 'signalk' }]);
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
+
+      const res = await request(app({ self: selfContainer }))
+        .put('/api/stacks/5/autoupdate')
+        .send({ interval: '1h' });
+
+      expect(res.status).toBe(403);
+      expect(asJson(res.body).error).toContain('enable auto-update on');
+    });
+
+    it('still lets that stack’s auto-update be turned off', async () => {
+      // Turning it off is the cure for exactly what the guard is protecting
+      // against, so refusing it would leave the operator stuck with it.
+      const held = { ...fixtures.stacks[2], Name: 'signalk', AutoUpdate: { Interval: '1h' } };
+      withEnvironment();
+      boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, [held]);
+      boat().intercept({ path: '/api/stacks/5', method: 'GET' }).reply(200, held);
+      withWrite();
+
+      const res = await request(app({ self: selfContainer }))
+        .put('/api/stacks/5/autoupdate')
+        .send({});
+
+      expect(res.status).toBe(200);
+    });
+
+    it('refuses a body whose fields are the wrong shape', async () => {
+      for (const payload of [{ interval: 30 }, { webhook: 'yes' }, { pullImage: 1 }]) {
+        const res = await request(app()).put('/api/stacks/5/autoupdate').send(payload);
+
+        expect(res.status).toBe(400);
+      }
+    });
+
+    it('needs control enabled, like every other stack write', async () => {
+      const res = await request(app({ control: control({ allowPutControl: false }) }))
+        .put('/api/stacks/5/autoupdate')
+        .send({ interval: '1h' });
+
+      expect(res.status).toBe(403);
+    });
+  });
 });

@@ -19,6 +19,7 @@ import { ImagePruneDialog } from './ImagePruneDialog';
 import { ImagePullDialog, type RegistryOption } from './ImagePullDialog';
 import { PanelBoundary } from './PanelBoundary';
 import { LogViewer } from './LogViewer';
+import { StackAutoUpdateDialog } from './StackAutoUpdateDialog';
 import { StackConfirmDialog, type ConfirmableStackAction } from './StackConfirmDialog';
 import { StackDeleteDialog } from './StackDeleteDialog';
 import { StackEditor, type StackDeployment, type StackTarget } from './StackEditor';
@@ -76,10 +77,17 @@ const POLL_BACKOFF_CEILING_MS = 60_000;
  */
 const PRUNE_BUSY_KEY = 'images:prune';
 const PULL_BUSY_KEY = 'images:pull';
+const AUTO_UPDATE_BUSY_KEY = 'stacks:autoupdate';
 
 interface InstanceSummary {
   name: string;
   isDefault: boolean;
+  /**
+   * Where this Portainer answers, as the plugin is configured to reach it.
+   * Reported by `/instances` already; read here so a webhook URL can be shown
+   * in full rather than as an id the operator has to assemble a URL from.
+   */
+  baseUrl?: string;
 }
 
 type TabId =
@@ -197,6 +205,15 @@ function Panel(): ReactElement {
   const [confirmingStack, setConfirmingStack] = useState<
     { stack: Stack; action: ConfirmableStackAction } | undefined
   >(undefined);
+  /**
+   * The stack whose auto-update is being edited, and how the last save went.
+   * Kept in the dialog rather than the page banner: the settings that produced
+   * a refusal are still on screen beside it.
+   */
+  const [autoUpdating, setAutoUpdating] = useState<Stack | undefined>(undefined);
+  const [autoUpdateResult, setAutoUpdateResult] = useState<
+    { ok: true; message: string } | { ok: false; error: ApiError } | undefined
+  >(undefined);
   // Kept apart from the poll's error for the same reason a container action is.
   const [stackResult, setStackResult] = useState<
     { ok: true; message: string } | { ok: false; error: ApiError } | undefined
@@ -257,6 +274,11 @@ function Panel(): ReactElement {
   // started before the switch passes that guard while answering for the
   // environment the operator has just left.
   const registrySeq = useRef(0);
+  // And one for the auto-update dialog, which the instance guard cannot cover
+  // either: the dialog can be closed while its save is in flight and another
+  // stack's opened, and both are the same Portainer — so the first save's
+  // outcome would be written into a dialog describing a different stack.
+  const autoUpdateSeq = useRef(0);
   // A stalled request would otherwise stay open while every poll starts
   // another, so each new request cancels the one before it.
   const inFlight = useRef<AbortController | undefined>(undefined);
@@ -314,6 +336,12 @@ function Panel(): ReactElement {
 
   /** The environment in use, once there is one and its row has been read. */
   const chosen = environments.find((entry) => entry.id === environment);
+
+  /** Where the selected Portainer answers, for the webhook URL to be shown. */
+  const instanceBaseUrl = useMemo(
+    () => instances.find((entry) => entry.name === instance)?.baseUrl,
+    [instance, instances],
+  );
 
   const visibleTabs = useMemo(
     () => TABS.filter((candidate) => !candidate.swarmOnly || capabilities?.swarm),
@@ -895,6 +923,12 @@ function Panel(): ReactElement {
         setConfirmingStack({ stack, action });
         return;
       }
+      if (action === 'autoupdate') {
+        autoUpdateSeq.current += 1;
+        setAutoUpdateResult(undefined);
+        setAutoUpdating(stack);
+        return;
+      }
       sendStackAction(stack, action);
     },
     [sendStackAction],
@@ -940,6 +974,53 @@ function Panel(): ReactElement {
     [editing, instance, runStack],
   );
 
+  /**
+   * Saves a stack's auto-update, and re-reads the stacks so the row shows it.
+   *
+   * The dialog stays open on either outcome. A success is worth reading — it
+   * is where a newly created webhook URL first appears — and a failure leaves
+   * the settings that caused it on screen to be corrected.
+   */
+  const saveAutoUpdate = useCallback(
+    (settings: { interval?: string; webhook?: boolean; pullImage?: boolean; force?: boolean }) => {
+      const target = autoUpdating;
+      if (!target) return;
+      const startedOn = instance;
+      const seq = autoUpdateSeq.current;
+      startBusy(AUTO_UPDATE_BUSY_KEY);
+      setAutoUpdateResult(undefined);
+      // The dialog this save belongs to, not merely the Portainer: a result
+      // naming one stack must never appear under another. The busy mark is
+      // cleared regardless, since leaving it set would lock the button for
+      // good.
+      const mine = (): boolean => stillOn(startedOn) && seq === autoUpdateSeq.current;
+      void (async () => {
+        try {
+          await apiSend('PUT', `/stacks/${target.Id}/autoupdate`, startedOn, undefined, settings);
+          if (!mine()) return;
+          const on = settings.interval !== undefined || settings.webhook === true;
+          setAutoUpdateResult({
+            ok: true,
+            message: on
+              ? `${target.Name}: auto-update saved`
+              : `${target.Name}: auto-update turned off`,
+          });
+          // The dialog reads the stack it was given, so the fresh record is
+          // what puts a just-created webhook URL on screen.
+          await load();
+        } catch (cause) {
+          if (!mine()) return;
+          const failure = asApiError(cause);
+          setAutoUpdateResult({ ok: false, error: failure });
+          if (failure.status === 403) void loadControl();
+        } finally {
+          if (stillOn(startedOn)) endBusy(AUTO_UPDATE_BUSY_KEY);
+        }
+      })();
+    },
+    [autoUpdating, endBusy, instance, load, loadControl, startBusy, stillOn],
+  );
+
   // A tab that disappears (swarm turned off) must not leave a blank panel.
   useEffect(() => {
     if (!visibleTabs.some((candidate) => candidate.id === tab)) setTab(LANDING_TAB);
@@ -958,6 +1039,11 @@ function Panel(): ReactElement {
     setDeleting(undefined);
     setConfirmingStack(undefined);
     setStackResult(undefined);
+    // A stack id, and a webhook URL that names this Portainer: neither means
+    // anything on the next one.
+    setAutoUpdating(undefined);
+    setAutoUpdateResult(undefined);
+    autoUpdateSeq.current += 1;
     // An image id belongs to its Docker host as much as a container id does,
     // and the prune dialog quotes a figure that is about to stop being true.
     setDeletingImage(undefined);
@@ -1395,6 +1481,22 @@ function Panel(): ReactElement {
           busy={busyStack === confirmingStack.stack.Id}
           onCancel={() => setConfirmingStack(undefined)}
           onConfirm={() => sendStackAction(confirmingStack.stack, confirmingStack.action)}
+        />
+      ) : null}
+
+      {autoUpdating ? (
+        <StackAutoUpdateDialog
+          // The row from the latest read, so a webhook this dialog just
+          // created is the one it shows rather than the absence it opened on.
+          stack={normalizeStacks(payload).find((row) => row.Id === autoUpdating.Id) ?? autoUpdating}
+          {...(instanceBaseUrl === undefined ? {} : { baseUrl: instanceBaseUrl })}
+          busy={busyIds.has(AUTO_UPDATE_BUSY_KEY)}
+          {...(autoUpdateResult === undefined ? {} : { result: autoUpdateResult })}
+          onCancel={() => {
+            autoUpdateSeq.current += 1;
+            setAutoUpdating(undefined);
+          }}
+          onConfirm={saveAutoUpdate}
         />
       ) : null}
 
