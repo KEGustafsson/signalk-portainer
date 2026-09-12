@@ -316,6 +316,144 @@ describe('fetching an image', () => {
     expect(String(failure)).toMatch(/ran past/);
   });
 
+  it('names a registry without ever holding its password', async () => {
+    // Portainer's docker proxy reads the id out of this header and replaces
+    // the whole thing with credentials from its own store before Docker sees
+    // the request. So the plugin sends a reference, not a secret.
+    withEnvironment();
+    let header: string | undefined;
+    agent
+      .get(BASE_URL)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=ghcr.io%2Fowner%2Fapp&tag=1.4',
+        method: 'POST',
+      })
+      .reply(200, (options) => {
+        const sent = options.headers as Record<string, string> | undefined;
+        header = sent?.['x-registry-auth'];
+        return '{"status":"Downloaded newer image for ghcr.io/owner/app:1.4"}\n';
+      });
+
+    await createClient(agent).docker.pullImage('ghcr.io/owner/app:1.4', 7);
+
+    expect(header).toBeDefined();
+    expect(JSON.parse(Buffer.from(header as string, 'base64').toString('utf8'))).toEqual({
+      registryId: 7,
+    });
+  });
+
+  it('sends no registry header for an anonymous pull', async () => {
+    // Docker Hub, and any registry that needs no login. Portainer deletes an
+    // empty header anyway, but not sending one keeps the request identical to
+    // what it was before registries were offered at all.
+    withEnvironment();
+    let seen: Record<string, string> | undefined;
+    agent
+      .get(BASE_URL)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=nginx&tag=alpine',
+        method: 'POST',
+      })
+      .reply(200, (options) => {
+        seen = options.headers as Record<string, string> | undefined;
+        return '{"status":"Status: Image is up to date for nginx:alpine"}\n';
+      });
+
+    await createClient(agent).docker.pullImage('nginx:alpine');
+
+    expect(seen?.['x-registry-auth']).toBeUndefined();
+  });
+
+  it('asks for the registries of this environment, not the admin-only list', async () => {
+    // `GET /api/registries` is admin-only and answers 403 for anyone else —
+    // its own message says to use the environment route instead — and an API
+    // key made for a plugin has no business being an admin one.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints/1/registries', method: 'GET' })
+      .reply(200, [
+        { Id: 7, Name: 'ghcr', URL: 'ghcr.io', Type: 3, Authentication: true },
+        { Id: 9, URL: 'registry.lan:5000', Type: 3, Authentication: false },
+        { Id: 'nope' },
+      ]);
+
+    const registries = await createClient(agent).registries();
+
+    expect(registries).toEqual([
+      { id: 7, name: 'ghcr', url: 'ghcr.io', authenticated: true },
+      // Named by its address, because Portainer allows a registry with no
+      // name and the address is what an operator recognises anyway.
+      { id: 9, name: 'registry.lan:5000', url: 'registry.lan:5000', authenticated: false },
+    ]);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('offers the registries through the facade', async () => {
+    agent
+      .get(BOAT)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    agent
+      .get(BOAT)
+      .intercept({ path: '/api/endpoints/1/registries', method: 'GET' })
+      .reply(200, [{ Id: 7, Name: 'ghcr', URL: 'ghcr.io', Type: 3, Authentication: true }]);
+
+    const app = buildApp(new InstanceRegistry(instances));
+    const list = await request(app).get('/api/registries');
+
+    expect(list.status).toBe(200);
+    expect(asJson(list.body).registries).toEqual([
+      { id: 7, name: 'ghcr', url: 'ghcr.io', authenticated: true },
+    ]);
+  });
+
+  it('refuses a registryId that is not one', async () => {
+    const app = buildApp(new InstanceRegistry(instances));
+
+    // The last four are the ones `Number()` would have been happy to coerce:
+    // `true` reads as 1, `false` and an empty array as 0, and "0x7" as 7. Each
+    // of those is a registry id Portainer might really have issued, so a body
+    // that names no registry at all would have pulled through one.
+    for (const registryId of [-1, 1.5, 'seven', {}, true, false, [], '0x7']) {
+      const res = await request(app)
+        .post('/api/images/pull')
+        .send({ reference: 'nginx:alpine', registryId });
+
+      expect(res.status).toBe(400);
+      expect(asJson(res.body).error).toMatch(/is not a registry id/);
+    }
+  });
+
+  it('takes a registry id written as digits', async () => {
+    // A number is what the panel sends, but a body typed by hand quotes it as
+    // often as not, and there is no ambiguity in digits.
+    let header: string | undefined;
+    agent
+      .get(BOAT)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    agent
+      .get(BOAT)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=ghcr.io%2Fowner%2Fapp&tag=1.4',
+        method: 'POST',
+      })
+      .reply(200, (options) => {
+        header = (options.headers as Record<string, string> | undefined)?.['x-registry-auth'];
+        return '{"status":"Downloaded newer image for ghcr.io/owner/app:1.4"}\n';
+      });
+
+    const res = await request(buildApp(new InstanceRegistry(instances)))
+      .post('/api/images/pull')
+      .send({ reference: 'ghcr.io/owner/app:1.4', registryId: '7' });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(Buffer.from(header as string, 'base64').toString('utf8'))).toEqual({
+      registryId: 7,
+    });
+  });
+
   it('refuses a reference that is not an image name', async () => {
     const res = await request(buildApp(new InstanceRegistry(instances)))
       .post('/api/images/pull')

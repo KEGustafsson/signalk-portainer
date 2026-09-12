@@ -791,10 +791,37 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     withClient(deps, async (req, client) => {
       requireControlEnabled(deps);
       const reference = readImageReference(req);
-      const result = await client.docker.pullImage(reference);
-      audit(deps, req, 'pull', reference, undefined, 'image');
+      const registryId = readRegistryId(req);
+      const result =
+        registryId === undefined
+          ? await client.docker.pullImage(reference)
+          : await client.docker.pullImage(reference, registryId);
+      // The registry is part of what was done, so it belongs in the audit: a
+      // pull from a private registry is a use of stored credentials.
+      audit(
+        deps,
+        req,
+        registryId === undefined ? 'pull' : `pull via registry ${registryId}`,
+        reference,
+        undefined,
+        'image',
+      );
       return { reference, action: 'pull', status: result.status, ok: true };
     }),
+  );
+
+  /**
+   * The registries this environment may pull from.
+   *
+   * A read, so it needs no control: it names registries and says whether
+   * Portainer holds credentials for each, and carries no credential itself —
+   * Portainer hides the password and the client narrows the record further.
+   * Offered so the panel can put a chooser next to the reference box rather
+   * than asking an operator to remember numeric ids.
+   */
+  router.get(
+    '/api/registries',
+    withClient(deps, async (_req, client) => ({ registries: await client.registries() })),
   );
 
   router.post(
@@ -1477,6 +1504,54 @@ function readImageReference(req: Request): string {
     );
   }
   return reference;
+}
+
+/**
+ * The registry to pull through, out of the body.
+ *
+ * Absent means an anonymous pull, which is the right answer for Docker Hub and
+ * for any registry that needs no login — so absent is not an error. What is an
+ * error is something that is not a registry id, because the alternative is
+ * sending Portainer a header it will reject with a message about its own
+ * internals.
+ */
+function readRegistryId(req: Request): number | undefined {
+  const payload = (req.body ?? {}) as { registryId?: unknown };
+  const raw = payload.registryId;
+  if (raw === undefined || raw === null || raw === '') return undefined;
+  const id = registryIdOf(raw);
+  // Zero is Portainer's own id for Docker Hub, so it is allowed; negative and
+  // fractional are not ids at all.
+  if (id === undefined || !Number.isSafeInteger(id) || id < 0) {
+    // Described rather than stringified: an object here would otherwise be
+    // quoted back as "[object Object]", which tells the caller nothing.
+    const shown = typeof raw === 'number' || typeof raw === 'string' ? String(raw) : typeof raw;
+    throw badRequest(
+      'POST',
+      '/api/images/pull',
+      `"${shown}" is not a registry id`,
+      'omit registryId to pull anonymously, or use an id from GET /registries',
+    );
+  }
+  return id;
+}
+
+/**
+ * A registry id out of a body, or undefined when the body named something that
+ * is not one.
+ *
+ * Digits, matched as text, before `Number()` sees it — the same reason the
+ * stack id is read that way. `Number()` is willing to coerce far more than an
+ * id: `true` becomes 1, `false` and an empty array become 0, and "0x7" becomes
+ * 7. A body naming no registry at all would otherwise pull through whichever
+ * registry those land on instead of being refused. The digits have to survive
+ * the round trip too, so "007" is not mistaken for the id 7.
+ */
+function registryIdOf(raw: unknown): number | undefined {
+  if (typeof raw === 'number') return raw;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+  const id = Number(raw);
+  return String(id) === raw ? id : undefined;
 }
 
 /** A 400 about the request body, phrased for whoever sent it. */

@@ -84,6 +84,12 @@ function routeFetch(overrides: Record<string, unknown> = {}, swarm = false): Fet
   });
 }
 
+/** The JSON a recorded fetch call sent, which is always a string here. */
+function sentBody(call: unknown[] | undefined): unknown {
+  const body = (call?.[1] as RequestInit | undefined)?.body;
+  return typeof body === 'string' ? JSON.parse(body) : undefined;
+}
+
 /**
  * Renders the panel and opens the Containers tab.
  *
@@ -1592,6 +1598,181 @@ describe('AppPanel container actions', () => {
       const dialog = await screen.findByRole('dialog');
       expect(within(dialog).getByText(/1 container is using it/)).toBeInTheDocument();
       expect(within(dialog).getByRole('button', { name: 'Delete' })).toBeEnabled();
+    });
+
+    it('fetches an image through the registry the operator chose', async () => {
+      // The whole point: a pull of a private image failed with a registry
+      // error and nothing to do about it. The id goes to the facade and
+      // Portainer substitutes the credentials — nothing secret is typed here.
+      const fetchMock = imageFetch({
+        '/registries': {
+          registries: [{ id: 7, name: 'ghcr', url: 'ghcr.io', authenticated: true }],
+        },
+        '/images/pull': { status: 'Downloaded newer image for ghcr.io/owner/app:1.4' },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.type(within(dialog).getByLabelText('Image'), 'ghcr.io/owner/app:1.4');
+      await waitFor(() =>
+        expect(within(dialog).getByRole('option', { name: 'ghcr' })).toBeInTheDocument(),
+      );
+      await user.selectOptions(within(dialog).getByLabelText('Registry'), '7');
+      await user.click(within(dialog).getByRole('button', { name: 'Fetch' }));
+
+      await waitFor(() => {
+        expect(requests(fetchMock)).toContain(
+          'POST /plugins/signalk-portainer/api/images/pull?instance=boat',
+        );
+      });
+      const sent = fetchMock.mock.calls.find(
+        (call) => String(call[0]).includes('/images/pull') && call[1]?.method === 'POST',
+      );
+      expect(sentBody(sent)).toEqual({
+        reference: 'ghcr.io/owner/app:1.4',
+        registryId: 7,
+      });
+      // Docker's own last word, shown where it was asked for.
+      expect(await within(dialog).findByText(/Downloaded newer image/)).toBeInTheDocument();
+    });
+
+    it('pulls anonymously when no registry is chosen', async () => {
+      const fetchMock = imageFetch({
+        '/registries': { registries: [] },
+        '/images/pull': { status: 'Status: Image is up to date for nginx:alpine' },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.type(within(dialog).getByLabelText('Image'), 'nginx:alpine');
+      // Portainer has none configured, and the dialog says so rather than
+      // offering an empty picker with no explanation.
+      expect(await within(dialog).findByText(/no registries configured/)).toBeInTheDocument();
+      await user.click(within(dialog).getByRole('button', { name: 'Fetch' }));
+
+      await waitFor(() => {
+        const sent = fetchMock.mock.calls.find(
+          (call) => String(call[0]).includes('/images/pull') && call[1]?.method === 'POST',
+        );
+        expect(sent).toBeDefined();
+        expect(sentBody(sent)).toEqual({ reference: 'nginx:alpine' });
+      });
+    });
+
+    it('still offers an anonymous pull when the registries cannot be read', async () => {
+      // The list is a convenience, not a requirement: a Portainer that
+      // refuses it, or a transport failure, must not stop the pull that needs
+      // no login.
+      const base = imageFetch();
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/registries')) {
+          return Promise.resolve(
+            asResponse({
+              ok: false,
+              status: 403,
+              json: () => Promise.resolve({ error: 'Permission denied to list registries' }),
+            }),
+          );
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(await within(dialog).findByText(/could not be read/)).toBeInTheDocument();
+      await user.type(within(dialog).getByLabelText('Image'), 'nginx:alpine');
+      expect(within(dialog).getByRole('button', { name: 'Fetch' })).toBeEnabled();
+    });
+
+    it('does not offer the registries a previous dialog read', async () => {
+      // The list belongs to the environment that offered it, and an id from
+      // one names something else — or nothing — on the next. A read still in
+      // flight when the dialog closes used to pass the instance guard, which
+      // only sees the Portainer: an environment switch leaves that unchanged.
+      // So the picker could open holding options the panel had already
+      // discarded, and pulling through one of them failed on a registry the
+      // operator had never chosen.
+      const base = imageFetch();
+      let release: (() => void) | undefined;
+      let reads = 0;
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/registries')) {
+          reads += 1;
+          // Only the first read is held; the second answers with nothing, as
+          // an environment with no registries of its own would.
+          if (reads > 1) {
+            return Promise.resolve(
+              asResponse({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ registries: [] }),
+              }),
+            );
+          }
+          return new Promise((resolve) => {
+            release = () =>
+              resolve(
+                asResponse({
+                  ok: true,
+                  status: 200,
+                  json: () =>
+                    Promise.resolve({
+                      registries: [{ id: 7, name: 'ghcr', url: 'ghcr.io', authenticated: true }],
+                    }),
+                }),
+              );
+          });
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+      await user.click(
+        within(await screen.findByRole('dialog')).getByRole('button', {
+          name: 'Cancel',
+        }),
+      );
+
+      // Reopened before the first read landed, then it lands: it is answering
+      // for a dialog that is gone, so nothing it says may reach this one.
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+      release?.();
+      const dialog = await screen.findByRole('dialog');
+
+      await waitFor(() =>
+        expect(within(dialog).getByText(/no registries configured/)).toBeInTheDocument(),
+      );
+      expect(within(dialog).queryByRole('option', { name: 'ghcr' })).not.toBeInTheDocument();
+    });
+
+    it('will not send a reference Docker would not take', async () => {
+      const fetchMock = imageFetch({ '/registries': { registries: [] } });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.type(within(dialog).getByLabelText('Image'), 'ghcr.io/owner/app 1.4');
+
+      expect(within(dialog).getByText(/optional :tag/)).toBeInTheDocument();
+      expect(within(dialog).getByRole('button', { name: 'Fetch' })).toBeDisabled();
     });
 
     it('prunes untagged layers unless the operator widens it', async () => {

@@ -217,6 +217,49 @@ export function imageActionLabel(action: ImageAction): string {
 }
 
 /**
+ * What an image reference may look like, mirroring the facade's own rule.
+ *
+ * Duplicated deliberately, as the stack-name rule is: the facade is the
+ * authority and refuses the same shapes, but a round trip to be told the
+ * reference has a space in it is a worse way to learn it than the box saying
+ * so as it is typed.
+ */
+const IMAGE_REFERENCE =
+  /^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::\d+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/;
+
+/** Why this reference would be refused, or undefined when it would not be. */
+export function imageReferenceProblem(reference: string): string | undefined {
+  const trimmed = reference.trim();
+  if (trimmed.length === 0) return undefined;
+  if (trimmed.length > 255) return 'Too long to be an image name';
+  if (!IMAGE_REFERENCE.test(trimmed)) {
+    return 'A name like ghcr.io/owner/app, with an optional :tag or @sha256: digest';
+  }
+  return undefined;
+}
+
+/**
+ * Whether the panel may offer to fetch an image.
+ *
+ * Control, but not destructive: a pull adds and removes nothing. The old image
+ * stays until something prunes it, so the one cost is a boat's bandwidth —
+ * which is why it is offered wherever control is, and refused where it is not.
+ */
+export function imagePullState(control: ControlState | undefined): ActionState {
+  if (!control) {
+    return { enabled: false, reason: 'Waiting for the plugin to report what is allowed' };
+  }
+  if (!control.allowPutControl) {
+    return {
+      enabled: false,
+      reason:
+        'Container control is disabled — enable "Allow Signal K PUT control" in the plugin configuration',
+    };
+  }
+  return { enabled: true };
+}
+
+/**
  * Whether the panel may offer to change the images, and why not when it may
  * not.
  *

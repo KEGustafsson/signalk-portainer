@@ -28,8 +28,10 @@ import {
   type EnvironmentHealth,
   type EnvironmentSupport,
   type ImagePullResult,
+  type PortainerRegistry,
   type PortainerStatus,
   type PortainerVersion,
+  type RegistryChoice,
   type Stack,
   StackStatus,
 } from './types';
@@ -208,7 +210,20 @@ export interface DockerApi {
    * — no such tag, no route to the registry — inside the progress stream, so
    * that stream is read to the end and the answer comes from its last word.
    */
-  pullImage(reference: string): Promise<ImagePullResult>;
+  /**
+   * Fetches an image, optionally through a registry Portainer has credentials
+   * for.
+   *
+   * `registryId` names one of `registries()`; the plugin never sees the
+   * password. Portainer's docker proxy intercepts `/images/create`, reads the
+   * id out of the `X-Registry-Auth` header it is given, and replaces the whole
+   * header with credentials from its own store before Docker sees it. So the
+   * worst a caller can do with a wrong id is fail to authenticate.
+   *
+   * Omitted, no header is sent at all, which is the anonymous pull this had
+   * before — right for Docker Hub and for any registry that needs no login.
+   */
+  pullImage(reference: string, registryId?: number): Promise<ImagePullResult>;
 
   /** A bounded slice of the log, demuxed. `tail` is always sent. */
   logs(id: string, options?: LogOptions): Promise<LogFrame[]>;
@@ -746,14 +761,22 @@ export class PortainerClient {
         };
       },
 
-      pullImage: async (reference) => {
+      pullImage: async (reference, registryId) => {
         const { name, tag } = splitImageReference(reference);
         const query = new URLSearchParams({ fromImage: name });
         if (tag) query.set('tag', tag);
         const path = `${await this.dockerBase()}/images/create?${query.toString()}`;
         // The write budget: a pull is a download, and on a boat's uplink a
         // multi-hundred-megabyte image is minutes of it.
-        const response = await this.send('POST', path, { timeoutMs: this.writeTimeoutMs }, true);
+        const response = await this.send(
+          'POST',
+          path,
+          {
+            timeoutMs: this.writeTimeoutMs,
+            ...(registryId === undefined ? {} : { headers: registryAuthHeader(registryId) }),
+          },
+          true,
+        );
         const result = await readPullProgress(response, 'POST', path);
         this.cache.invalidate(IMAGE_VOLATILE_KEYS);
         return { reference, ...result };
@@ -1130,6 +1153,38 @@ export class PortainerClient {
     return this.cache.get(`environments${query}`, TTL.environments, () =>
       this.json<Environment[]>('GET', `/api/endpoints${query}`),
     );
+  }
+
+  /**
+   * The registries this environment may pull from.
+   *
+   * Asked per environment rather than globally: `GET /api/registries` is
+   * admin-only and answers 403 for anyone else — its own message says to use
+   * this route instead — and an API key made for a plugin has no business
+   * being an admin one. The environment-scoped route is authenticated rather
+   * than restricted, and returns what this environment is actually allowed to
+   * use, which is the more useful answer anyway.
+   *
+   * Narrowed on the way through. Portainer hides the password, but the raw
+   * record also carries GitLab, Quay, ECR and access-policy blocks that the
+   * panel has no use for and that would travel through the facade for nothing.
+   */
+  async registries(): Promise<RegistryChoice[]> {
+    const id = await this.environmentId();
+    const raw = await this.cache.get(`registries:${id}`, TTL.environments, () =>
+      this.json<PortainerRegistry[]>('GET', `/api/endpoints/${id}/registries`),
+    );
+    if (!Array.isArray(raw)) return [];
+    return raw
+      .filter((entry): entry is PortainerRegistry => typeof entry?.Id === 'number')
+      .map((entry) => ({
+        id: entry.Id,
+        // Portainer allows a registry with no name; the address is what an
+        // operator recognises it by anyway.
+        name: entry.Name?.trim() || entry.URL?.trim() || `Registry ${entry.Id}`,
+        ...(entry.URL ? { url: entry.URL } : {}),
+        authenticated: entry.Authentication === true,
+      }));
   }
 
   /**
@@ -1956,6 +2011,23 @@ async function* readLogFrames(
     // rejection in a finally would mask whatever ended the loop.
     await reader.cancel().catch(() => undefined);
   }
+}
+
+/**
+ * The `X-Registry-Auth` header that names a registry without carrying a secret.
+ *
+ * Portainer's docker proxy intercepts `/images/create` (and any `…/push`),
+ * decodes this header, and if it finds a `registryId` replaces the whole thing
+ * with real credentials from its own store before Docker sees the request. So
+ * this is a reference, not a credential: base64 here is Docker's transport
+ * convention for the header, not protection.
+ *
+ * Id 0 is Docker Hub anonymously, which Portainer treats as a registry in its
+ * own right.
+ */
+function registryAuthHeader(registryId: number): Record<string, string> {
+  const named = JSON.stringify({ registryId });
+  return { 'x-registry-auth': Buffer.from(named, 'utf8').toString('base64') };
 }
 
 /**
