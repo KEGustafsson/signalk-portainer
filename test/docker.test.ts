@@ -489,6 +489,23 @@ describe('PortainerClient event stream', () => {
     expect(actions).toEqual(['die', 'start']);
   });
 
+  it('skips a line that parses to something that is not an event', async () => {
+    // `null` parses, and the cast would not have caught it: the first read of
+    // `.Type` on it throws, which would tear down a healthy stream over one
+    // line something in the middle wrote.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: eventPath, method: 'GET' })
+      .reply(200, 'null\n123\n"text"\n{"Type":"container","Action":"start"}\n');
+
+    const events = await createClient(agent).docker.eventStream(new AbortController().signal);
+
+    const actions = [];
+    for await (const event of events) actions.push(event.Action);
+    expect(actions).toEqual(['start']);
+  });
+
   it('gives up on a handshake that never completes', async () => {
     // The body is meant to stay open, but opening it still has to end
     // somewhere, or a Portainer that accepts the connection and says nothing

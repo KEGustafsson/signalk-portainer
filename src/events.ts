@@ -59,6 +59,18 @@ const SETTLE_MS = 400;
 const RECONNECT_MS = 2_000;
 const RECONNECT_CEILING_MS = 60_000;
 
+/**
+ * How long a stream has to stay open before it counts as working.
+ *
+ * A handshake that succeeds proves nothing: a proxy in front of Portainer can
+ * answer 200 and close the body at once, and treating that as recovery reset
+ * the backoff on every attempt — so the retry never slowed down past the first
+ * step, and every cycle logged that events had "resumed" when nothing had.
+ * Either an event arrives, or the stream holds this long; otherwise the outage
+ * is still the same outage.
+ */
+const STABLE_MS = 30_000;
+
 export interface ContainerEventsDeps {
   registry: () => InstanceRegistry | undefined;
   /** Read this instance now: something about it changed. */
@@ -67,6 +79,9 @@ export interface ContainerEventsDeps {
   /** Overridable so tests do not wait on real time. */
   settleMs?: number;
   reconnectMs?: number;
+  stableMs?: number;
+  /** Injectable clock, for the same reason. */
+  now?: () => number;
 }
 
 /** One instance's subscription, and what it is waiting on. */
@@ -131,27 +146,44 @@ export class ContainerEvents {
     };
     this.subscriptions.set(name, subscription);
 
+    const clock = this.deps.now ?? (() => Date.now());
+    const stableMs = this.deps.stableMs ?? STABLE_MS;
+
     while (!this.stopped && this.subscriptions.get(name) === subscription) {
+      // Not the handshake: a proxy can answer 200 and close the body at once,
+      // and calling that recovery is what kept the backoff at its first step
+      // forever. Recovery is an event, or a stream that stayed open.
+      const openedAt = clock();
+      let recovered = false;
+      const working = (): void => {
+        if (recovered) return;
+        recovered = true;
+        if (subscription.failures > 0) this.deps.log(`events on instance ${name} resumed`);
+        subscription.failures = 0;
+        subscription.quiet = false;
+      };
+      const heldOpen = (): void => {
+        if (clock() - openedAt >= stableMs) working();
+      };
+
       try {
         const registry = this.deps.registry();
         if (!registry) return;
         const events = await registry.get(name).docker.eventStream(subscription.controller.signal);
-        // The handshake worked, so whatever was wrong before is over.
-        if (subscription.failures > 0) {
-          this.deps.log(`events on instance ${name} resumed`);
-        }
-        subscription.failures = 0;
-        subscription.quiet = false;
         for await (const event of events) {
           if (this.stopped) return;
+          // An event is proof the subscription works, whatever it says.
+          working();
           if (interesting(event)) this.settle(name, subscription);
         }
         // The stream ended without an error: Portainer restarted, or a proxy
         // closed an idle connection. Reconnect, but count it, so a stream that
         // ends immediately and forever does not become a hot loop.
+        heldOpen();
         subscription.failures += 1;
       } catch (cause) {
         if (this.stopped || subscription.controller.signal.aborted) return;
+        heldOpen();
         subscription.failures += 1;
         // Once per outage. An unreachable Portainer is already reported by the
         // poll and on the status line; repeating it here every two seconds

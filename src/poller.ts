@@ -60,6 +60,16 @@ export class DeltaPoller {
   private polling = false;
   /** Instances with an event-driven read in flight, for the same reason. */
   private readonly refreshing = new Set<string>();
+  /** Instances an event asked for while a read of them was already running. */
+  private readonly trailing = new Set<string>();
+  /**
+   * Per instance, the ticket the next read takes and the newest one that has
+   * published. Tickets are handed out in the order reads *start*, so a read
+   * that finishes late is known to have looked at an older Docker than one
+   * that has already published, and is dropped rather than painting over it.
+   */
+  private readonly tickets = new Map<string, number>();
+  private readonly newest = new Map<string, number>();
   private stopped = false;
 
   constructor(private readonly deps: PollerDeps) {}
@@ -106,14 +116,19 @@ export class DeltaPoller {
    * containers is the bandwidth this exists to save.
    */
   async refresh(name: string): Promise<void> {
-    if (this.stopped || this.refreshing.has(name)) return;
+    if (this.stopped) return;
+    if (this.refreshing.has(name)) {
+      this.trailing.add(name);
+      return;
+    }
     const registry = this.deps.registry();
     if (!registry?.names.includes(name)) return;
 
     this.refreshing.add(name);
     try {
+      const ticket = this.ticket(name);
       const snapshot = await this.snapshot(registry, name);
-      if (!this.stopped) this.publishInstance(name, snapshot);
+      if (!this.stopped) this.publishInstance(name, snapshot, ticket);
     } catch (cause) {
       // `snapshot` contains its own failures and `publishInstance` contains
       // its own; this is the backstop, because an unhandled rejection from a
@@ -126,6 +141,11 @@ export class DeltaPoller {
     } finally {
       this.refreshing.delete(name);
     }
+
+    // An event that arrived while the read was running described a Docker the
+    // read may not have seen. One more read covers it; more than one would be
+    // the burst this already coalesces.
+    if (this.trailing.delete(name)) await this.refresh(name);
   }
 
   /** Exposed for tests, which drive the loop rather than waiting on a timer. */
@@ -144,8 +164,9 @@ export class DeltaPoller {
       // prevent.
       const health = await Promise.all(
         registry.names.map(async (name) => {
+          const ticket = this.ticket(name);
           const snapshot = await this.snapshot(registry, name);
-          if (!this.stopped) this.publishInstance(name, snapshot);
+          if (!this.stopped) this.publishInstance(name, snapshot, ticket);
           return {
             name,
             reachable: snapshot.reachable,
@@ -185,7 +206,13 @@ export class DeltaPoller {
    * something unexpected must not stop the instance beside it from publishing,
    * and must not stop the health report at the end of the poll either.
    */
-  private publishInstance(name: string, snapshot: InstanceSnapshot): void {
+  private publishInstance(name: string, snapshot: InstanceSnapshot, ticket: number): void {
+    // A slow interval read and a fast event-driven one race for the same
+    // instance. Whichever started later saw the later Docker, so an older
+    // read that lands afterwards is dropped: publishing it would put the
+    // container back the way it was until something read again.
+    if (ticket < (this.newest.get(name) ?? 0)) return;
+    this.newest.set(name, ticket);
     try {
       const built = this.builderFor(name).build(snapshot);
       if (built.values.length > 0 || built.meta.length > 0) {
@@ -208,6 +235,13 @@ export class DeltaPoller {
         `publishing instance ${name} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
     }
+  }
+
+  /** The next read's place in line for this instance. */
+  private ticket(name: string): number {
+    const ticket = (this.tickets.get(name) ?? 0) + 1;
+    this.tickets.set(name, ticket);
+    return ticket;
   }
 
   private builderFor(instance: string): DeltaBuilder {

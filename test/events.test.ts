@@ -118,13 +118,18 @@ describe('ContainerEvents', () => {
       }),
     }) as unknown as InstanceRegistry;
 
-  const build = (registry: InstanceRegistry | undefined, settleMs = 1) => {
+  const build = (
+    registry: InstanceRegistry | undefined,
+    settleMs = 1,
+    extra: { stableMs?: number; now?: () => number } = {},
+  ) => {
     watcher = new ContainerEvents({
       registry: () => registry,
       onChange: (instance) => changed.push(instance),
       log: (message) => logs.push(message),
       settleMs,
       reconnectMs: 1,
+      ...extra,
     });
     return watcher;
   };
@@ -204,6 +209,50 @@ describe('ContainerEvents', () => {
     streams[streams.length - 1]?.push({ Type: 'container', Action: 'die' });
     await new Promise((resolve) => setTimeout(resolve, 20));
     expect(changed).toEqual(['boat']);
+  });
+
+  it('does not call a stream that closes at once a recovery', async () => {
+    // A proxy in front of Portainer can answer 200 and close the body
+    // immediately. Treating the handshake as recovery reset the backoff every
+    // cycle — so the retry never slowed down — and logged that events had
+    // "resumed" each time, when nothing had.
+    build(
+      registryOf(['boat'], () => {
+        const stream = new FakeStream();
+        streams.push(stream);
+        stream.end();
+        return stream.iterate();
+      }),
+      1,
+      { stableMs: 10_000 },
+    ).start();
+    await new Promise((resolve) => setTimeout(resolve, 40));
+
+    expect(opened.length).toBeGreaterThan(2);
+    expect(logs.filter((line) => line.includes('resumed'))).toEqual([]);
+  });
+
+  it('counts a stream that stayed open as recovery when it finally drops', async () => {
+    // The other side of it: a subscription that ran for hours and then fell
+    // over is a new outage, and its reconnect starts from the bottom of the
+    // backoff rather than wherever the last one left off.
+    let clock = 0;
+    build(registryOf(['boat'], undefined), 1, { stableMs: 50, now: () => clock }).start();
+    await settle();
+
+    // It failed once before, so the state is mid-outage.
+    streams[0]?.fail(new Error('socket hang up'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(logs.filter((line) => line.includes('falling back'))).toHaveLength(1);
+
+    // The replacement holds open well past the stability mark, then drops.
+    clock += 1_000;
+    streams[streams.length - 1]?.fail(new Error('socket hang up again'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+
+    expect(logs.filter((line) => line.includes('resumed'))).toHaveLength(1);
+    // A new outage, so it is reported again rather than staying quiet.
+    expect(logs.filter((line) => line.includes('falling back'))).toHaveLength(2);
   });
 
   it('stops following once the plugin stops', async () => {

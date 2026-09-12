@@ -1984,11 +1984,18 @@ async function* readEventLines(response: Response): AsyncIterable<DockerEvent> {
         const line = held.slice(0, at).trim();
         held = held.slice(at + 1);
         if (!line) continue;
+        let parsed: unknown;
         try {
-          yield JSON.parse(line) as DockerEvent;
+          parsed = JSON.parse(line);
         } catch {
           continue;
         }
+        // `null` parses, and a cast would not have caught it: the first read
+        // of `.Type` on it throws, which would tear down a healthy stream over
+        // one line a proxy wrote. Numbers and strings parse too, and are no
+        // more an event than `null` is.
+        if (typeof parsed !== 'object' || parsed === null) continue;
+        yield parsed;
       }
       if (held.length > MAX_EVENT_LINE_BYTES) return;
     }

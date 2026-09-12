@@ -20,8 +20,10 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
   The interval keeps running underneath, so this adds no new way for the plugin
   to go quiet: an environment with no Docker API behind it never opens a
   stream and keeps the interval it had, a stream that drops reconnects with a
-  backoff and is logged once per outage rather than once per attempt, and a
-  read that fails is contained exactly as a polled one is. Only container
+  backoff — a stream that _fails_ is logged once per outage rather than once
+  per attempt, while a clean end (Portainer restarting, a proxy closing an idle
+  connection) reconnects without a word — and a read that fails is contained
+  exactly as a polled one is. Only container
   events are subscribed to, and only the actions that change what the plugin
   publishes cause a read — a console session's `exec_create` and `exec_start`
   are ignored, and the burst a stack deploy makes is collapsed into one read

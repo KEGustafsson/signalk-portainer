@@ -195,14 +195,19 @@ describe('DeltaPoller', () => {
       expect(published).toEqual([]);
     });
 
-    it('does not read the same instance twice at once', async () => {
-      // A burst is already collapsed upstream, but two reads of the same
-      // container list is exactly the bandwidth this exists to save.
+    it('reads the same instance one at a time, and does not lose the second ask', async () => {
+      // Two reads of the same container list at once is exactly the bandwidth
+      // this exists to save — but an event that arrived while a read was
+      // running described a Docker that read may not have seen, so it is not
+      // dropped either. One trailing read covers it; a burst of them is
+      // already coalesced before it gets here.
       let release!: () => void;
       const held = new Promise<void>((resolve) => {
         release = resolve;
       });
       let reads = 0;
+      let concurrent = 0;
+      let overlapped = false;
       const registry = {
         names: ['boat'],
         get: () => ({
@@ -210,7 +215,10 @@ describe('DeltaPoller', () => {
           docker: {
             listContainers: async () => {
               reads += 1;
-              await held;
+              concurrent += 1;
+              if (concurrent > 1) overlapped = true;
+              if (reads === 1) await held;
+              concurrent -= 1;
               return fixtures.containers;
             },
           },
@@ -223,7 +231,49 @@ describe('DeltaPoller', () => {
       release();
       await Promise.all([first, second]);
 
-      expect(reads).toBe(1);
+      expect(overlapped).toBe(false);
+      expect(reads).toBe(2);
+    });
+
+    it('drops a slow interval read that lands after a newer one published', async () => {
+      // The race the event stream introduces: an interval read of an instance
+      // is still in flight when an event arrives, the event-driven read
+      // finishes first with the newer truth, and the interval read then lands
+      // with the older one. Published, it would put the container back the way
+      // it was until something read again.
+      let releaseSlow!: () => void;
+      const slow = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      let reads = 0;
+      const registry = {
+        names: ['boat'],
+        get: () => ({
+          capabilities: () => Promise.resolve({ swarm: false }),
+          docker: {
+            listContainers: async () => {
+              reads += 1;
+              if (reads === 1) {
+                await slow;
+                // The stale answer: the container is still running.
+                return fixtures.containers;
+              }
+              return [];
+            },
+          },
+        }),
+      } as unknown as InstanceRegistry;
+
+      const poller = build(registry);
+      const interval = poller.poll();
+      await poller.refresh('boat');
+      releaseSlow();
+      await interval;
+
+      // Two reads happened, but only the newer one reached the deltas.
+      expect(reads).toBe(2);
+      expect(published).toHaveLength(1);
+      expect(paths(0)['system.docker.boat.containers.ais_logger.state']).toBeUndefined();
     });
   });
 

@@ -374,8 +374,12 @@ plugin to go quiet:
 
 - An environment with no Docker API behind it — Kubernetes, an async Edge
   agent — never opens one, and keeps exactly the interval it had.
-- A stream that drops reconnects with a backoff, and the plugin logs it once
-  per outage rather than once per attempt.
+- A stream that fails reconnects with a backoff, logged once per outage
+  rather than once per attempt. A stream that simply ends — Portainer
+  restarting, a proxy closing an idle connection — reconnects without a log
+  line at all. Either way the backoff only resets once a stream has proved
+  itself, by carrying an event or by staying open, so a proxy that accepts the
+  connection and closes it at once cannot hold the retry at its first step.
 - Only container events are subscribed to, and only the actions that change
   what the plugin publishes cause a read. A console session's `exec_create`
   and `exec_start` are ignored, and a stack deploy's burst is collapsed into
