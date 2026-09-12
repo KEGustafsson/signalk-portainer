@@ -178,7 +178,9 @@ Three independent switches, each enforced server-side however the panel behaves:
 
 Deltas are `off`, `health` or `full`, on a configurable poll interval — held
 between 5 and 3600 seconds, since a poll faster than that is a busy loop on a
-Raspberry Pi and one slower is indistinguishable from none. Add a watchdog entry
+Raspberry Pi and one slower is indistinguishable from none. The interval is a
+backstop rather than the resolution: container changes arrive over Docker's
+event stream as they happen, so a longer interval costs less than it used to. Add a watchdog entry
 for any container whose absence should raise a Signal K alarm.
 
 ![The rest of the configuration form: publish level, poll interval and path prefix under "Signal K telemetry", the three switches under "Control", and a watchdog entry naming a container and the server it belongs to](https://raw.githubusercontent.com/KEGustafsson/signalk-portainer/main/docs/images/plugin-control.png)
@@ -358,6 +360,34 @@ polling on its interval.
 `health` is the default: it is what a dashboard and the watchdog need, without
 carrying an image name and a container id for every container through the delta
 stream on every poll.
+
+### The interval is a floor, not the resolution
+
+The plugin also subscribes to Docker's own event stream through Portainer's
+proxy, one idle connection per instance, and reads an instance the moment
+Docker says something happened to a container on it. A container that dies at
+02:00:01 raises its alarm at 02:00:01 rather than at the next tick.
+
+The interval keeps running underneath. The subscription is a prompt to look
+early, never the only thing that looks, so nothing here is a new way for the
+plugin to go quiet:
+
+- An environment with no Docker API behind it — Kubernetes, an async Edge
+  agent — never opens one, and keeps exactly the interval it had.
+- A stream that fails reconnects with a backoff, logged once per outage
+  rather than once per attempt. A stream that simply ends — Portainer
+  restarting, a proxy closing an idle connection — reconnects without a log
+  line at all. Either way the backoff only resets once a stream has proved
+  itself, by carrying an event or by staying open, so a proxy that accepts the
+  connection and closes it at once cannot hold the retry at its first step.
+- Only container events are subscribed to, and only the actions that change
+  what the plugin publishes cause a read. A console session's `exec_create`
+  and `exec_start` are ignored, and a stack deploy's burst is collapsed into
+  one read rather than one per container.
+
+So the poll interval now sets how long a _missed_ change can go unnoticed,
+rather than how long every change waits. A boat on a metered link can raise it
+without the panel and the watchdog going stale with it.
 
 `<key>` prefers the compose project and service (`signalk_influxdb`), then the
 Swarm service name, then the container name, then the short id — so `docker

@@ -12,6 +12,7 @@ import { ExecTickets } from './exectickets';
 import { openConsole, type ConsoleServer } from './console';
 import { ConsoleSessions } from './consolesessions';
 import { registerRoutes, type FacadeHandle } from './facade';
+import { ContainerEvents } from './events';
 import { DeltaPoller, type InstanceHealth, type KeyedContainer } from './poller';
 import { PutHandlers, replaceKnownContainers } from './put';
 import { InstanceRegistry } from './registry';
@@ -33,6 +34,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    */
   let rawOptions: RawConfig | undefined;
   let poller: DeltaPoller | undefined;
+  let events: ContainerEvents | undefined;
   /** Containers seen on the last poll, keyed by "<instance>/<key>", for PUT. */
   let seen = new Map<string, KeyedContainer>();
   /**
@@ -220,6 +222,11 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
    * WebSocket endpoint per enable/disable cycle.
    */
   const shutdown = (): void => {
+    // Before the poller, and before the registry closes: an open event stream
+    // holds a client from the registry, and a subscription that outlived the
+    // poller would ask a stopped one to read.
+    events?.stop();
+    events = undefined;
     // Before the registry closes: stopping clears the published paths, and
     // that clearing delta has to go out while the plugin still can send it.
     poller?.stop();
@@ -255,7 +262,7 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
       // before restarting it, but nothing here should depend on that, and a
       // second start without a stop used to leave the first poller polling,
       // its clients open and a second console endpoint registered.
-      if (registry || poller || consoleServer) shutdown();
+      if (registry || poller || events || consoleServer) shutdown();
       try {
         // A status from the previous run says nothing about this one, and a
         // stale summary here is what makes the first healthy poll report
@@ -357,6 +364,18 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
             onHealth: reportPolledHealth,
           });
           poller.start();
+
+          // Docker's own account of what changed, where it can be had. The
+          // interval above still runs: this only brings the read forward from
+          // "within the interval" to "as it happens", and an instance whose
+          // events cannot be streamed simply keeps the interval it had.
+          const started = poller;
+          events = new ContainerEvents({
+            registry: () => registry,
+            onChange: (instance) => void started.refresh(instance),
+            log,
+          });
+          events.start();
         }
       } catch (cause) {
         // Symmetric with stop(): a half-started plugin holds the same things a

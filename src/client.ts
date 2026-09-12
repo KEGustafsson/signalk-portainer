@@ -14,6 +14,7 @@ import {
   type DockerContainerStats,
   type DockerContainerTop,
   type DockerDiskUsage,
+  type DockerEvent,
   type DockerImage,
   type DockerImagePrune,
   type DockerImageRemoval,
@@ -225,6 +226,21 @@ export interface DockerApi {
     signal: AbortSignal,
     options?: LogOptions,
   ): Promise<AsyncIterable<LogFrame>>;
+  /**
+   * Docker's own account of what just changed, as it changes.
+   *
+   * The alternative is asking every few seconds and hoping the interval is
+   * short enough — which on a boat is a trade between a stale panel and a
+   * radio link spent re-listing containers that did not move. This costs one
+   * idle connection per instance and reports a container's death in the
+   * second it happens.
+   *
+   * Subscribed to containers only: images and networks change nothing this
+   * plugin publishes, and every event that crosses the link is bandwidth.
+   * Like `logStream`, the handshake is bounded but the body is not — the
+   * caller's signal is the only thing that ends it.
+   */
+  eventStream(signal: AbortSignal): Promise<AsyncIterable<DockerEvent>>;
   removeContainer(id: string, opts?: { force?: boolean; removeVolumes?: boolean }): Promise<void>;
 
   // ── images ──────────────────────────────────────────────────────────────
@@ -796,6 +812,31 @@ export class PortainerClient {
             true,
           );
           return readLogFrames(response);
+        } finally {
+          clearTimeout(timer);
+        }
+      },
+
+      eventStream: async (signal) => {
+        // `since` is deliberately absent: this stream is a prompt to go and
+        // look, not a log to replay. Asking for the events of the last minute
+        // on every reconnect would replay a burst the plugin has already seen
+        // and re-read the container list for each one.
+        const filters = encodeURIComponent(JSON.stringify({ type: ['container'] }));
+        const path = `${await this.dockerBase()}/events?filters=${filters}`;
+        const handshake = new AbortController();
+        const timer = setTimeout(
+          () => handshake.abort(timeoutError('the event stream handshake', this.timeoutMs)),
+          this.timeoutMs,
+        );
+        try {
+          const response = await this.send(
+            'GET',
+            path,
+            { signal: AbortSignal.any([signal, handshake.signal]) },
+            true,
+          );
+          return readEventLines(response);
         } finally {
           clearTimeout(timer);
         }
@@ -1918,6 +1959,54 @@ async function* readLogFrames(
 }
 
 /**
+ * Docker's event stream, one JSON object per line, as they arrive.
+ *
+ * Nothing is buffered between lines: an event is acted on the moment its line
+ * completes. A line that never completes is the unbounded case — the same one
+ * the pull progress reader guards — so the buffer is capped and a stream that
+ * runs past it ends rather than growing. An unparseable line is skipped: a
+ * proxy that injects a keep-alive newline or a blank line is not a reason to
+ * tear down a healthy subscription.
+ */
+async function* readEventLines(response: Response): AsyncIterable<DockerEvent> {
+  const body = response.body;
+  if (!body) return;
+
+  const reader = body.getReader();
+  const decoder = new TextDecoder();
+  let held = '';
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (value) held += decoder.decode(value, { stream: true });
+      for (let at = held.indexOf('\n'); at !== -1; at = held.indexOf('\n')) {
+        const line = held.slice(0, at).trim();
+        held = held.slice(at + 1);
+        if (!line) continue;
+        let parsed: unknown;
+        try {
+          parsed = JSON.parse(line);
+        } catch {
+          continue;
+        }
+        // `null` parses, and a cast would not have caught it: the first read
+        // of `.Type` on it throws, which would tear down a healthy stream over
+        // one line a proxy wrote. Numbers and strings parse too, and are no
+        // more an event than `null` is.
+        if (typeof parsed !== 'object' || parsed === null) continue;
+        yield parsed;
+      }
+      if (held.length > MAX_EVENT_LINE_BYTES) return;
+    }
+  } finally {
+    // The caller's signal firing mid-read can leave cancel() rejecting, and a
+    // rejection in a finally would mask whatever ended the loop.
+    await reader.cancel().catch(() => undefined);
+  }
+}
+
+/**
  * Whether a log body is Docker's multiplexed framing, from the content type.
  *
  * Docker 23 and later say so on the response — `multiplexed-stream` for a
@@ -1942,6 +2031,9 @@ const MAX_LOG_BYTES = 16 * 1024 * 1024;
  * Docker's are a few hundred bytes; only one is ever held at a time.
  */
 const MAX_PULL_LINE_BYTES = 64 * 1024;
+
+/** The same bound for an event line, which is smaller still. */
+const MAX_EVENT_LINE_BYTES = 64 * 1024;
 
 /** How often a deploying stack is asked whether it has settled. */
 const STACK_SETTLE_POLL_MS = 2_000;

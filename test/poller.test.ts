@@ -166,6 +166,117 @@ describe('DeltaPoller', () => {
     expect(health[0]?.[0]?.error).toBeTruthy();
   });
 
+  describe('reading one instance because Docker said it changed', () => {
+    it('publishes that instance without touching the others', async () => {
+      // What the event stream asks for: the container that just died shows up
+      // now rather than at the end of the interval, and the instance beside it
+      // is not re-read for nothing.
+      interceptOk('https://boat.test:9443');
+
+      await build(new InstanceRegistry(config)).refresh('boat');
+
+      expect(published).toHaveLength(1);
+      expect(paths(0)['system.docker.boat.status.reachable']).toBe(true);
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('ignores an instance that is not configured', async () => {
+      await build(new InstanceRegistry(boatOnly)).refresh('shore');
+
+      expect(published).toEqual([]);
+    });
+
+    it('publishes nothing once the poller has stopped', async () => {
+      const poller = build(new InstanceRegistry(boatOnly));
+      poller.stop();
+
+      await poller.refresh('boat');
+
+      expect(published).toEqual([]);
+    });
+
+    it('reads the same instance one at a time, and does not lose the second ask', async () => {
+      // Two reads of the same container list at once is exactly the bandwidth
+      // this exists to save — but an event that arrived while a read was
+      // running described a Docker that read may not have seen, so it is not
+      // dropped either. One trailing read covers it; a burst of them is
+      // already coalesced before it gets here.
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      let concurrent = 0;
+      let overlapped = false;
+      const registry = {
+        names: ['boat'],
+        get: () => ({
+          capabilities: () => Promise.resolve({ swarm: false }),
+          docker: {
+            listContainers: async () => {
+              reads += 1;
+              concurrent += 1;
+              if (concurrent > 1) overlapped = true;
+              if (reads === 1) await held;
+              concurrent -= 1;
+              return fixtures.containers;
+            },
+          },
+        }),
+      } as unknown as InstanceRegistry;
+
+      const poller = build(registry);
+      const first = poller.refresh('boat');
+      const second = poller.refresh('boat');
+      release();
+      await Promise.all([first, second]);
+
+      expect(overlapped).toBe(false);
+      expect(reads).toBe(2);
+    });
+
+    it('drops a slow interval read that lands after a newer one published', async () => {
+      // The race the event stream introduces: an interval read of an instance
+      // is still in flight when an event arrives, the event-driven read
+      // finishes first with the newer truth, and the interval read then lands
+      // with the older one. Published, it would put the container back the way
+      // it was until something read again.
+      let releaseSlow!: () => void;
+      const slow = new Promise<void>((resolve) => {
+        releaseSlow = resolve;
+      });
+      let reads = 0;
+      const registry = {
+        names: ['boat'],
+        get: () => ({
+          capabilities: () => Promise.resolve({ swarm: false }),
+          docker: {
+            listContainers: async () => {
+              reads += 1;
+              if (reads === 1) {
+                await slow;
+                // The stale answer: the container is still running.
+                return fixtures.containers;
+              }
+              return [];
+            },
+          },
+        }),
+      } as unknown as InstanceRegistry;
+
+      const poller = build(registry);
+      const interval = poller.poll();
+      await poller.refresh('boat');
+      releaseSlow();
+      await interval;
+
+      // Two reads happened, but only the newer one reached the deltas.
+      expect(reads).toBe(2);
+      expect(published).toHaveLength(1);
+      expect(paths(0)['system.docker.boat.containers.ais_logger.state']).toBeUndefined();
+    });
+  });
+
   it('publishes each instance as its own snapshot settles', async () => {
     interceptOk('https://boat.test:9443');
     interceptOk('https://shore.test:9443');
