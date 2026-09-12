@@ -542,6 +542,15 @@ export class PortainerClient {
       path: string,
     ): Promise<ImagePullResult> => {
       let status = '';
+      let read = 0;
+      const protocolError = (why: string): PortainerError =>
+        new PortainerError({
+          status: 502,
+          method,
+          path,
+          message: `Docker did not report what it did with the image: ${why}`,
+          hint: 'the pull may or may not have happened; check the image list',
+        });
       const take = (line: string): void => {
         const trimmed = line.trim();
         if (!trimmed) return;
@@ -567,36 +576,47 @@ export class PortainerClient {
             body: failure,
           });
         }
+        read += 1;
         if (typeof entry.status === 'string') status = entry.status;
       };
 
+      // No body at all is not an empty pull: Docker answers `/images/create`
+      // with a progress stream and nothing else, so an answer without one came
+      // from something in between — a proxy that buffered it away, a tunnel
+      // that dropped it — and reporting it as a completed pull would tell the
+      // operator an image is there when nothing has said so.
       const body = response.body;
-      if (!body) return { status };
+      if (!body) throw protocolError('the answer carried no progress stream');
       const reader = body.getReader();
       const decoder = new TextDecoder();
       let held = '';
-      // A line longer than any progress line Docker writes is not one, and
-      // holding it would put the bound back where this took it from. It is
-      // dropped as far as the next newline instead.
-      let overlong = false;
       try {
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
           if (value) held += decoder.decode(value, { stream: true });
           for (let at = held.indexOf('\n'); at !== -1; at = held.indexOf('\n')) {
-            const line = held.slice(0, at);
+            take(held.slice(0, at));
             held = held.slice(at + 1);
-            if (!overlong) take(line);
-            overlong = false;
           }
+          // A line longer than any progress line Docker writes is not one.
+          // Held, it would put the bound back where reading a line at a time
+          // took it from; skipped, it would let a stream that is not Docker's
+          // pass for a pull that worked. So the buffer goes and so does the
+          // answer.
           if (held.length > MAX_PULL_LINE_BYTES) {
             held = '';
-            overlong = true;
+            throw protocolError(`a progress line ran past ${MAX_PULL_LINE_BYTES} bytes`);
           }
         }
         held += decoder.decode();
-        if (!overlong) take(held);
+        take(held);
+        // Docker says something about every pull, an image already current
+        // included — that one answers "Status: Image is up to date for …". A
+        // stream that said nothing this could read is not a pull that worked,
+        // and answering `ok` for it tells the operator an image is there when
+        // nothing has said so.
+        if (read === 0) throw protocolError('nothing in the stream was a progress record');
       } catch (cause) {
         // A failure Docker reported inside the stream is the answer, not a
         // transport fault, and must reach the caller as it was written.

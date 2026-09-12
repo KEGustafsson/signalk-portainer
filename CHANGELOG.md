@@ -133,6 +133,16 @@ the Portainer and Docker calls the plugin was missing.
 - A pull's progress stream is read a line at a time rather than buffered
   whole, and a redeploy no longer sends a git credential id Portainer's
   redeploy route has never had a field for.
+- **A pull that reported nothing is not a pull.** Docker answers
+  `/images/create` with a progress stream and nothing else — an image already
+  current still says so — so an answer carrying no readable progress came from
+  something in between, and calling it `ok` told the operator an image was
+  there when nothing had said so.
+- **An answer for a Portainer the operator has left is dropped.** The request
+  went to the right host, but its result banner, the dialog it closed and the
+  busy mark it lifted were written against whichever instance was on screen
+  when it landed — so a slow stop on one Portainer announced itself over
+  another, and re-enabled a button whose own request was still open.
 
 ## [0.1.2] - 2026-08-24
 

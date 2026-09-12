@@ -250,6 +250,20 @@ function Panel(): ReactElement {
     selected.current = instance;
   });
 
+  /**
+   * Whether the panel is still on the Portainer a request was sent to.
+   *
+   * Everything a completion writes describes the instance the request went
+   * to: a result banner, the dialog it closes, the busy mark it lifts. Written
+   * after the operator has switched, it describes a Portainer they are no
+   * longer looking at — and worse, it can clear state belonging to something
+   * they have since started on the new one, re-enabling a button whose
+   * request is still open.
+   */
+  const stillOn = useCallback((startedOn: string | undefined): boolean => {
+    return selected.current === startedOn;
+  }, []);
+
   const activeTab = useMemo(
     () => TABS.find((candidate) => candidate.id === tab) ?? TABS[0]!,
     [tab],
@@ -389,14 +403,19 @@ function Panel(): ReactElement {
    * configuration, with no Portainer call behind it.
    */
   const loadControl = useCallback(async (): Promise<void> => {
+    const startedOn = instance;
     try {
-      setControl(normalizeControl(await apiGet<unknown>('/control', instance)));
+      const answer = normalizeControl(await apiGet<unknown>('/control', instance));
+      // What one Portainer allows says nothing about the next: an answer that
+      // lands after a switch would gate the new instance's buttons by the old
+      // instance's rules until the next tick corrected it.
+      if (stillOn(startedOn)) setControl(answer);
     } catch {
       // Without an answer the panel offers nothing rather than guessing: the
       // buttons stay disabled and say they are waiting on the plugin.
-      setControl(undefined);
+      if (stillOn(startedOn)) setControl(undefined);
     }
-  }, [instance]);
+  }, [instance, stillOn]);
 
   const load = useCallback(async (): Promise<boolean> => {
     // The tab as it is now, not as it was when this callback was created.
@@ -585,6 +604,11 @@ function Panel(): ReactElement {
       const { method, path } = actionRequest(container.Id, action, options);
       try {
         await apiSend(method, path, startedOn);
+        // Nothing is written for a Portainer the operator has left: the views
+        // this would touch were closed by the switch, and `load` is bound to
+        // the old instance — running it now would abort the new instance's
+        // request and paint its table with the old one's containers.
+        if (!stillOn(startedOn)) return;
         // Only this container's dialog. Cleared unconditionally, a slow stop
         // on one container closed the confirmation the operator had just
         // opened for another, and nothing stopped that one.
@@ -595,13 +619,9 @@ function Panel(): ReactElement {
         });
         // Straight to a fresh read: the table is the confirmation that it
         // worked, and the 10s poll is too slow to feel like one.
-        //
-        // Unless the operator has switched instance while this was in flight:
-        // `load` is bound to the instance the action started on, and running it
-        // now would abort the new instance's request and paint its table with
-        // the old one's containers. The switch has already started its own load.
-        if (selected.current === startedOn) await load();
+        await load();
       } catch (cause) {
+        if (!stillOn(startedOn)) return;
         setConfirming((open) => (open?.container.Id === container.Id ? undefined : open));
         const failure = asApiError(cause);
         setActionResult({ ok: false, error: failure });
@@ -610,10 +630,12 @@ function Panel(): ReactElement {
         // rather than left showing buttons that no longer work.
         if (failure.status === 403) void loadControl();
       } finally {
-        endBusy(container.Id);
+        // The switch cleared the whole set; lifting one id now would only
+        // reach an operation the operator has since started.
+        if (stillOn(startedOn)) endBusy(container.Id);
       }
     },
-    [endBusy, instance, load, loadControl, startBusy],
+    [endBusy, instance, load, loadControl, startBusy, stillOn],
   );
 
   const requestAction = useCallback(
@@ -635,6 +657,10 @@ function Panel(): ReactElement {
    * that arrives after the operator has switched Portainer belongs to the one
    * they left, and running `load` for it would abort the new instance's
    * request and paint its table with the old one's rows.
+   *
+   * Such an answer reports `ok: false`, which is what the callers need: the
+   * dialog each of them would close on success was closed by the switch, and
+   * closing it now would close whatever has been opened since.
    */
   const runImage = useCallback(
     async (busyKey: string, run: () => Promise<unknown>, done: (body: unknown) => string) => {
@@ -643,24 +669,24 @@ function Panel(): ReactElement {
       const startedOn = instance;
       try {
         const body = await run();
+        if (!stillOn(startedOn)) return { ok: false };
         setActionResult({ ok: true, message: done(body) });
-        if (selected.current === startedOn) {
-          await load();
-          // After the list, not with it: the summary is the answer to what the
-          // prune just did, and reading it first would report the state before.
-          await loadUsage();
-        }
+        await load();
+        // After the list, not with it: the summary is the answer to what the
+        // prune just did, and reading it first would report the state before.
+        await loadUsage();
         return { ok: true };
       } catch (cause) {
+        if (!stillOn(startedOn)) return { ok: false };
         const failure = asApiError(cause);
         setActionResult({ ok: false, error: failure });
         if (failure.status === 403) void loadControl();
         return { ok: false };
       } finally {
-        endBusy(busyKey);
+        if (stillOn(startedOn)) endBusy(busyKey);
       }
     },
-    [endBusy, instance, load, loadControl, loadUsage, startBusy],
+    [endBusy, instance, load, loadControl, loadUsage, startBusy, stillOn],
   );
 
   const removeImage = useCallback(
@@ -711,6 +737,7 @@ function Panel(): ReactElement {
       const startedOn = instance;
       try {
         const body = (await run()) as { warning?: unknown } | undefined;
+        if (!stillOn(startedOn)) return { ok: false };
         // Portainer clears a stack's auto-update on every update, and ignores
         // prune on a compose stack before 2.42. The facade says so in the
         // answer; dropping it left the operator to discover it when the
@@ -722,16 +749,20 @@ function Panel(): ReactElement {
         });
         // Straight to a fresh read, as a container action does — the table is
         // the confirmation, and the 10s poll is too slow to feel like one.
-        if (selected.current === startedOn) await load();
+        await load();
         return { ok: true };
       } catch (cause) {
+        if (!stillOn(startedOn)) return { ok: false };
         setStackResult({ ok: false, error: asApiError(cause) });
         return { ok: false };
       } finally {
-        setBusyStack(undefined);
+        // One id, not a set: clearing it for a stack on the Portainer the
+        // operator has left would re-enable the buttons of whatever they have
+        // started on this one.
+        if (stillOn(startedOn)) setBusyStack(undefined);
       }
     },
-    [instance, load],
+    [instance, load, stillOn],
   );
 
   /** Sends one of the simple stack verbs, once there is nothing left to ask. */
@@ -743,7 +774,9 @@ function Panel(): ReactElement {
         stack,
         () => apiSend('POST', `/stacks/${stack.Id}/${action}`, instance),
         done,
-      ).then(() => setConfirmingStack(undefined));
+      ).then((outcome) => {
+        if (outcome.ok) setConfirmingStack(undefined);
+      });
     },
     [instance, runStack],
   );
@@ -841,6 +874,10 @@ function Panel(): ReactElement {
     setConfirming(undefined);
     setActionResult(undefined);
     setEnvironmentWarning(undefined);
+    // A busy mark names a container or a stack on the instance being left, and
+    // the request that set it will not clear it once it is no longer current.
+    setBusyIds(new Set());
+    setBusyStack(undefined);
   }, []);
 
   /**
@@ -888,11 +925,13 @@ function Panel(): ReactElement {
           undefined,
           { id },
         );
-        setEnvironment(id);
         // Guarded the same way an action's refresh is: if the operator has
         // switched Portainer while the PUT was in flight, this answer belongs
-        // to the one they left.
-        await loadEnvironments(undefined, () => selected.current === startedOn);
+        // to the one they left — and an environment id from one Portainer
+        // names nothing on the next.
+        if (!stillOn(startedOn)) return;
+        setEnvironment(id);
+        await loadEnvironments(undefined, () => stillOn(startedOn));
         // After the re-read, which carries no warning of its own and would
         // otherwise clear this one. Live either way; only its survival across
         // a restart is at stake, and an operator who is not told assumes it
@@ -902,12 +941,14 @@ function Panel(): ReactElement {
         // Into the setup sink, never into `error`: the next poll succeeds
         // against the environment that was never left, and would clear a
         // refusal the operator has to see.
-        setSetupError(asApiError(cause));
+        if (stillOn(startedOn)) setSetupError(asApiError(cause));
       } finally {
-        setSwitching(false);
+        // Not for a switch the operator has moved on from: this flag locks the
+        // picker, and clearing it would unlock it under a switch still running.
+        if (stillOn(startedOn)) setSwitching(false);
       }
     },
-    [closeInstanceViews, instance, loadEnvironments],
+    [closeInstanceViews, instance, loadEnvironments, stillOn],
   );
 
   // The backstop, for an instance that changes any other way — the first one

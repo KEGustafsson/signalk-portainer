@@ -1009,6 +1009,10 @@ describe('AppPanel container actions', () => {
     await waitFor(() => expect(screen.getByText('shore-only')).toBeInTheDocument());
     // Without the guard the stale refresh renders boat's containers here.
     expect(screen.queryByText('ais-logger')).toBeNull();
+    // Nor its banner: "Start ais-logger: done" under shore's table describes a
+    // Portainer the operator has left, and names a container shore has never
+    // heard of.
+    expect(screen.queryByText(/Start ais-logger/)).toBeNull();
   });
 
   it('warns when the plugin cannot identify its own container', async () => {

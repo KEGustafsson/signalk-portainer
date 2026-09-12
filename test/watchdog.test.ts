@@ -138,6 +138,28 @@ describe('Watchdog', () => {
     expect(alarm?.value.method).toEqual(['visual']);
   });
 
+  it('does not let an unreachable poll reset the count towards an alarm', () => {
+    // The debounce exists to let a recreate finish, and an unreachable poll
+    // in the middle only means more time has passed with the container still
+    // gone. Clearing the count there would let a flapping link suppress the
+    // alarm forever: unreachable, missing, unreachable, missing never reaches
+    // two in a row, and the watchdog would go quiet exactly when it matters.
+    const watchdog = watching();
+    watchdog.evaluate('boat', up());
+
+    const absent = up([container({ Id: 'other', Names: ['/influxdb'] })]);
+    expect(
+      watchdog.evaluate('boat', absent).find((e) => e.path.endsWith('containers.ais_logger')),
+    ).toBeUndefined();
+    watchdog.evaluate('boat', down());
+
+    const alarm = watchdog
+      .evaluate('boat', absent)
+      .find((e) => e.path.endsWith('containers.ais_logger'));
+    expect(alarm?.value.state).toBe('alarm');
+    expect(alarm?.value.message).toContain('does not exist');
+  });
+
   it('takes the sound back when an exited container is paused instead', () => {
     // Both states are alarms, so a watchdog that only remembered the state
     // published nothing for the change — and the chartplotter went on

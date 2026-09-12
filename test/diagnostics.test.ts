@@ -7,6 +7,7 @@ import {
   jwtLifetimeMs,
   splitImageReference,
 } from '../src/client';
+import { PortainerError } from '../src/errors';
 import { normalizeConfig, type PluginConfig } from '../src/config';
 import { registerRoutes } from '../src/facade';
 import { InstanceRegistry } from '../src/registry';
@@ -267,6 +268,52 @@ describe('fetching an image', () => {
       .catch((cause: unknown) => cause);
 
     expect(String(failure)).toMatch(/manifest unknown/);
+  });
+
+  it('refuses a pull whose stream said nothing about what it did', async () => {
+    // Docker answers /images/create with a progress stream and nothing else,
+    // so an answer without one came from something in between — a proxy that
+    // buffered it away, a tunnel that dropped it. Reporting that as a pull
+    // tells the operator an image is there when nothing has said so.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=ais-logger&tag=1.4',
+        method: 'POST',
+      })
+      .reply(200, '');
+
+    const failure = await createClient(agent)
+      .docker.pullImage('ais-logger:1.4')
+      .catch((cause: unknown) => cause);
+
+    expect(failure).toBeInstanceOf(PortainerError);
+    expect((failure as PortainerError).status).toBe(502);
+    expect(String(failure)).toMatch(/progress record/);
+  });
+
+  it('refuses an unterminated line longer than any Docker writes', async () => {
+    // The bound is on what is held, not on what has been read: a line that
+    // ends is parsed and released whatever its length. One that never ends is
+    // what reading a line at a time would otherwise accumulate, and a stream
+    // that writes one is not Docker's.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=ais-logger&tag=1.4',
+        method: 'POST',
+      })
+      .reply(200, `{"status":"${'x'.repeat(70 * 1024)}`);
+
+    const failure = await createClient(agent)
+      .docker.pullImage('ais-logger:1.4')
+      .catch((cause: unknown) => cause);
+
+    expect(failure).toBeInstanceOf(PortainerError);
+    expect((failure as PortainerError).status).toBe(502);
+    expect(String(failure)).toMatch(/ran past/);
   });
 
   it('refuses a reference that is not an image name', async () => {
