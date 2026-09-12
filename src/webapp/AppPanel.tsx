@@ -274,6 +274,11 @@ function Panel(): ReactElement {
   // started before the switch passes that guard while answering for the
   // environment the operator has just left.
   const registrySeq = useRef(0);
+  // And one for the auto-update dialog, which the instance guard cannot cover
+  // either: the dialog can be closed while its save is in flight and another
+  // stack's opened, and both are the same Portainer — so the first save's
+  // outcome would be written into a dialog describing a different stack.
+  const autoUpdateSeq = useRef(0);
   // A stalled request would otherwise stay open while every poll starts
   // another, so each new request cancels the one before it.
   const inFlight = useRef<AbortController | undefined>(undefined);
@@ -919,6 +924,7 @@ function Panel(): ReactElement {
         return;
       }
       if (action === 'autoupdate') {
+        autoUpdateSeq.current += 1;
         setAutoUpdateResult(undefined);
         setAutoUpdating(stack);
         return;
@@ -980,12 +986,18 @@ function Panel(): ReactElement {
       const target = autoUpdating;
       if (!target) return;
       const startedOn = instance;
+      const seq = autoUpdateSeq.current;
       startBusy(AUTO_UPDATE_BUSY_KEY);
       setAutoUpdateResult(undefined);
+      // The dialog this save belongs to, not merely the Portainer: a result
+      // naming one stack must never appear under another. The busy mark is
+      // cleared regardless, since leaving it set would lock the button for
+      // good.
+      const mine = (): boolean => stillOn(startedOn) && seq === autoUpdateSeq.current;
       void (async () => {
         try {
           await apiSend('PUT', `/stacks/${target.Id}/autoupdate`, startedOn, undefined, settings);
-          if (!stillOn(startedOn)) return;
+          if (!mine()) return;
           const on = settings.interval !== undefined || settings.webhook === true;
           setAutoUpdateResult({
             ok: true,
@@ -997,7 +1009,7 @@ function Panel(): ReactElement {
           // what puts a just-created webhook URL on screen.
           await load();
         } catch (cause) {
-          if (!stillOn(startedOn)) return;
+          if (!mine()) return;
           const failure = asApiError(cause);
           setAutoUpdateResult({ ok: false, error: failure });
           if (failure.status === 403) void loadControl();
@@ -1031,6 +1043,7 @@ function Panel(): ReactElement {
     // anything on the next one.
     setAutoUpdating(undefined);
     setAutoUpdateResult(undefined);
+    autoUpdateSeq.current += 1;
     // An image id belongs to its Docker host as much as a container id does,
     // and the prune dialog quotes a figure that is about to stop being true.
     setDeletingImage(undefined);
@@ -1479,7 +1492,10 @@ function Panel(): ReactElement {
           {...(instanceBaseUrl === undefined ? {} : { baseUrl: instanceBaseUrl })}
           busy={busyIds.has(AUTO_UPDATE_BUSY_KEY)}
           {...(autoUpdateResult === undefined ? {} : { result: autoUpdateResult })}
-          onCancel={() => setAutoUpdating(undefined)}
+          onCancel={() => {
+            autoUpdateSeq.current += 1;
+            setAutoUpdating(undefined);
+          }}
           onConfirm={saveAutoUpdate}
         />
       ) : null}

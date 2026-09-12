@@ -1355,6 +1355,138 @@ describe('AppPanel container actions', () => {
       ).toBeInTheDocument();
     });
 
+    it('will not save a schedule with no interval in it', async () => {
+      // The facade reads an empty interval as "do not poll", so saving with
+      // the box cleared would turn auto-update off rather than schedule it —
+      // the opposite of what ticking the box asked for.
+      const fetchMock = stackFetch();
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await openStacks(user);
+
+      const row = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Check the repository on a schedule/));
+      await user.clear(within(dialog).getByLabelText('Every'));
+
+      expect(within(dialog).getByRole('button', { name: 'Save' })).toBeDisabled();
+    });
+
+    it('says when a webhook URL will travel in cleartext', async () => {
+      // Not hidden — a LAN Portainer on http is supported, the URL is on
+      // Portainer's own page anyway, and hiding it would leave the operator
+      // no way to read the thing they need. Said plainly instead: this URL is
+      // the whole credential.
+      const fetchMock = stackFetch({
+        '/instances': {
+          instances: [{ name: 'boat', isDefault: true, baseUrl: 'http://boat.test:9000' }],
+        },
+        '/stacks': {
+          stacks: [
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+              AutoUpdate: { Webhook: 'abc-123' },
+            },
+          ],
+        },
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await showContainers();
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
+      const row = await screen.findByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(row).getByRole('button', { name: 'Auto-update' }));
+
+      const dialog = await screen.findByRole('dialog');
+      expect(
+        within(dialog).getByText('http://boat.test:9000/api/stacks/webhooks/abc-123'),
+      ).toBeInTheDocument();
+      expect(within(dialog).getByText(/travels in cleartext/)).toBeInTheDocument();
+    });
+
+    it('does not report one stack’s save inside another stack’s dialog', async () => {
+      // The dialog can be closed while its save is still in flight, and the
+      // next one opened is the same Portainer — so the instance guard passes
+      // and the first result would appear under a stack it says nothing about.
+      let release: (() => void) | undefined;
+      const base = stackFetch({
+        '/stacks': {
+          stacks: [
+            {
+              Id: 5,
+              Name: 'from-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/stacks' },
+            },
+            {
+              Id: 6,
+              Name: 'other-git',
+              Type: 2,
+              EndpointId: 1,
+              Status: 1,
+              GitConfig: { URL: 'https://example.test/other' },
+            },
+          ],
+        },
+      });
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/autoupdate')) {
+          return new Promise((resolve) => {
+            release = () =>
+              resolve(
+                asResponse({
+                  ok: true,
+                  status: 200,
+                  json: () => Promise.resolve({ id: 5, action: 'autoupdate', ok: true }),
+                }),
+              );
+          });
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+      await showContainers();
+      await screen.findByText('signalk_influxdb');
+      await user.click(screen.getByRole('tab', { name: 'Stacks' }));
+      await screen.findByRole('group', { name: 'Actions for from-git' });
+
+      const git = screen.getByRole('group', { name: 'Actions for from-git' });
+      await user.click(within(git).getByRole('button', { name: 'Auto-update' }));
+      let dialog = await screen.findByRole('dialog');
+      await user.click(within(dialog).getByLabelText(/Redeploy when a URL is called/));
+      await user.click(within(dialog).getByRole('button', { name: 'Save' }));
+
+      // Closed mid-save, then a different stack's dialog opened.
+      await user.click(within(dialog).getByRole('button', { name: 'Close' }));
+      await user.click(
+        within(screen.getByRole('group', { name: 'Actions for other-git' })).getByRole('button', {
+          name: 'Auto-update',
+        }),
+      );
+      dialog = await screen.findByRole('dialog');
+      expect(within(dialog).getByText(/Auto-update other-git/)).toBeInTheDocument();
+
+      release?.();
+      // Waited on positively: the shared busy mark clearing is what proves the
+      // first save has finished, so the absence below is a real absence rather
+      // than an assertion made before the answer could arrive.
+      await waitFor(() =>
+        expect(within(dialog).getByRole('button', { name: 'Cancel' })).toBeInTheDocument(),
+      );
+      expect(within(dialog).queryByText(/from-git: auto-update/)).not.toBeInTheDocument();
+    });
+
     it('will not send an interval Portainer would poll at but nobody meant', async () => {
       // `0s` parses, and Portainer's scheduler polls at whatever it is given
       // without looking — a git fetch as fast as the link allows.

@@ -1673,16 +1673,27 @@ export class PortainerClient {
    */
   async stackAutoUpdate(id: number, settings: StackAutoUpdate): Promise<StackAutoUpdateState> {
     const path = `/api/stacks/${id}/git`;
-    const stack = await this.ownStack(id, 'POST', path);
-    if (!stack.GitConfig?.URL) {
-      throw new PortainerError({
+    const notGit = (name: string): PortainerError =>
+      new PortainerError({
         status: 400,
         method: 'POST',
         path,
-        message: `Stack ${stack.Name} was not deployed from a repository`,
+        message: `Stack ${name} was not deployed from a repository`,
         hint: 'auto-update redeploys from git, so only a git-backed stack can have it',
       });
-    }
+
+    // The cached list first, for the refusals that can name what this
+    // environment does have.
+    const known = await this.ownStack(id, 'POST', path);
+    if (!known.GitConfig?.URL) throw notGit(known.Name);
+
+    // Then the stack itself, fresh. That list is cached for fifteen seconds
+    // and a stack write does not retire it, so the record echoed back below
+    // could otherwise be up to that old — and an environment variable or a
+    // branch changed in Portainer's own UI a moment ago would be reverted by
+    // the very payload written to preserve it.
+    const stack = await this.stack(id);
+    if (!stack.GitConfig?.URL) throw notGit(stack.Name);
 
     const interval = settings.interval?.trim() ?? '';
     if (interval !== '') {
@@ -1741,8 +1752,11 @@ export class PortainerClient {
     return {
       ...(interval === '' ? {} : { interval }),
       ...(webhook === undefined ? {} : { webhook }),
-      pullImage: settings.pullImage === true,
-      force: settings.force === true,
+      // What the stack now has, not what was asked for: with neither trigger
+      // on there is no record to carry them, so reporting them back would
+      // describe a state Portainer is not in.
+      pullImage: wanted && settings.pullImage === true,
+      force: wanted && settings.force === true,
     };
   }
 

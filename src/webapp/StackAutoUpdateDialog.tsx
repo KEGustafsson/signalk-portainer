@@ -57,8 +57,13 @@ export function StackAutoUpdateDialog({
     return () => document.removeEventListener('keydown', onKey);
   }, [onCancel]);
 
+  // A blank box is not yet a mistake while typing, so `intervalProblem` says
+  // nothing about it — but submitting one is: the facade reads an empty
+  // interval as "do not poll", so pressing Save with the box cleared would
+  // turn auto-update off rather than schedule it.
+  const blank = polling && interval.trim() === '';
   const problem = polling ? intervalProblem(interval) : undefined;
-  const ready = problem === undefined && !busy;
+  const ready = !blank && problem === undefined && !busy;
   const anything = polling || webhook;
   const url = held.webhook === undefined ? undefined : webhookUrl(baseUrl, held.webhook);
 
@@ -160,6 +165,17 @@ export function StackAutoUpdateDialog({
                       Call this from wherever the repository is pushed:
                     </div>
                     <code className="small user-select-all d-block text-break">{url}</code>
+                    {url.startsWith('http://') ? (
+                      // Not hidden for an http Portainer: the address is the
+                      // one the plugin is configured with, a LAN Portainer on
+                      // http is supported and documented, and the URL is on
+                      // Portainer's own page anyway. Worth saying plainly
+                      // though — this URL is the whole credential.
+                      <div className="form-text text-warning-emphasis">
+                        This Portainer is reached over http, so the URL travels in cleartext to
+                        anyone on the path.
+                      </div>
+                    ) : null}
                   </>
                 ) : held.webhook !== undefined ? (
                   <div className="form-text text-muted">

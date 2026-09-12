@@ -731,6 +731,11 @@ describe('facade stack writes', () => {
       boat()
         .intercept({ path: '/api/stacks', method: 'GET' })
         .reply(200, [{ ...fixtures.stacks[2], ...overrides }]);
+      // The write reads the stack itself as well, rather than trust a list
+      // cached for fifteen seconds with the record it has to echo back.
+      boat()
+        .intercept({ path: '/api/stacks/5', method: 'GET' })
+        .reply(200, { ...fixtures.stacks[2], ...overrides });
     };
 
     const withWrite = () => {
@@ -804,10 +809,10 @@ describe('facade stack writes', () => {
     it('still lets that stack’s auto-update be turned off', async () => {
       // Turning it off is the cure for exactly what the guard is protecting
       // against, so refusing it would leave the operator stuck with it.
+      const held = { ...fixtures.stacks[2], Name: 'signalk', AutoUpdate: { Interval: '1h' } };
       withEnvironment();
-      boat()
-        .intercept({ path: '/api/stacks', method: 'GET' })
-        .reply(200, [{ ...fixtures.stacks[2], Name: 'signalk', AutoUpdate: { Interval: '1h' } }]);
+      boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, [held]);
+      boat().intercept({ path: '/api/stacks/5', method: 'GET' }).reply(200, held);
       withWrite();
 
       const res = await request(app({ self: selfContainer }))

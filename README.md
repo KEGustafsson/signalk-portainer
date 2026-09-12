@@ -707,8 +707,10 @@ refused, since that is the cure.
 The webhook URL is Portainer's own — `/api/stacks/webhooks/{id}` on the address
 the plugin is configured to reach it at — so whatever calls it talks to
 Portainer directly, with Signal K nowhere in the path. It carries no credential
-of its own: anyone who has the URL can redeploy that stack, which is worth
-bearing in mind before it goes anywhere. Turning the webhook off and on again
+of its own: the URL _is_ the credential, and anyone who has it can redeploy
+that stack, which is worth bearing in mind before it goes anywhere. On a
+Portainer reached over `http://` the dialog says so beside the URL, since it
+then travels in cleartext to anyone on the path. Turning the webhook off and on again
 issues a new one and retires the old.
 
 One thing the API cannot do is put back an auto-update that Portainer itself

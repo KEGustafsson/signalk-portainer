@@ -234,7 +234,13 @@ describe('PortainerClient stack writes', () => {
       },
     };
 
-    /** The stack list, with the git stack in the shape a test wants it. */
+    /**
+     * The stack list and the single-stack read, in the shape a test wants.
+     *
+     * Both, because the write reads the list for the ownership refusal and
+     * then the stack itself for the record it echoes back — the list is cached
+     * for 15 seconds and would otherwise hand over a stale one.
+     */
     const withGitStack = (overrides: Record<string, unknown> = {}) => {
       const pool = agent.get(BASE_URL);
       pool
@@ -243,6 +249,9 @@ describe('PortainerClient stack writes', () => {
       pool
         .intercept({ path: '/api/stacks', method: 'GET' })
         .reply(200, [{ ...gitStack, ...overrides }]);
+      pool
+        .intercept({ path: '/api/stacks/5', method: 'GET' })
+        .reply(200, { ...gitStack, ...overrides });
       return pool;
     };
 
@@ -416,6 +425,41 @@ describe('PortainerClient stack writes', () => {
         expect(error).toBeInstanceOf(PortainerError);
         expect((error as PortainerError).message).toMatch(/is not an interval/);
       }
+    });
+
+    it('echoes the stack as it is now, not as the cached list had it', async () => {
+      // The list is cached for fifteen seconds and a stack write does not
+      // retire it. Left to that, a variable or a branch changed in
+      // Portainer's own UI a moment ago would be reverted by the very payload
+      // written to preserve it.
+      const pool = agent.get(BASE_URL);
+      pool
+        .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+        .reply(200, [fixtures.localEnvironment]);
+      pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, [gitStack]);
+      pool.intercept({ path: '/api/stacks/5', method: 'GET' }).reply(200, {
+        ...gitStack,
+        Env: [{ name: 'TZ', value: 'UTC' }],
+        GitConfig: { ...gitStack.GitConfig, ReferenceName: 'refs/heads/winter' },
+      });
+      const sent = capture(pool);
+
+      await createClient(agent).stackAutoUpdate(5, { interval: '1h' });
+
+      expect(sent.body?.Env).toEqual([{ name: 'TZ', value: 'UTC' }]);
+      expect(sent.body?.RepositoryReferenceName).toBe('refs/heads/winter');
+    });
+
+    it('does not claim flags Portainer has nowhere to keep', async () => {
+      // With neither trigger on there is no record to carry them, so the
+      // answer would otherwise describe a state Portainer is not in.
+      const pool = withGitStack();
+      const sent = capture(pool);
+
+      const state = await createClient(agent).stackAutoUpdate(5, { pullImage: true, force: true });
+
+      expect(sent.body?.AutoUpdate).toBeNull();
+      expect(state).toEqual({ pullImage: false, force: false });
     });
 
     it('takes the compound durations Go writes', async () => {
