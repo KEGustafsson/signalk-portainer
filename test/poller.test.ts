@@ -166,6 +166,67 @@ describe('DeltaPoller', () => {
     expect(health[0]?.[0]?.error).toBeTruthy();
   });
 
+  describe('reading one instance because Docker said it changed', () => {
+    it('publishes that instance without touching the others', async () => {
+      // What the event stream asks for: the container that just died shows up
+      // now rather than at the end of the interval, and the instance beside it
+      // is not re-read for nothing.
+      interceptOk('https://boat.test:9443');
+
+      await build(new InstanceRegistry(config)).refresh('boat');
+
+      expect(published).toHaveLength(1);
+      expect(paths(0)['system.docker.boat.status.reachable']).toBe(true);
+      expect(agent.pendingInterceptors()).toHaveLength(0);
+    });
+
+    it('ignores an instance that is not configured', async () => {
+      await build(new InstanceRegistry(boatOnly)).refresh('shore');
+
+      expect(published).toEqual([]);
+    });
+
+    it('publishes nothing once the poller has stopped', async () => {
+      const poller = build(new InstanceRegistry(boatOnly));
+      poller.stop();
+
+      await poller.refresh('boat');
+
+      expect(published).toEqual([]);
+    });
+
+    it('does not read the same instance twice at once', async () => {
+      // A burst is already collapsed upstream, but two reads of the same
+      // container list is exactly the bandwidth this exists to save.
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let reads = 0;
+      const registry = {
+        names: ['boat'],
+        get: () => ({
+          capabilities: () => Promise.resolve({ swarm: false }),
+          docker: {
+            listContainers: async () => {
+              reads += 1;
+              await held;
+              return fixtures.containers;
+            },
+          },
+        }),
+      } as unknown as InstanceRegistry;
+
+      const poller = build(registry);
+      const first = poller.refresh('boat');
+      const second = poller.refresh('boat');
+      release();
+      await Promise.all([first, second]);
+
+      expect(reads).toBe(1);
+    });
+  });
+
   it('publishes each instance as its own snapshot settles', async () => {
     interceptOk('https://boat.test:9443');
     interceptOk('https://shore.test:9443');

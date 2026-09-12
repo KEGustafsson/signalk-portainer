@@ -216,6 +216,23 @@ export interface DockerContainerTop {
   Processes: string[][];
 }
 
+/**
+ * One entry from Docker's event stream, narrowed to what this plugin reads.
+ *
+ * Docker sends a great deal more per event — the image, the labels, the
+ * scope. Only the three fields below decide anything here: what kind of thing
+ * changed, what happened to it, and which one it was.
+ */
+export interface DockerEvent {
+  /** `container`, `image`, `network`… — the plugin subscribes to containers. */
+  Type?: string;
+  /** `start`, `die`, `health_status: unhealthy`, `exec_create: sh`… */
+  Action?: string;
+  Actor?: { ID?: string; Attributes?: Record<string, string> };
+  /** Seconds since the epoch, as Docker writes it. */
+  time?: number;
+}
+
 /** What a pull ended with: Docker's last status line, e.g. "Downloaded newer image". */
 export interface ImagePullResult {
   reference?: string;

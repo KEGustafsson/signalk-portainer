@@ -7,6 +7,30 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+
+- **Container changes arrive as they happen.** The plugin subscribes to
+  Docker's event stream through Portainer's proxy — one idle connection per
+  instance — and reads that instance the moment a container starts, dies,
+  pauses or changes health, instead of waiting out the poll interval. A
+  container that dies at 02:00:01 now raises its watchdog alarm at 02:00:01
+  rather than up to an interval later, and the panel and the Signal K deltas
+  follow it just as quickly.
+
+  The interval keeps running underneath, so this adds no new way for the plugin
+  to go quiet: an environment with no Docker API behind it never opens a
+  stream and keeps the interval it had, a stream that drops reconnects with a
+  backoff and is logged once per outage rather than once per attempt, and a
+  read that fails is contained exactly as a polled one is. Only container
+  events are subscribed to, and only the actions that change what the plugin
+  publishes cause a read — a console session's `exec_create` and `exec_start`
+  are ignored, and the burst a stack deploy makes is collapsed into one read
+  rather than one per container.
+
+  The practical effect is that the poll interval now bounds how long a _missed_
+  change can go unnoticed, rather than how long every change waits, so a boat
+  on a metered link can raise it without the panel and the watchdog going stale.
+
 A robustness pass over every layer, from five reviews of the whole codebase, and
 the Portainer and Docker calls the plugin was missing.
 

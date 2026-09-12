@@ -58,6 +58,8 @@ export class DeltaPoller {
   private readonly builders = new Map<string, DeltaBuilder>();
   /** True while a poll is in flight, so a slow poll never overlaps itself. */
   private polling = false;
+  /** Instances with an event-driven read in flight, for the same reason. */
+  private readonly refreshing = new Set<string>();
   private stopped = false;
 
   constructor(private readonly deps: PollerDeps) {}
@@ -89,6 +91,41 @@ export class DeltaPoller {
     // live problem while the thing that would clear it is no longer running.
     const cleared = this.deps.watchdog?.clear() ?? [];
     if (cleared.length > 0) this.deps.publishNotifications?.(cleared);
+  }
+
+  /**
+   * Reads one instance now, because Docker said something about it changed.
+   *
+   * Everything the interval poll does for an instance, except the health
+   * report: that is a statement about the instances together — "1 of 2
+   * reachable" — and cannot be assembled from one of them. Health stays with
+   * the timer, which still runs.
+   *
+   * Never rejects, and never queues: an instance already being read will be
+   * read again by the timer, and a second concurrent listing of the same
+   * containers is the bandwidth this exists to save.
+   */
+  async refresh(name: string): Promise<void> {
+    if (this.stopped || this.refreshing.has(name)) return;
+    const registry = this.deps.registry();
+    if (!registry?.names.includes(name)) return;
+
+    this.refreshing.add(name);
+    try {
+      const snapshot = await this.snapshot(registry, name);
+      if (!this.stopped) this.publishInstance(name, snapshot);
+    } catch (cause) {
+      // `snapshot` contains its own failures and `publishInstance` contains
+      // its own; this is the backstop, because an unhandled rejection from a
+      // stream callback ends the Signal K process rather than the read.
+      this.deps.log(
+        `event-driven read of instance ${name} failed: ${
+          cause instanceof Error ? cause.message : String(cause)
+        }`,
+      );
+    } finally {
+      this.refreshing.delete(name);
+    }
   }
 
   /** Exposed for tests, which drive the loop rather than waiting on a timer. */

@@ -431,6 +431,81 @@ describe('logQuery', () => {
   });
 });
 
+describe('PortainerClient event stream', () => {
+  let agent: MockAgent;
+
+  beforeEach(() => {
+    agent = createMockAgent();
+  });
+
+  afterEach(async () => {
+    await agent.close();
+    restoreGlobalDispatcher();
+  });
+
+  const eventPath = `/api/endpoints/1/docker/events?filters=${encodeURIComponent(
+    JSON.stringify({ type: ['container'] }),
+  )}`;
+
+  const withEnvironment = () =>
+    agent
+      .get(BASE_URL)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+
+  it('asks Docker for container events only', async () => {
+    // Images and networks change nothing this plugin publishes, and every
+    // event that crosses a boat's link is bandwidth.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: eventPath, method: 'GET' })
+      .reply(200, '{"Type":"container","Action":"start","Actor":{"ID":"abc"}}\n');
+
+    const events = await createClient(agent).docker.eventStream(new AbortController().signal);
+
+    const collected = [];
+    for await (const event of events) collected.push(event);
+    expect(collected).toEqual([{ Type: 'container', Action: 'start', Actor: { ID: 'abc' } }]);
+    expect(agent.pendingInterceptors()).toHaveLength(0);
+  });
+
+  it('skips a line that is not an event rather than ending the subscription', async () => {
+    // A proxy that injects a keep-alive newline, or a blank line between
+    // events, is not a reason to stop watching for the rest of the voyage.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: eventPath, method: 'GET' })
+      .reply(
+        200,
+        '\n{"Type":"container","Action":"die"}\nnot json\n{"Type":"container","Action":"start"}\n',
+      );
+
+    const events = await createClient(agent).docker.eventStream(new AbortController().signal);
+
+    const actions = [];
+    for await (const event of events) actions.push(event.Action);
+    expect(actions).toEqual(['die', 'start']);
+  });
+
+  it('gives up on a handshake that never completes', async () => {
+    // The body is meant to stay open, but opening it still has to end
+    // somewhere, or a Portainer that accepts the connection and says nothing
+    // holds the request until the process restarts.
+    withEnvironment();
+    agent
+      .get(BASE_URL)
+      .intercept({ path: eventPath, method: 'GET' })
+      .reply(200, Buffer.alloc(0))
+      .delay(2_000);
+
+    await expect(
+      createClient(agent, { timeoutMs: 50 }).docker.eventStream(new AbortController().signal),
+    ).rejects.toBeInstanceOf(PortainerError);
+  });
+});
+
 describe('PortainerClient log streams', () => {
   let agent: MockAgent;
 
