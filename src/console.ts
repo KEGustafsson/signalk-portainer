@@ -236,6 +236,13 @@ async function accept(
     // while the ticket was being redeemed should not cause a shell process to
     // be started in the container at all.
     if (state.closing || gone) {
+      // The permit and the session go back here too. Both are taken a few
+      // lines above and this path returns without reaching the relay, whose
+      // onEnd is what otherwise releases them — so leaving them held leaks a
+      // console slot for the lifetime of the plugin, and three of those is a
+      // console that refuses every attempt until Signal K restarts.
+      release?.();
+      if (sessionAdded) options.sessions.remove(grant.session);
       browser.close(RELAY_CLOSE.refused, 'the console is no longer available');
       return;
     }

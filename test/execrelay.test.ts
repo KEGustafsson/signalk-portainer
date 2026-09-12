@@ -46,6 +46,26 @@ class FakeSocket implements RelaySocket {
   }
 }
 
+/**
+ * A socket that also offers the optional `ws` methods.
+ *
+ * Kept apart from `FakeSocket` on purpose: the heartbeat only arms when the
+ * browser can ping, so giving every socket these would start a timer in every
+ * test above rather than only where one is being tested.
+ */
+class PingableSocket extends FakeSocket {
+  pings = 0;
+  terminated = false;
+
+  ping(): void {
+    this.pings += 1;
+  }
+
+  terminate(): void {
+    this.terminated = true;
+  }
+}
+
 describe('relay', () => {
   const pair = (options: Parameters<typeof relay>[2] = {}) => {
     const browser = new FakeSocket();
@@ -184,6 +204,139 @@ describe('relay', () => {
     expect(browser.closed).toBeDefined();
     expect(upstream.closed).toBeDefined();
     expect(ended).toEqual(['the plugin stopped']);
+  });
+
+  it('refuses a message too large to relay rather than carrying it', () => {
+    // One message is bounded on its own as well as by the queue behind it: a
+    // peer that sends a megabyte in a single frame gets there before
+    // bufferedAmount has anything to say about it.
+    const { browser, upstream } = pair();
+
+    browser.emit('message', 'x'.repeat(1024 * 1024 + 1));
+
+    expect(upstream.sent).toHaveLength(0);
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.refused);
+    expect(browser.closed?.reason).toBe('a message was too large to relay');
+  });
+
+  it('gives up on a receiver that is already past the hard limit', () => {
+    // Past this there is no recovering by pausing: the queue is the heap.
+    const { browser, upstream } = pair();
+
+    upstream.bufferedAmount = 9 * 1024 * 1024;
+    browser.emit('message', 'more');
+
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.refused);
+    expect(browser.closed?.reason).toBe('the other end could not keep up');
+  });
+
+  it('stringifies a message that is neither text nor bytes', () => {
+    // Swallowing a keystroke is worse than sending something odd.
+    const { browser, upstream } = pair();
+
+    browser.emit('message', 42);
+
+    expect(upstream.sent).toEqual(['42']);
+  });
+
+  it('says so when Portainer closes for its own reasons', () => {
+    // The agent lost, Docker restarted, the proxy giving up: reporting that as
+    // the shell exiting sends the operator to open another one that fails the
+    // same way.
+    const { browser, upstream } = pair();
+
+    upstream.emit('close', 1006);
+
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.upstream);
+    expect(browser.closed?.reason).toBe('the connection to Portainer closed (1006)');
+  });
+
+  describe('back pressure', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    it('lets the sender go again once the receiver has drained', () => {
+      const { browser, upstream, end } = pair();
+
+      upstream.bufferedAmount = 2 * 1024 * 1024;
+      browser.emit('message', 'a very long paste');
+      expect(browser.paused).toBe(true);
+
+      // Still above the low mark: pausing has not achieved anything yet.
+      upstream.bufferedAmount = 512 * 1024;
+      jest.advanceTimersByTime(200);
+      expect(browser.paused).toBe(true);
+
+      upstream.bufferedAmount = 1024;
+      jest.advanceTimersByTime(200);
+      expect(browser.paused).toBe(false);
+
+      end();
+    });
+
+    it('ends the console when a paused receiver keeps growing anyway', () => {
+      // Pausing the sender is the recovery; a queue that grows through it
+      // means the receiver is gone rather than slow.
+      const { browser, upstream } = pair();
+
+      upstream.bufferedAmount = 2 * 1024 * 1024;
+      browser.emit('message', 'a very long paste');
+      expect(browser.paused).toBe(true);
+
+      upstream.bufferedAmount = 9 * 1024 * 1024;
+      jest.advanceTimersByTime(200);
+
+      expect(browser.closed?.code).toBe(RELAY_CLOSE.refused);
+      expect(browser.closed?.reason).toBe('the other end could not keep up');
+    });
+  });
+
+  describe('the heartbeat', () => {
+    beforeEach(() => jest.useFakeTimers());
+    afterEach(() => jest.useRealTimers());
+
+    const pingable = (heartbeatMs: number) => {
+      const browser = new PingableSocket();
+      const upstream = new PingableSocket();
+      const end = relay(browser, upstream, { idleMs: 0, heartbeatMs });
+      return { browser, upstream, end };
+    };
+
+    it('asks both ends whether they are still there', () => {
+      const { browser, upstream, end } = pingable(1000);
+
+      jest.advanceTimersByTime(1001);
+
+      expect(browser.pings).toBe(1);
+      expect(upstream.pings).toBe(1);
+      end();
+    });
+
+    it('keeps a console that answers', () => {
+      const { browser, upstream, end } = pingable(1000);
+
+      for (let round = 0; round < 4; round += 1) {
+        jest.advanceTimersByTime(1001);
+        browser.emit('pong');
+        upstream.emit('pong');
+      }
+
+      expect(browser.closed).toBeUndefined();
+      end();
+    });
+
+    it('terminates a half-open connection that answers nothing', () => {
+      // close() waits for a FIN that a vanished peer will never send, which is
+      // how these were held open; terminate is what actually reclaims it.
+      const { browser } = pingable(1000);
+
+      jest.advanceTimersByTime(1001);
+      jest.advanceTimersByTime(1001);
+
+      expect(browser.terminated).toBe(true);
+      expect(browser.closed?.code).toBe(RELAY_CLOSE.upstream);
+      expect(browser.closed?.reason).toBe('the connection stopped answering');
+    });
   });
 
   describe('the idle timeout', () => {

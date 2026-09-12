@@ -13,6 +13,8 @@ const mockSockets: { url: string; options: Record<string, unknown>; terminated: 
  * neither 'open' nor 'error' for that.
  */
 let mockSocketStalls = false;
+/** When set, the socket fails the connection rather than opening it. */
+let mockSocketFails = false;
 
 jest.mock('ws', () => ({
   WebSocket: class {
@@ -21,11 +23,15 @@ jest.mock('ws', () => ({
       mockSockets.push(this.record);
       // The real socket opens on the next turn, so the await in connectWithWs
       // is a real one.
-      if (!mockSocketStalls) setImmediate(() => this.handlers.get('open')?.());
+      if (mockSocketFails) {
+        setImmediate(() => this.handlers.get('error')?.(new Error('certificate has expired')));
+      } else if (!mockSocketStalls) {
+        setImmediate(() => this.handlers.get('open')?.());
+      }
     }
     private readonly record: { url: string; options: Record<string, unknown>; terminated: boolean };
-    private readonly handlers = new Map<string, () => void>();
-    once(event: string, listener: () => void): this {
+    private readonly handlers = new Map<string, (arg?: unknown) => void>();
+    once(event: string, listener: (arg?: unknown) => void): this {
       this.handlers.set(event, listener);
       return this;
     }
@@ -198,6 +204,29 @@ describe('openConsole', () => {
     expect(upstream.sent).toEqual(['ls\n', 'pwd\n']);
   });
 
+  it('holds binary keystrokes in every shape ws delivers them', async () => {
+    // Terminal traffic is bytes, and what is typed before the shell exists is
+    // measured against the backlog allowance and then replayed. Both of those
+    // have to understand a Uint8Array, an ArrayBuffer and the array of pieces
+    // ws hands over for a fragmented message, or a paste arriving as binary is
+    // silently dropped on its way to a shell that had not opened yet.
+    const { endpoint, tickets, upstream } = setup();
+    const browser = new FakeSocket();
+    endpoint.connection?.(browser, { url: `/console?ticket=${tickets.mint(grant)}` });
+
+    browser.emit('message', new Uint8Array([0x6c, 0x73]));
+    browser.emit('message', new Uint8Array([0x20]).buffer);
+    browser.emit('message', [new Uint8Array([0x2d]), new Uint8Array([0x6c])]);
+    browser.emit('message', 7);
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(
+      upstream.sent
+        .map((part) => (typeof part === 'string' ? part : Buffer.from(part).toString()))
+        .join(''),
+    ).toBe('ls -l7');
+  });
+
   it('refuses a socket with no ticket', async () => {
     // The cookie rides along on an upgrade and CORS does not stop one, so the
     // ticket is the only thing that authorises this.
@@ -211,6 +240,48 @@ describe('openConsole', () => {
 
     expect(browser.closed?.code).toBe(RELAY_CLOSE.unauthorized);
     expect(upstream.sent).toHaveLength(0);
+  });
+
+  it('reports a console Portainer refused outright', async () => {
+    // A private CA that has expired, a proxy rejecting the upgrade: the socket
+    // errors rather than stalling, and the permit and session have to come
+    // back on that path as much as on the timeout.
+    mockSocketFails = true;
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    try {
+      const { tickets, connect, sessions, lines } = setup({ realConnect: true, limits });
+
+      const browser = await connect(tickets.mint(grant));
+      await new Promise((resolve) => setTimeout(resolve, 20));
+
+      expect(browser.closed?.code).toBe(RELAY_CLOSE.upstream);
+      expect(limits.openCount).toBe(0);
+      expect(sessions.size).toBe(0);
+      expect(lines.join('\n')).toContain('certificate has expired');
+    } finally {
+      mockSocketFails = false;
+    }
+  });
+
+  it('does not start a shell for a plugin that is already stopping', async () => {
+    // The ticket is valid and the browser is connected, but Signal K is on its
+    // way down: starting a process in the container now leaves one behind.
+    const limits = new StreamLimiter({ total: 1, perTarget: 1 });
+    const { tickets, sessions, endpoint, server, upstream } = setup({ limits });
+    server.close();
+
+    const browser = new FakeSocket();
+    endpoint.connection?.(browser, { url: `/console?ticket=${tickets.mint(grant)}` });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    expect(browser.closed?.code).toBe(RELAY_CLOSE.refused);
+    expect(browser.closed?.reason).toBe('the console is no longer available');
+    // Nothing was asked of Portainer, and neither the permit nor the session
+    // was left behind: this path returns before the relay exists, so nothing
+    // else ever gives them back.
+    expect(upstream.sent).toHaveLength(0);
+    expect(sessions.size).toBe(0);
+    expect(limits.openCount).toBe(0);
   });
 
   it('refuses a ticket that was already used', async () => {
