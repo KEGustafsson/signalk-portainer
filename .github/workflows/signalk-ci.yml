@@ -63,7 +63,7 @@ jobs:
   # ── Automatic runs (push / pull request) ──────────────────
   plugin-ci:
     if: ${{ github.event_name != 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@9edfbf958eb7addb69140a605b4d21a0df249fdc # SignalK/signalk-server master @ 2026-08-23
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@dd491dd17e621ccffcc228da8b7a823df6cb0ebe # SignalK/signalk-server master @ 2026-08-23
     with:
       # `npm test` is `jest --coverage` and enforces the 80% threshold.
       # Passing it as coverage-command puts the summary in the job output.
@@ -86,7 +86,7 @@ jobs:
   # ── Manual runs (workflow_dispatch with custom inputs) ────
   plugin-ci-manual:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@9edfbf958eb7addb69140a605b4d21a0df249fdc # SignalK/signalk-server master @ 2026-08-23
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@dd491dd17e621ccffcc228da8b7a823df6cb0ebe # SignalK/signalk-server master @ 2026-08-23
     with:
       test-command: npm test
       coverage-command: npm test
@@ -107,7 +107,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
@@ -129,7 +129,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version: '22'
           cache: npm
