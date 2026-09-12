@@ -417,7 +417,7 @@ describe('StackEditor', () => {
       await user.type(screen.getByLabelText('Name'), '../etc');
 
       expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
-      expect(screen.getByText(/only letters, digits/)).toBeInTheDocument();
+      expect(screen.getByText(/only lowercase letters/)).toBeInTheDocument();
     });
 
     it('creates from a compose file', async () => {

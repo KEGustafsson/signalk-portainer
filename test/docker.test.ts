@@ -190,10 +190,12 @@ describe('PortainerClient docker read surface', () => {
     withEnvironment();
     agent
       .get(BASE_URL)
-      // The slashes and the colon of a registry tag reach Docker as part of
-      // the image name, not as more path.
+      // A registry tag's slashes and colon reach Docker as they were
+      // written: Docker's route takes the rest of the path as the image
+      // name, and Portainer's proxy refuses a path carrying an encoded
+      // separator outright.
       .intercept({
-        path: '/api/endpoints/1/docker/images/ghcr.io%2Fowner%2Fapp%3A1.2',
+        path: '/api/endpoints/1/docker/images/ghcr.io/owner/app:1.2',
         method: 'DELETE',
       })
       .reply(200, [{ Untagged: 'ghcr.io/owner/app:1.2' }, { Deleted: 'sha256:aaa' }]);
@@ -211,7 +213,7 @@ describe('PortainerClient docker read surface', () => {
     withEnvironment();
     agent
       .get(BASE_URL)
-      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
       .reply(409, { message: 'conflict: unable to delete sha256:aaa (cannot be forced)' });
 
     const client = createClient(agent);

@@ -11,6 +11,9 @@ import { hostname as osHostname } from 'node:os';
 
 export type SelfSource = 'cgroup' | 'mountinfo' | 'hostname' | 'none';
 
+/** Files a container runtime leaves at the root of its containers. */
+const RUNTIME_MARKERS = ['/.dockerenv', '/run/.containerenv'] as const;
+
 export interface SelfContainer {
   /** True when this process appears to be inside a container at all. */
   inContainer: boolean;
@@ -40,15 +43,30 @@ const CGROUP_PATTERNS: readonly RegExp[] = [
   /\/docker[/-]([0-9a-f]{64})/,
   // systemd driver: .../system.slice/docker-<64hex>.scope
   /docker-([0-9a-f]{64})\.scope/,
+  // podman: .../machine.slice/libpod-<64hex>.scope
+  /libpod-([0-9a-f]{64})\.scope/,
   // containerd / CRI, as used by Kubernetes
   /cri-containerd[-:]([0-9a-f]{64})/,
   // kubepods: .../pod<uuid>/<64hex>
   /\/kubepods\/.*\/([0-9a-f]{64})/,
 ];
 
-// Docker bind-mounts /etc/hostname, /etc/hosts and /etc/resolv.conf from
-// /var/lib/docker/containers/<id>/, which survives cgroup v2 hiding the id.
-const MOUNTINFO_PATTERN = /\/containers\/([0-9a-f]{64})\//;
+/**
+ * Docker bind-mounts /etc/hostname, /etc/hosts and /etc/resolv.conf from
+ * /var/lib/docker/containers/<id>/, which survives cgroup v2 hiding the id;
+ * podman does the same from its own storage.
+ *
+ * Read as a mount table, not as text. A line's fourth field is where the
+ * mounted thing lives on its source filesystem and its fifth is where it is
+ * mounted, and only the pairing identifies a container: its own id in the
+ * source, one of the three files as the destination. Matching the id
+ * anywhere in the file was how a Signal K installed on the host beside
+ * Docker — the ordinary Raspberry Pi setup — found the first container's
+ * `shm` mount in the host's own mount table, decided it was that container,
+ * and refused to stop it.
+ */
+const MOUNTINFO_LINE =
+  /^\S+ \S+ \S+ \S*\/(?:containers|overlay-containers)\/([0-9a-f]{64})\/\S* (\/etc\/(?:hostname|hosts|resolv\.conf)) /m;
 
 const HOSTNAME_PATTERN = /^[0-9a-f]{12}$/;
 
@@ -89,16 +107,16 @@ export function detectSelfContainer(overrides: Partial<SelfSources> = {}): SelfC
 
   const cgroup = sources.readFile('/proc/self/cgroup');
   const mountinfo = sources.readFile('/proc/self/mountinfo');
-  const dockerEnv = sources.fileExists('/.dockerenv');
+  const marker = RUNTIME_MARKERS.some((path) => sources.fileExists(path));
 
   const fromCgroup = matchFirst(cgroup, CGROUP_PATTERNS);
   if (fromCgroup) return identified(fromCgroup, 'cgroup');
 
-  const fromMountinfo = matchFirst(mountinfo, [MOUNTINFO_PATTERN]);
+  const fromMountinfo = matchFirst(mountinfo, [MOUNTINFO_LINE]);
   if (fromMountinfo) return identified(fromMountinfo, 'mountinfo');
 
   // Nothing carried an id. Decide whether we are containerised at all.
-  const containerised = dockerEnv || looksContainerised(cgroup, mountinfo);
+  const containerised = marker || looksContainerised(cgroup, mountinfo);
   if (!containerised) {
     return { inContainer: false, source: 'none', identified: false };
   }
@@ -126,10 +144,24 @@ function matchFirst(text: string | undefined, patterns: readonly RegExp[]): stri
   return undefined;
 }
 
-/** cgroup v2 in a container still shows container-ish mounts even without an id. */
+/**
+ * cgroup v2 in a container still shows container-ish paths even without an id.
+ *
+ * The cgroup path is the tell; the mount table is not. A host running Docker
+ * has `/var/lib/docker/…` mounts in its own table for every container it
+ * runs, and reading those as "we are inside one" told a Signal K installed
+ * beside Docker that it was containerised but unidentifiable — a warning
+ * about protection it never needed. Only a mount whose *destination* is one
+ * of the files Docker binds into a container counts.
+ */
 function looksContainerised(cgroup: string | undefined, mountinfo: string | undefined): boolean {
-  if (cgroup && /\/(docker|kubepods|containerd)\b/.test(cgroup)) return true;
-  return Boolean(mountinfo && /\/var\/lib\/(docker|containerd)\//.test(mountinfo));
+  if (cgroup && /\/(docker|kubepods|containerd|libpod)\b/.test(cgroup)) return true;
+  return Boolean(
+    mountinfo &&
+    /^\S+ \S+ \S+ \S*\/(?:docker|containers|containerd)\/\S* \/etc\/(?:hostname|hosts|resolv\.conf) /m.test(
+      mountinfo,
+    ),
+  );
 }
 
 /**

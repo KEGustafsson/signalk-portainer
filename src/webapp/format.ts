@@ -28,6 +28,14 @@ export function formatBytes(bytes: number | undefined): string {
     value /= 1000;
     unit += 1;
   }
+  // Rounded before the threshold is re-checked, not after: 999 950 B scales
+  // to 999.95 kB, which is under the limit, and then rounds to the printed
+  // "1000 kB" — a unit that does not exist beside the one above it.
+  const digits = value < 10 ? 1 : 0;
+  if (Number(value.toFixed(digits)) >= 1000 && unit < UNITS.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
   return `${sign}${value.toFixed(value < 10 ? 1 : 0)} ${UNITS[unit]}`;
 }
 

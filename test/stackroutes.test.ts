@@ -123,14 +123,32 @@ describe('facade stack writes', () => {
     });
 
     it('matches the project name however it was cased', async () => {
+      // Compose lowercases a project name it derives from a directory, while
+      // Portainer keeps a stack name as typed, so the guard compares without
+      // regard to case.
+      withEnvironment();
+      withContainers(inStack(SELF_ID, 'signalk-server', 'SignalK'));
+
+      const res = await request(app({ self: selfContainer }))
+        .post('/api/stacks')
+        .send({ name: 'signalk', content: 'services: {}' });
+
+      expect(res.status).toBe(403);
+    });
+
+    it('refuses a name compose would not accept as a project', async () => {
+      // Uppercase and dots are what Portainer's own form refuses; what
+      // happens to them afterwards depends on the version, so they are
+      // refused here rather than deployed under a name nobody typed.
       withEnvironment();
       withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
 
       const res = await request(app({ self: selfContainer }))
         .post('/api/stacks')
-        .send({ name: 'SignalK', content: 'services: {}' });
+        .send({ name: 'My.Stack', content: 'services: {}' });
 
-      expect(res.status).toBe(403);
+      expect(res.status).toBe(400);
+      expect(asJson(res.body).error).toMatch(/lowercase/);
     });
 
     const withCreate = (name: string) => {

@@ -26,7 +26,13 @@ export class TtlCache {
    */
   private readonly epochs = new Map<string, number>();
 
-  constructor(private readonly now: () => number = Date.now) {}
+  /**
+   * Monotonic by default. Wall-clock time jumps on a boat computer without a
+   * real-time clock — backwards at boot until NTP answers, forwards when it
+   * does — and a jump backwards kept every expired entry alive for its
+   * length. Injectable for tests, which drive it by hand.
+   */
+  constructor(private readonly now: () => number = () => performance.now()) {}
 
   async get<T>(key: string, ttlMs: number, load: () => Promise<T>): Promise<T> {
     const entry = this.entries.get(key);

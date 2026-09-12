@@ -34,7 +34,10 @@ protected by Signal K's own authentication, and on top of that:
 ## Requirements
 
 - Signal K server running on Node.js 22 or newer.
-- Portainer CE 2.x, reachable from the Signal K server.
+- Portainer CE **2.17 or newer**, reachable from the Signal K server. Older
+  releases have no `/api/system/status`; the plugin falls back to the route it
+  replaced, so 2.x before 2.17 works but reports no Portainer version. Edge
+  environments report their own health from 2.18.1.
 
 Node 20 platforms — Venus OS / Cerbo GX among them — are out of scope.
 
@@ -434,9 +437,12 @@ enabled instance (`/instances` and `/health` span them all, and
 | `GET /images` `/volumes` `/networks` `/df` | inventory and disk usage                                                                              |
 | `DELETE /images/:reference`                | remove one image by id or tag — never forced, so Docker still refuses one in use                      |
 | `POST /images/prune`                       | reclaim space (`?all=true` widens it from untagged layers to every unused image)                      |
+| `POST /images/pull`                        | fetch an image: body `{ reference }`, e.g. `ghcr.io/owner/app:1.2`                                    |
+| `GET /containers/:id/stats`                | one reading of CPU, memory, network and block I/O — Docker samples twice, so it takes about a second  |
+| `GET /containers/:id/top`                  | the processes running inside a container                                                              |
 | `GET /swarm/services` `/swarm/nodes`       | 404 unless the daemon is a swarm                                                                      |
 | `GET /control`                             | what the UI may offer, and whether self-protection is active                                          |
-| `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause`                                           |
+| `POST /containers/:id/:action`             | `start` · `stop` · `restart` · `kill` · `pause` · `unpause` · `recreate` (needs destructive)          |
 | `POST /containers/:id/exec`                | a console ticket, redeemed on `ws://…/plugins/signalk-portainer/console?ticket=`                      |
 | `POST /console/resize`                     | `{ session, cols, rows }` — the size of an open console's terminal                                    |
 | `DELETE /containers/:id`                   | remove (`?force=` `?removeVolumes=`)                                                                  |
@@ -448,6 +454,33 @@ at most.
 `persisted` is false: the choice is live either way, but a server that offers a
 plugin no way to save its options cannot carry it across a restart. It is what
 step 4 of the configuration writes.
+
+`GET /environments` marks each row `supported`, and carries a `reason` when it is
+false: the plugin manages Docker through Portainer's proxy, and a Kubernetes or
+Azure environment has no Docker behind it while an Edge agent in **async** mode
+has no tunnel the proxy can use. Those are refused when chosen rather than
+accepted and then failing on every read. If the environment a saved id names has
+since been removed from Portainer, this route still answers — with `selected:
+null` and a `warning` — so the panel can offer the list again instead of
+dead-ending on a 404.
+
+`POST /containers/:id/recreate` is Portainer's own operation rather than
+Docker's: it removes the container and creates it again from the same
+configuration, carrying its networks and volumes across, and with `?pullImage=true`
+it fetches the image first. It is how a container started by hand — outside any
+stack — is moved to a newer image, and it needs Portainer 2.19 or newer. A stack's
+containers are updated by redeploying the stack instead.
+
+`POST /stacks/:id/redeploy` takes `?prune=` and `?pullImage=` as before, and also
+a JSON body: `{ prune, pullImage, username, password }`. The credentials are for
+a private repository whose stored ones need replacing — a token belongs in no URL.
+A redeploy that sends none reuses what Portainer stored with the stack.
+
+A stack write now waits for the deploy to finish. Portainer 2.42 and newer answer
+an update or a redeploy immediately and do the work in the background (2.44 for a
+create), so the route polls the stack until it leaves the _deploying_ state and
+reports a failed deploy with Portainer's own reason rather than reporting success
+while compose was still pulling.
 
 The routes that take a body — the environment choice and the stack writes — read
 it as JSON and stop at **512 kb**, answering 413 rather than reading further.
@@ -533,9 +566,11 @@ offers:
 - **Control disabled** — every mutating route returns 403 unless **Allow Signal
   K PUT control** is set.
 - **Destructive disabled** — removal additionally requires **Allow destructive
-  operations**. `removeVolumes` defaults to false, so a container's data is
-  never destroyed by implication, and an image prune stays narrow — untagged
-  layers only — unless `?all=true` asks for the wide one.
+  operations**: removing a container, recreating one, deleting a stack, and
+  deleting or pruning images. Volumes and networks have no write route at all —
+  `removeVolumes` on a container removal is the only way a volume goes, it
+  defaults to false, and an image prune stays narrow — untagged layers only —
+  unless `?all=true` asks for the wide one.
 - **Self-protection** — the plugin identifies the container it runs in and
   refuses to start, stop, restart, kill or remove it, and refuses to stop,
   update, redeploy or delete the _stack_ that contains it. Creating a stack whose
@@ -566,6 +601,20 @@ trail. The Signal K PUT path is quieter: it logs each write that reached Docker
 and each error that came back, but a refusal there — control disabled, an
 unknown container, the Signal K container itself — is answered `FAILED` with its
 reason and not written to the log.
+
+### What Portainer itself refuses
+
+Two things need an administrator credential in Portainer, whatever the plugin
+asks: **pruning images**, which Portainer marks an administrator operation and
+refuses with a 403 for any scoped token, and **stack management**, which an
+administrator can enable for non-admin users in Portainer's own settings. The
+README recommends a scoped token, so both are worth knowing before a button
+answers with a refusal that has nothing to do with this plugin.
+
+Portainer before 2.42 also ignores **prune** on a compose stack: the field did
+not exist in the update those versions accept, so services the new file no
+longer names keep running. The answer says so rather than leaving it to be
+found later. Swarm stacks prune on every version.
 
 ### Who may write
 

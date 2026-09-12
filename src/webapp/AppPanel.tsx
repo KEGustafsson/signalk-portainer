@@ -55,6 +55,17 @@ import {
 const POLL_INTERVAL_MS = 10_000;
 
 /**
+ * How far the poll backs off while reads are failing, and the ceiling it
+ * stops at.
+ *
+ * A Portainer that is down is down for minutes, not milliseconds, and every
+ * open admin tab was asking it again every ten seconds — on a boat's server,
+ * with a shore instance over a metered link, for as long as the tab stayed
+ * open.
+ */
+const POLL_BACKOFF_CEILING_MS = 60_000;
+
+/**
  * What `busyId` holds while a prune is in flight.
  *
  * A prune has no row to be busy on, and every other id in that slot is a
@@ -112,6 +123,11 @@ interface TabPayload {
   environments?: EnvironmentRow[];
   /** Only from /environments: which one this instance is working against. */
   selected?: number | null;
+  /**
+   * Only from /environments: why there is no selection when the operator
+   * made one. A saved id that Portainer no longer has is the usual reason.
+   */
+  warning?: string;
   containers?: DockerContainer[];
   stacks?: Stack[];
   images?: DockerImage[];
@@ -156,6 +172,14 @@ function Panel(): ReactElement {
   // the environment the operator failed to leave, so the banner disappears,
   // the selection has not moved, and the switch reads as having worked.
   const [setupError, setSetupError] = useState<ApiError | undefined>(undefined);
+  /**
+   * What the server said about a choice it could not honour: a saved
+   * environment id that no longer exists, or a selection it could not
+   * persist. Kept apart from the errors because neither stops the panel
+   * working — they only say that something will not be as the operator
+   * expects.
+   */
+  const [environmentWarning, setEnvironmentWarning] = useState<string | undefined>(undefined);
   const [loading, setLoading] = useState(true);
   const [control, setControl] = useState<ControlState | undefined>(undefined);
   const [confirming, setConfirming] = useState<ConfirmRequest | undefined>(undefined);
@@ -174,7 +198,25 @@ function Panel(): ReactElement {
   const [stackResult, setStackResult] = useState<
     { ok: true; message: string } | { ok: false; error: ApiError } | undefined
   >(undefined);
-  const [busyId, setBusyId] = useState<string | undefined>(undefined);
+  /**
+   * Every id a request is currently in flight for.
+   *
+   * A set rather than one id: two actions can be in flight at once — start
+   * one container, then another — and a single slot meant the first to
+   * finish re-enabled the second's buttons while its request was still open,
+   * so a second press re-sent it. Restart and Kill are not idempotent.
+   */
+  const [busyIds, setBusyIds] = useState<ReadonlySet<string>>(() => new Set());
+  const startBusy = useCallback((id: string) => {
+    setBusyIds((current) => new Set(current).add(id));
+  }, []);
+  const endBusy = useCallback((id: string) => {
+    setBusyIds((current) => {
+      const next = new Set(current);
+      next.delete(id);
+      return next;
+    });
+  }, []);
   // Docker's account of what the images cost, read only while the Images tab
   // is open. The image that is about to be deleted, and whether a prune is
   // being confirmed, live beside it.
@@ -212,6 +254,21 @@ function Panel(): ReactElement {
     () => TABS.find((candidate) => candidate.id === tab) ?? TABS[0]!,
     [tab],
   );
+
+  /**
+   * The tab on screen, readable from inside a `load` that was created for a
+   * different one.
+   *
+   * An action's refresh runs the `load` of the render it was started from,
+   * which is bound to the tab that was open then. After a switch that read
+   * the old tab's path, aborted the new tab's request and painted its answer
+   * under the new tab's heading — "No containers" for a table that had
+   * plenty.
+   */
+  const activeTabRef = useRef(activeTab);
+  useEffect(() => {
+    activeTabRef.current = activeTab;
+  });
 
   /**
    * Several environments, none chosen. Distinct from "still loading": the
@@ -254,11 +311,11 @@ function Panel(): ReactElement {
    */
   const loadEnvironments = useCallback(
     async (signal?: AbortSignal, wanted: () => boolean = () => true): Promise<void> => {
-      const body = await apiGet<{ environments: EnvironmentRow[]; selected: number | null }>(
-        '/environments',
-        instance,
-        signal,
-      );
+      const body = await apiGet<{
+        environments: EnvironmentRow[];
+        selected: number | null;
+        warning?: string;
+      }>('/environments', instance, signal);
       // An answer belonging to an instance the operator has already left must
       // not paint the picker: the header would name the wrong Docker host, and
       // the Environments tab would then offer the other instance's ids —
@@ -272,6 +329,7 @@ function Panel(): ReactElement {
       // yet" and holds the panel back, and an answer that omits the field would
       // otherwise hold it back for good.
       setEnvironment(body.selected ?? null);
+      setEnvironmentWarning(typeof body.warning === 'string' ? body.warning : undefined);
     },
     [instance],
   );
@@ -322,48 +380,57 @@ function Panel(): ReactElement {
     };
   }, [instance, instances.length, environment, needsEnvironment]);
 
-  useEffect(() => {
-    if (instances.length === 0) return;
-    let cancelled = false;
-    apiGet<unknown>('/control', instance)
-      .then((body) => {
-        if (!cancelled) setControl(normalizeControl(body));
-      })
-      .catch(() => {
-        // Without an answer the panel offers nothing rather than guessing: the
-        // buttons stay disabled and say they are waiting on the plugin.
-        if (!cancelled) setControl(undefined);
-      });
-    return () => {
-      cancelled = true;
-    };
-  }, [instance, instances.length]);
+  /**
+   * What the server currently allows, re-read on every tick.
+   *
+   * Read once per instance, an open panel never learned that control had
+   * been enabled in the plugin configuration: every button stayed inert
+   * until the page was reloaded. This is a read of the plugin's own parsed
+   * configuration, with no Portainer call behind it.
+   */
+  const loadControl = useCallback(async (): Promise<void> => {
+    try {
+      setControl(normalizeControl(await apiGet<unknown>('/control', instance)));
+    } catch {
+      // Without an answer the panel offers nothing rather than guessing: the
+      // buttons stay disabled and say they are waiting on the plugin.
+      setControl(undefined);
+    }
+  }, [instance]);
 
-  const load = useCallback(async (): Promise<void> => {
+  const load = useCallback(async (): Promise<boolean> => {
+    // The tab as it is now, not as it was when this callback was created.
+    const target = activeTabRef.current;
     inFlight.current?.abort();
     const controller = new AbortController();
     inFlight.current = controller;
     const seq = (requestSeq.current += 1);
     try {
-      const body = await apiGet<TabPayload>(activeTab.path, instance, controller.signal);
-      if (seq !== requestSeq.current) return;
+      const body = await apiGet<TabPayload>(target.path, instance, controller.signal);
+      if (seq !== requestSeq.current) return true;
       setPayload(body);
       // This tab reads the very list the choice is made from, so one read keeps
       // both current: an environment that goes down, or a choice made from
       // another browser, shows up without a second request.
-      if (activeTab.id === 'environments') {
+      if (target.id === 'environments') {
         setEnvironments(rowsOf(body.environments));
         setEnvironment(body.selected ?? null);
+        setEnvironmentWarning(typeof body.warning === 'string' ? body.warning : undefined);
       }
       setError(undefined);
+      return true;
     } catch (cause) {
       // A cancelled request is expected, not a failure to report.
-      if (isAbort(cause) || seq !== requestSeq.current) return;
+      if (isAbort(cause) || seq !== requestSeq.current) return true;
       setError(asApiError(cause));
+      return false;
     } finally {
-      if (seq === requestSeq.current) setLoading(false);
+      if (seq === requestSeq.current) {
+        setLoading(false);
+        inFlight.current = undefined;
+      }
     }
-  }, [activeTab.id, activeTab.path, instance]);
+  }, [instance]);
 
   /**
    * Docker's own figures for the images: what the layers cost, and which of
@@ -434,14 +501,69 @@ function Panel(): ReactElement {
       return;
     }
     setLoading(true);
-    void load();
-    const timer = setInterval(() => void load(), POLL_INTERVAL_MS);
+    let stopped = false;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let delay = POLL_INTERVAL_MS;
+
+    /**
+     * One tick, and the next one scheduled from what this one cost.
+     *
+     * A fixed interval that aborted its own predecessor could never report a
+     * backend that had stopped answering: every read was cancelled by the
+     * next before its own deadline could fire, so the panel sat under
+     * "Loading…" with no error, asking again forever. A tick that finds a
+     * read still in flight now leaves it alone and lets the deadline in
+     * `api.ts` turn it into a real failure — and a failure slows the next
+     * one down instead of hammering a Portainer that is down.
+     */
+    const tick = async (): Promise<void> => {
+      if (stopped) return;
+      if (document.hidden || inFlight.current) {
+        schedule(delay);
+        return;
+      }
+      // The control read rides along with the poll: it is a read of the
+      // plugin's own configuration, so it costs nothing upstream.
+      void loadControl();
+      const ok = await load();
+      delay = ok
+        ? POLL_INTERVAL_MS
+        : Math.min(POLL_BACKOFF_CEILING_MS, Math.max(POLL_INTERVAL_MS, delay * 2));
+      schedule(delay);
+    };
+
+    function schedule(after: number): void {
+      if (stopped) return;
+      timer = setTimeout(() => void tick(), after);
+    }
+
+    void (async () => {
+      // The first read of both, before any tick: what the server allows is
+      // what decides whether a row's buttons are offered at all, and waiting
+      // a whole interval for it left every button inert on arrival.
+      void loadControl();
+      await load();
+      schedule(delay);
+    })();
+
+    // A hidden tab stops asking, and asks once the moment it is looked at
+    // again rather than waiting out the delay it stopped on.
+    const onVisible = (): void => {
+      if (stopped || document.hidden) return;
+      if (timer) clearTimeout(timer);
+      delay = POLL_INTERVAL_MS;
+      void tick();
+    };
+    document.addEventListener('visibilitychange', onVisible);
+
     return () => {
-      clearInterval(timer);
+      stopped = true;
+      if (timer) clearTimeout(timer);
+      document.removeEventListener('visibilitychange', onVisible);
       // Unmounting or switching away must not leave a request open.
       inFlight.current?.abort();
     };
-  }, [load, instances.length, environment, needsEnvironment, tab]);
+  }, [load, loadControl, instances.length, environment, needsEnvironment, tab]);
 
   const runAction = useCallback(
     async (
@@ -449,13 +571,16 @@ function Panel(): ReactElement {
       action: ContainerAction,
       options: RemoveOptions,
     ): Promise<void> => {
-      setBusyId(container.Id);
+      startBusy(container.Id);
       setActionResult(undefined);
       const startedOn = instance;
       const { method, path } = actionRequest(container.Id, action, options);
       try {
         await apiSend(method, path, startedOn);
-        setConfirming(undefined);
+        // Only this container's dialog. Cleared unconditionally, a slow stop
+        // on one container closed the confirmation the operator had just
+        // opened for another, and nothing stopped that one.
+        setConfirming((open) => (open?.container.Id === container.Id ? undefined : open));
         setActionResult({
           ok: true,
           message: `${actionLabel(action)} ${containerName(container.Names)}: done`,
@@ -469,13 +594,18 @@ function Panel(): ReactElement {
         // the old one's containers. The switch has already started its own load.
         if (selected.current === startedOn) await load();
       } catch (cause) {
-        setConfirming(undefined);
-        setActionResult({ ok: false, error: asApiError(cause) });
+        setConfirming((open) => (open?.container.Id === container.Id ? undefined : open));
+        const failure = asApiError(cause);
+        setActionResult({ ok: false, error: failure });
+        // A refusal means the rules changed under the panel — control turned
+        // off, or the allowlist narrowed — so what it may offer is re-read
+        // rather than left showing buttons that no longer work.
+        if (failure.status === 403) void loadControl();
       } finally {
-        setBusyId(undefined);
+        endBusy(container.Id);
       }
     },
-    [instance, load],
+    [endBusy, instance, load, loadControl, startBusy],
   );
 
   const requestAction = useCallback(
@@ -500,7 +630,7 @@ function Panel(): ReactElement {
    */
   const runImage = useCallback(
     async (busyKey: string, run: () => Promise<unknown>, done: (body: unknown) => string) => {
-      setBusyId(busyKey);
+      startBusy(busyKey);
       setActionResult(undefined);
       const startedOn = instance;
       try {
@@ -514,13 +644,15 @@ function Panel(): ReactElement {
         }
         return { ok: true };
       } catch (cause) {
-        setActionResult({ ok: false, error: asApiError(cause) });
+        const failure = asApiError(cause);
+        setActionResult({ ok: false, error: failure });
+        if (failure.status === 403) void loadControl();
         return { ok: false };
       } finally {
-        setBusyId(undefined);
+        endBusy(busyKey);
       }
     },
-    [instance, load, loadUsage],
+    [endBusy, instance, load, loadControl, loadUsage, startBusy],
   );
 
   const removeImage = useCallback(
@@ -570,8 +702,16 @@ function Panel(): ReactElement {
       setStackResult(undefined);
       const startedOn = instance;
       try {
-        await run();
-        setStackResult({ ok: true, message: `${stack.Name}: ${done}` });
+        const body = (await run()) as { warning?: unknown } | undefined;
+        // Portainer clears a stack's auto-update on every update, and ignores
+        // prune on a compose stack before 2.42. The facade says so in the
+        // answer; dropping it left the operator to discover it when the
+        // webhook stopped firing.
+        const warning = typeof body?.warning === 'string' ? body.warning : undefined;
+        setStackResult({
+          ok: true,
+          message: `${stack.Name}: ${done}${warning ? `. ${warning}` : ''}`,
+        });
         // Straight to a fresh read, as a container action does — the table is
         // the confirmation, and the 10s poll is too slow to feel like one.
         if (selected.current === startedOn) await load();
@@ -688,6 +828,11 @@ function Panel(): ReactElement {
     setDeletingImage(undefined);
     setPruning(false);
     setUsage(undefined);
+    // These hold a container id too, and a result about a Portainer the
+    // operator has left says nothing about the one they are looking at.
+    setConfirming(undefined);
+    setActionResult(undefined);
+    setEnvironmentWarning(undefined);
   }, []);
 
   /**
@@ -728,7 +873,7 @@ function Panel(): ReactElement {
       setStackResult(undefined);
       const startedOn = instance;
       try {
-        await apiSend<{ selected: number; warning?: string }>(
+        const answer = await apiSend<{ selected: number; persisted?: boolean; warning?: string }>(
           'PUT',
           '/environment',
           instance,
@@ -740,6 +885,11 @@ function Panel(): ReactElement {
         // switched Portainer while the PUT was in flight, this answer belongs
         // to the one they left.
         await loadEnvironments(undefined, () => selected.current === startedOn);
+        // After the re-read, which carries no warning of its own and would
+        // otherwise clear this one. Live either way; only its survival across
+        // a restart is at stake, and an operator who is not told assumes it
+        // was saved.
+        if (typeof answer?.warning === 'string') setEnvironmentWarning(answer.warning);
       } catch (cause) {
         // Into the setup sink, never into `error`: the next poll succeeds
         // against the environment that was never left, and would clear a
@@ -868,10 +1018,29 @@ function Panel(): ReactElement {
         </div>
       ) : null}
 
-      {error ? (
+      {error && error.message !== setupError?.message ? (
+        // Not when the dismissible banner below already says the same thing:
+        // a failing environment read reports itself twice, once through the
+        // read the picker makes and once through the poll behind it.
         <div className="alert alert-danger" role="alert">
           <div>{error.message}</div>
           {error.hint ? <div className="small mt-1">{error.hint}</div> : null}
+          <Detail detail={error.detail} />
+        </div>
+      ) : null}
+
+      {environmentWarning ? (
+        <div
+          className="alert alert-warning d-flex justify-content-between align-items-start"
+          role="alert"
+        >
+          <div>{environmentWarning}</div>
+          <button
+            type="button"
+            className="btn-close"
+            aria-label="Dismiss"
+            onClick={() => setEnvironmentWarning(undefined)}
+          />
         </div>
       ) : null}
 
@@ -885,6 +1054,7 @@ function Panel(): ReactElement {
           <div>
             <div>{setupError.message}</div>
             {setupError.hint ? <div className="small mt-1">{setupError.hint}</div> : null}
+            <Detail detail={setupError.detail} />
           </div>
           <button
             type="button"
@@ -905,6 +1075,7 @@ function Panel(): ReactElement {
             {!actionResult.ok && actionResult.error.hint ? (
               <div className="small mt-1">{actionResult.error.hint}</div>
             ) : null}
+            {actionResult.ok ? null : <Detail detail={actionResult.error.detail} />}
           </div>
           <button
             type="button"
@@ -925,6 +1096,7 @@ function Panel(): ReactElement {
             {!stackResult.ok && stackResult.error.hint ? (
               <div className="small mt-1">{stackResult.error.hint}</div>
             ) : null}
+            {stackResult.ok ? null : <Detail detail={stackResult.error.detail} />}
           </div>
           <button
             type="button"
@@ -963,8 +1135,14 @@ function Panel(): ReactElement {
       ) : null}
 
       {/* The Environments tab renders with no environment chosen — it is where
-          the choice is made. Every other tab has nothing to show until then. */}
-      {!loading && !error && !switching && (!needsEnvironment || tab === LANDING_TAB) ? (
+          the choice is made. Every other tab has nothing to show until then.
+          It renders under a failed read too, and that is the point: a saved
+          environment Portainer no longer has fails every read, and hiding the
+          table hid the only row that could put it right. */}
+      {!loading &&
+      !switching &&
+      (!error || tab === LANDING_TAB) &&
+      (!needsEnvironment || tab === LANDING_TAB) ? (
         <div role="tabpanel" id={TAB_PANEL_ID} aria-labelledby={tabButtonId(tab)}>
           <TabBody
             tab={tab}
@@ -976,7 +1154,7 @@ function Panel(): ReactElement {
             }}
             actions={{
               control,
-              busyId,
+              busyIds,
               onAction: requestAction,
               onLogs: setViewing,
               // Absent entirely, rather than disabled, on a server that cannot
@@ -987,7 +1165,7 @@ function Panel(): ReactElement {
             stackActions={{ control, busyId: busyStack, onAction: requestStackAction }}
             imageActions={{
               control,
-              busyId,
+              busyIds,
               onRemove: (image) => {
                 setActionResult(undefined);
                 setDeletingImage(image);
@@ -1070,7 +1248,7 @@ function Panel(): ReactElement {
         <ImageDeleteDialog
           image={deletingImage}
           users={imageUsers(usage, deletingImage.Id)}
-          busy={busyId === deletingImage.Id}
+          busy={busyIds.has(deletingImage.Id)}
           onCancel={() => setDeletingImage(undefined)}
           onConfirm={() => removeImage(deletingImage)}
         />
@@ -1079,7 +1257,7 @@ function Panel(): ReactElement {
       {pruning ? (
         <ImagePruneDialog
           reclaimable={reclaimableImageBytes(usage)}
-          busy={busyId === PRUNE_BUSY_KEY}
+          busy={busyIds.has(PRUNE_BUSY_KEY)}
           onCancel={() => setPruning(false)}
           onConfirm={pruneImages}
         />
@@ -1088,11 +1266,27 @@ function Panel(): ReactElement {
       {confirming ? (
         <ConfirmDialog
           request={confirming}
-          busy={busyId === confirming.container.Id}
+          busy={busyIds.has(confirming.container.Id)}
           onCancel={() => setConfirming(undefined)}
           onConfirm={(options) => void runAction(confirming.container, confirming.action, options)}
         />
       ) : null}
+    </div>
+  );
+}
+
+/**
+ * What Portainer itself said about a failure, when it said anything.
+ *
+ * The plugin's paraphrase names the request; this names the field Portainer
+ * objected to, which is the difference between "the update failed with 400"
+ * and "yaml: line 5: did not find expected key".
+ */
+function Detail({ detail }: { detail?: string }): ReactElement | null {
+  if (!detail) return null;
+  return (
+    <div className="small mt-1 font-monospace text-break" data-testid="portainer-detail">
+      {detail}
     </div>
   );
 }

@@ -86,15 +86,69 @@ describe('Watchdog', () => {
 
   it('alarms when the watched container does not exist at all', () => {
     const watchdog = watching();
+    const absent = up([container({ Names: ['/something-else'] })]);
 
-    const notifications = watchdog.evaluate(
-      'boat',
-      up([container({ Names: ['/something-else'] })]),
-    );
+    // Not on the first poll: `docker compose up` takes a service away and
+    // puts it back, and alarming on that raises and clears an alarm every
+    // interval for something nobody can act on.
+    const first = watchdog.evaluate('boat', absent);
+    expect(first.find((entry) => entry.path.endsWith('containers.ais_logger'))).toBeUndefined();
+
+    const notifications = watchdog.evaluate('boat', absent);
 
     const alarm = notifications.find((entry) => entry.path.endsWith('containers.ais_logger'));
     expect(alarm?.value.state).toBe('alarm');
     expect(alarm?.value.message).toContain('does not exist');
+  });
+
+  it('says so when a container is running but failing its health check', () => {
+    // The hung-but-alive case the watchdog exists for: Docker keeps the
+    // container running, and only the status text says the healthcheck is
+    // failing.
+    const watchdog = watching();
+
+    const notifications = watchdog.evaluate(
+      'boat',
+      up([
+        container({
+          Names: ['/ais-logger'],
+          State: 'running',
+          Status: 'Up 3 days (unhealthy)',
+        }),
+      ]),
+    );
+
+    const alarm = notifications.find((entry) => entry.path.endsWith('containers.ais_logger'));
+    expect(alarm?.value.state).toBe('alarm');
+    expect(alarm?.value.message).toContain('unhealthy');
+  });
+
+  it('does not sound the alarm for a container someone paused', () => {
+    const watchdog = watching();
+
+    const notifications = watchdog.evaluate(
+      'boat',
+      up([container({ Names: ['/ais-logger'], State: 'paused' })]),
+    );
+
+    const alarm = notifications.find((entry) => entry.path.endsWith('containers.ais_logger'));
+    expect(alarm?.value.state).toBe('alarm');
+    // Visual only: pausing is an operator's own action, and a chartplotter
+    // sounding over it teaches the crew to mute the channel.
+    expect(alarm?.value.method).toEqual(['visual']);
+  });
+
+  it('gives a restarting container a poll to settle before alarming', () => {
+    const watchdog = watching();
+    const restarting = up([container({ Names: ['/ais-logger'], State: 'restarting' })]);
+
+    expect(
+      watchdog.evaluate('boat', restarting).find((e) => e.path.endsWith('containers.ais_logger')),
+    ).toBeUndefined();
+    expect(
+      watchdog.evaluate('boat', restarting).find((e) => e.path.endsWith('containers.ais_logger'))
+        ?.value.state,
+    ).toBe('alarm');
   });
 
   describe('matching a configured watch to a container', () => {
@@ -128,8 +182,15 @@ describe('Watchdog', () => {
 
     it('does not match a short string against an id by accident', () => {
       // 'c1f' would otherwise match the id prefix and silently watch the wrong
-      // container — or the right one for the wrong reason.
-      expect(matched('c1f')?.value.state).toBe('alarm');
+      // container — or the right one for the wrong reason. Nothing matches,
+      // so this is the missing-container case, which takes a second poll.
+      const watchdog = new Watchdog('system.docker', [{ instance: 'boat', container: 'c1f' }]);
+      const snapshot = up([container({})]);
+      watchdog.evaluate('boat', snapshot);
+      const again = watchdog.evaluate('boat', snapshot);
+      expect(again.find((entry) => entry.path.endsWith('containers.c1f'))?.value.state).toBe(
+        'alarm',
+      );
     });
   });
 
@@ -153,6 +214,9 @@ describe('Watchdog', () => {
       const watchdog = byId();
       watchdog.evaluate('boat', up([composed()]));
 
+      // Two polls: a container that has vanished is given one to come back,
+      // since a compose recreate looks exactly like this in between.
+      watchdog.evaluate('boat', up([]));
       const notifications = watchdog.evaluate('boat', up([]));
 
       // The instance status was already normal, so only the container changes.
@@ -164,6 +228,7 @@ describe('Watchdog', () => {
     it('clears the alarm on the same path when the container comes back', () => {
       const watchdog = byId();
       watchdog.evaluate('boat', up([composed()]));
+      watchdog.evaluate('boat', up([]));
       watchdog.evaluate('boat', up([]));
 
       const notifications = watchdog.evaluate('boat', up([composed()]));

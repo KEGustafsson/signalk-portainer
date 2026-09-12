@@ -1462,7 +1462,7 @@ describe('facade image writes', () => {
   it('removes an image by id and reports what Docker removed', async () => {
     withEnvironment();
     boat()
-      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
       .reply(200, [{ Untagged: 'influxdb:2.7' }, { Deleted: 'sha256:aaa' }]);
 
     const res = await request(destructive()).delete('/api/images/sha256%3Aaaa');
@@ -1476,7 +1476,7 @@ describe('facade image writes', () => {
     withEnvironment();
     boat()
       .intercept({
-        path: '/api/endpoints/1/docker/images/ghcr.io%2Fowner%2Fapp%3A1.2',
+        path: '/api/endpoints/1/docker/images/ghcr.io/owner/app:1.2',
         method: 'DELETE',
       })
       .reply(200, [{ Untagged: 'ghcr.io/owner/app:1.2' }]);
@@ -1492,7 +1492,7 @@ describe('facade image writes', () => {
   it('passes Docker’s refusal of an image in use straight through', async () => {
     withEnvironment();
     boat()
-      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
       .reply(409, { message: 'conflict: unable to delete sha256:aaa (must be forced)' });
 
     const res = await request(destructive()).delete('/api/images/sha256%3Aaaa');
@@ -1531,7 +1531,7 @@ describe('facade image writes', () => {
   it('logs both writes for an operator reading back what happened', async () => {
     withEnvironment();
     boat()
-      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
       .reply(200, []);
     boat()
       .intercept({ path: pruneFilter('false'), method: 'POST' })
@@ -1742,6 +1742,13 @@ describe('instanceParam', () => {
     expect(instanceParam({ query: { instance: 'shore' } } as never)).toBe('shore');
     expect(instanceParam({ query: { instance: '' } } as never)).toBeUndefined();
     expect(instanceParam({ query: {} } as never)).toBeUndefined();
-    expect(instanceParam({ query: { instance: ['a', 'b'] } } as never)).toBeUndefined();
+  });
+
+  it('refuses two instances rather than quietly using the default', () => {
+    // `?instance=boat&instance=shore` named two Portainers; falling back to
+    // the default meant a mutation went to a third.
+    expect(() =>
+      instanceParam({ query: { instance: ['a', 'b'] }, method: 'POST', path: '/x' } as never),
+    ).toThrow(/instance must be given once/);
   });
 });

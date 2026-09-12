@@ -459,7 +459,10 @@ describe('the images table', () => {
 
   it('holds the button while that row’s own request is in flight', () => {
     render(
-      <ImagesTable rows={[image]} actions={{ control, busyId: image.Id, onRemove: () => {} }} />,
+      <ImagesTable
+        rows={[image]}
+        actions={{ control, busyIds: new Set([image.Id]), onRemove: () => {} }}
+      />,
     );
 
     expect(screen.getByRole('button', { name: 'Delete' })).toHaveAccessibleDescription(

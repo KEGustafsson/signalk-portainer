@@ -52,20 +52,43 @@ export class PortainerError extends Error {
     return this.status;
   }
 
-  static hintFor(status: number, authMode: AuthMode): string | undefined {
+  /**
+   * What a status most likely means, for the route it came from.
+   *
+   * The route matters: a 404 from Portainer's own API is usually the wrong
+   * environment id, while a 404 through the Docker proxy is Docker saying
+   * there is no such container — and telling an operator who mistyped a
+   * container name to check their environment id sends them the wrong way.
+   */
+  static hintFor(status: number, authMode: AuthMode, path = '', body?: string): string | undefined {
+    const proxied = path.includes('/docker/');
     switch (status) {
       case 400:
+        if (body && /HTTPS server/i.test(body)) {
+          return 'Portainer is answering https on that port — change the address to https://';
+        }
         return 'a required query parameter or body field is missing or malformed';
       case 401:
         return authMode === 'apiKey'
           ? 'the API token was rejected. A ptr_ token belongs in the X-API-Key header, never in Authorization: Bearer'
           : 'the username/password was rejected, or the cached JWT expired and could not be renewed';
       case 403:
-        return 'the credential is valid but its Portainer role lacks permission for this resource';
+        return proxied && /prune/.test(path)
+          ? 'pruning through Portainer needs an administrator credential; a scoped user is refused'
+          : 'the credential is valid but its Portainer role lacks permission for this resource';
       case 404:
-        return 'wrong environment id (ids are creation-order, not names), or an endpoint that only exists in Portainer EE';
+        return proxied
+          ? 'no container, image or resource by that name in this environment'
+          : 'wrong environment id (ids are creation-order, not names), or an endpoint that only exists in Portainer EE';
       case 409:
+        if (/\/stacks\/\d+\/file/.test(path)) {
+          return 'the stack’s git settings changed since it was deployed — redeploy it, then read the file again';
+        }
         return 'conflict — the resource already exists or is in an incompatible state';
+      case 503:
+        return proxied && /\/(services|nodes)/.test(path)
+          ? 'the daemon is not a swarm manager, so it has no services or nodes to list'
+          : undefined;
       default:
         return undefined;
     }
@@ -93,7 +116,7 @@ export class PortainerError extends Error {
       method,
       path,
       message: `Portainer ${method} ${path} failed with ${res.status}${detail ? `: ${detail}` : ''}`,
-      hint: PortainerError.hintFor(res.status, authMode),
+      hint: PortainerError.hintFor(res.status, authMode, path, body),
       body,
     });
   }

@@ -14,6 +14,18 @@ const fixtures = {
   hostNoContainer: '12:pids:/\n11:memory:/user.slice/user-1000.slice\n',
   mountinfoDocker: `1234 1200 0:59 /var/lib/docker/containers/${ID}/hostname /etc/hostname rw,relatime\n`,
   mountinfoHost: '25 30 0:22 / /proc rw,nosuid,nodev,noexec\n',
+  /**
+   * What a Docker *host* has in its own mount table: an shm and an overlay
+   * mount for every container it is running. The ids in them are other
+   * containers', and reading one as our own is how a Signal K installed on
+   * the host decided it was Portainer and refused to stop it.
+   */
+  mountinfoDockerHost:
+    `1039 28 0:52 / /var/lib/docker/containers/${ID}/mounts/shm rw,nosuid,nodev,noexec shared:512 - tmpfs shm rw,size=65536k\n` +
+    `1104 28 0:56 / /var/lib/docker/overlay2/2b9c/merged rw,relatime shared:520 - overlay overlay rw\n`,
+  /** podman's equivalent of the bind mount Docker uses. */
+  mountinfoPodman: `1234 1200 0:59 /var/lib/containers/storage/overlay-containers/${ID}/userdata/hostname /etc/hostname rw,relatime\n`,
+  cgroupPodman: `0::/machine.slice/libpod-${ID}.scope\n`,
 };
 
 const sources = (over: {
@@ -73,6 +85,31 @@ describe('detectSelfContainer', () => {
     );
     // The dangerous case: containerised, but self-protection cannot work.
     expect(self).toMatchObject({ inContainer: true, identified: false, source: 'none' });
+    expect(self.id).toBeUndefined();
+  });
+
+  it('reads the id from a podman scope', () => {
+    expect(detectSelfContainer(sources({ cgroup: fixtures.cgroupPodman })).id).toBe(ID);
+  });
+
+  it('reads the id from podman’s own bind mount', () => {
+    const self = detectSelfContainer(
+      sources({ cgroup: fixtures.cgroupV2Bare, mountinfo: fixtures.mountinfoPodman }),
+    );
+    expect(self).toMatchObject({ id: ID, source: 'mountinfo', identified: true });
+  });
+
+  it('does not mistake another container’s mounts for its own', () => {
+    // Signal K installed on the host, Docker beside it: the host's mount
+    // table lists every running container's shm and overlay mounts. Matching
+    // an id anywhere in that file made the plugin believe it was one of
+    // those containers, and self-protection then refused to stop it — for
+    // Portainer itself, as often as not.
+    const self = detectSelfContainer(
+      sources({ cgroup: fixtures.hostNoContainer, mountinfo: fixtures.mountinfoDockerHost }),
+    );
+
+    expect(self).toMatchObject({ inContainer: false, identified: false });
     expect(self.id).toBeUndefined();
   });
 

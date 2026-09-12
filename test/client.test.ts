@@ -1,4 +1,4 @@
-import { Agent, type MockAgent } from 'undici';
+import { Agent, setGlobalDispatcher, type MockAgent } from 'undici';
 import { PortainerClient, environmentHealth } from '../src/client';
 import { PortainerError } from '../src/errors';
 import * as fixtures from './fixtures';
@@ -511,9 +511,10 @@ describe('PortainerClient TLS and lifecycle', () => {
     client.close();
   });
 
-  it('closing a client that owns no dispatcher is a no-op', () => {
-    // The other direction: a client left on undici's defaults has nothing of
-    // its own to close, and must not reach for a dispatcher it shares.
+  it('closes the dispatcher it built even with no TLS settings to carry', () => {
+    // Every client owns one: undici's own defaults tear down a quiet follow
+    // stream after five minutes and cap a deploy at the same, and a pooled
+    // connection in the process-wide dispatcher outlives the plugin stopping.
     const close = jest.spyOn(Agent.prototype, 'close').mockResolvedValue(undefined);
     const client = new PortainerClient({
       baseUrl: BASE_URL,
@@ -521,8 +522,29 @@ describe('PortainerClient TLS and lifecycle', () => {
     });
 
     expect(() => client.close()).not.toThrow();
-    expect(close).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledTimes(1);
     close.mockRestore();
+  });
+
+  it('leaves a dispatcher somebody else installed alone', () => {
+    // A proxy agent the Signal K server installed process-wide, or a test's
+    // mock: deliberate, so it is used as it stands and not closed here.
+    const close = jest.spyOn(Agent.prototype, 'close').mockResolvedValue(undefined);
+    const installed = new Agent();
+    setGlobalDispatcher(installed);
+    try {
+      const client = new PortainerClient({
+        baseUrl: BASE_URL,
+        auth: { mode: 'apiKey', apiKey: 'ptr_x' },
+      });
+
+      client.close();
+
+      expect(close).not.toHaveBeenCalled();
+    } finally {
+      restoreGlobalDispatcher();
+      close.mockRestore();
+    }
   });
 
   it('drops cached reads on invalidate', async () => {

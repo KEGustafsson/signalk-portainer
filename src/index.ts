@@ -251,6 +251,11 @@ const plugin = (app: SignalKApp): SignalKPlugin => {
     uiSchema: PLUGIN_UI_SCHEMA,
 
     start(options: object, _restart: (newConfiguration: object) => void): void {
+      // A start on top of a start ends the first: the server stops a plugin
+      // before restarting it, but nothing here should depend on that, and a
+      // second start without a stop used to leave the first poller polling,
+      // its clients open and a second console endpoint registered.
+      if (registry || poller || consoleServer) shutdown();
       try {
         // A status from the previous run says nothing about this one, and a
         // stale summary here is what makes the first healthy poll report

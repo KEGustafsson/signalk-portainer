@@ -10,7 +10,11 @@
  */
 
 /** Every undici Agent the client constructed, and what it asked for. */
-const agents: { connect?: Record<string, unknown> }[] = [];
+const agents: {
+  connect?: Record<string, unknown>;
+  headersTimeout?: number;
+  bodyTimeout?: number;
+}[] = [];
 
 jest.mock('undici', () => {
   // Typed rather than left as `any`: everything spread below inherits it,
@@ -19,7 +23,11 @@ jest.mock('undici', () => {
   return {
     ...actual,
     Agent: class {
-      constructor(options: { connect?: Record<string, unknown> }) {
+      constructor(options: {
+        connect?: Record<string, unknown>;
+        headersTimeout?: number;
+        bodyTimeout?: number;
+      }) {
         agents.push(options);
       }
       close(): Promise<void> {
@@ -100,11 +108,17 @@ describe('the TLS settings reaching the connection', () => {
     });
   });
 
-  it('builds no dispatcher at all when there is nothing to configure', () => {
-    // An ordinary https Portainer with a public certificate is left to
-    // undici's defaults rather than handed an empty Agent.
+  it('builds an agent with undici’s own deadlines off even with no TLS to carry', () => {
+    // undici's defaults tear a response down after 300s of quiet, on the
+    // headers and between body chunks alike, whatever signal the request was
+    // given. That killed a follow stream on a container that prints hourly —
+    // the browser reconnected, and did it again five minutes later — and
+    // capped a deploy that legitimately took longer while Portainer carried
+    // on and finished it. The request's own budget is the only bound.
     new PortainerClient({ baseUrl: BASE_URL, auth });
 
-    expect(agents).toHaveLength(0);
+    expect(agents).toHaveLength(1);
+    expect(agents[0]).toMatchObject({ headersTimeout: 0, bodyTimeout: 0 });
+    expect(agents[0]?.connect).toBeUndefined();
   });
 });

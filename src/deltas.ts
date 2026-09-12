@@ -64,6 +64,10 @@ const META: Record<string, MetaValue['value']> = {
     displayName: 'Containers total',
     description: 'Containers known to this environment, running or not',
   },
+  'status.version': {
+    displayName: 'Docker version',
+    description: 'The Docker Engine version this environment runs',
+  },
   'containers.state': {
     displayName: 'State',
     description: 'Docker container state: running, exited, paused, restarting, created or dead',
@@ -72,10 +76,17 @@ const META: Record<string, MetaValue['value']> = {
     displayName: 'Health',
     description: "The container healthcheck's verdict: healthy, unhealthy or starting",
   },
-  'containers.uptime': {
-    units: 's',
-    displayName: 'Uptime',
-    description: 'Seconds since the container last started',
+  'containers.image': {
+    displayName: 'Image',
+    description: 'The image reference the container was created from',
+  },
+  'containers.name': {
+    displayName: 'Name',
+    description: 'The container name Docker shows',
+  },
+  'containers.id': {
+    displayName: 'Container id',
+    description: 'The first twelve characters of the container id',
   },
 };
 
