@@ -1931,6 +1931,11 @@ function timeoutError(what: string, budgetMs: number): DOMException {
   return new DOMException(`Waited ${budgetMs} ms for ${what}`, 'TimeoutError');
 }
 
+/**
+ * A pause that does not hold the process open. The timer is unreferenced
+ * because a settle poll waiting on Portainer must never be the reason Signal K
+ * refuses to exit.
+ */
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => {
     const timer = setTimeout(resolve, ms);

@@ -1421,6 +1421,11 @@ function parseVersion(value: string | undefined): number[] | undefined {
   return [Number(match[1]), Number(match[2]), Number(match[3] ?? '0')];
 }
 
+/**
+ * Orders two version tuples: negative when the left is older, positive when it
+ * is newer, zero when they are the same release. A missing segment counts as
+ * zero, so `2.42` and `2.42.0` compare equal.
+ */
 function compareVersions(left: number[], right: number[]): number {
   for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
     const difference = (left[index] ?? 0) - (right[index] ?? 0);

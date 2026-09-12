@@ -87,6 +87,12 @@ const CONSOLE_LIMITS = { total: 3, perTarget: 2 };
 const MAX_BACKLOG_MESSAGES = 64;
 const MAX_BACKLOG_BYTES = 64 * 1024;
 
+/**
+ * How many bytes one `ws` message is, in every shape `ws` hands one over:
+ * text as a string, binary as a Uint8Array or ArrayBuffer, and a fragmented
+ * message as the array of its pieces. Anything else counts as nothing rather
+ * than throwing — a message that cannot be measured cannot be relayed either.
+ */
 function messageSize(data: unknown): number {
   if (typeof data === 'string') return Buffer.byteLength(data);
   if (data instanceof Uint8Array) return data.byteLength;
