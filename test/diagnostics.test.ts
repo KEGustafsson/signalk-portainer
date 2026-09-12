@@ -411,7 +411,11 @@ describe('fetching an image', () => {
   it('refuses a registryId that is not one', async () => {
     const app = buildApp(new InstanceRegistry(instances));
 
-    for (const registryId of [-1, 1.5, 'seven', {}]) {
+    // The last four are the ones `Number()` would have been happy to coerce:
+    // `true` reads as 1, `false` and an empty array as 0, and "0x7" as 7. Each
+    // of those is a registry id Portainer might really have issued, so a body
+    // that names no registry at all would have pulled through one.
+    for (const registryId of [-1, 1.5, 'seven', {}, true, false, [], '0x7']) {
       const res = await request(app)
         .post('/api/images/pull')
         .send({ reference: 'nginx:alpine', registryId });
@@ -419,6 +423,35 @@ describe('fetching an image', () => {
       expect(res.status).toBe(400);
       expect(asJson(res.body).error).toMatch(/is not a registry id/);
     }
+  });
+
+  it('takes a registry id written as digits', async () => {
+    // A number is what the panel sends, but a body typed by hand quotes it as
+    // often as not, and there is no ambiguity in digits.
+    let header: string | undefined;
+    agent
+      .get(BOAT)
+      .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
+      .reply(200, [fixtures.localEnvironment]);
+    agent
+      .get(BOAT)
+      .intercept({
+        path: '/api/endpoints/1/docker/images/create?fromImage=ghcr.io%2Fowner%2Fapp&tag=1.4',
+        method: 'POST',
+      })
+      .reply(200, (options) => {
+        header = (options.headers as Record<string, string> | undefined)?.['x-registry-auth'];
+        return '{"status":"Downloaded newer image for ghcr.io/owner/app:1.4"}\n';
+      });
+
+    const res = await request(buildApp(new InstanceRegistry(instances)))
+      .post('/api/images/pull')
+      .send({ reference: 'ghcr.io/owner/app:1.4', registryId: '7' });
+
+    expect(res.status).toBe(200);
+    expect(JSON.parse(Buffer.from(header as string, 'base64').toString('utf8'))).toEqual({
+      registryId: 7,
+    });
   });
 
   it('refuses a reference that is not an image name', async () => {

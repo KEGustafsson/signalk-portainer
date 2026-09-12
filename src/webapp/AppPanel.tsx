@@ -252,6 +252,11 @@ function Panel(): ReactElement {
   // The same guard for /df, which needs its own: a prune reads it while the
   // read the tab started may still be open, and that one predates the prune.
   const usageSeq = useRef(0);
+  // And its own again for /registries, which the instance guard cannot cover:
+  // an environment switch leaves the panel on the same Portainer, so a read
+  // started before the switch passes that guard while answering for the
+  // environment the operator has just left.
+  const registrySeq = useRef(0);
   // A stalled request would otherwise stay open while every poll starts
   // another, so each new request cancels the one before it.
   const inFlight = useRef<AbortController | undefined>(undefined);
@@ -734,15 +739,20 @@ function Panel(): ReactElement {
   const startPull = useCallback((): void => {
     setPullResult(undefined);
     setRegistriesError(undefined);
+    // Cleared before the read rather than left standing: the list the dialog
+    // was last opened with belongs to whichever environment offered it, and
+    // showing it here would offer ids that name something else — or nothing.
+    setRegistries([]);
     setPulling(true);
     const startedOn = instance;
+    const seq = (registrySeq.current += 1);
     void apiGet<{ registries?: unknown }>('/registries', instance)
       .then((body) => {
-        if (!stillOn(startedOn)) return;
+        if (!stillOn(startedOn) || seq !== registrySeq.current) return;
         setRegistries(registryOptions(body.registries));
       })
       .catch((cause: unknown) => {
-        if (!stillOn(startedOn)) return;
+        if (!stillOn(startedOn) || seq !== registrySeq.current) return;
         setRegistries([]);
         setRegistriesError(asApiError(cause).message);
       });
@@ -958,6 +968,10 @@ function Panel(): ReactElement {
     setRegistries([]);
     setRegistriesError(undefined);
     setPullResult(undefined);
+    // Clearing the list is not enough on an environment switch: the panel is
+    // still on the same Portainer, so a /registries read already in flight
+    // would pass its instance guard and put the old environment's list back.
+    registrySeq.current += 1;
     setUsage(undefined);
     // These hold a container id too, and a result about a Portainer the
     // operator has left says nothing about the one they are looking at.

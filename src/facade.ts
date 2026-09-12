@@ -1519,10 +1519,10 @@ function readRegistryId(req: Request): number | undefined {
   const payload = (req.body ?? {}) as { registryId?: unknown };
   const raw = payload.registryId;
   if (raw === undefined || raw === null || raw === '') return undefined;
-  const id = typeof raw === 'number' ? raw : Number(raw);
+  const id = registryIdOf(raw);
   // Zero is Portainer's own id for Docker Hub, so it is allowed; negative and
   // fractional are not ids at all.
-  if (!Number.isSafeInteger(id) || id < 0) {
+  if (id === undefined || !Number.isSafeInteger(id) || id < 0) {
     // Described rather than stringified: an object here would otherwise be
     // quoted back as "[object Object]", which tells the caller nothing.
     const shown = typeof raw === 'number' || typeof raw === 'string' ? String(raw) : typeof raw;
@@ -1534,6 +1534,24 @@ function readRegistryId(req: Request): number | undefined {
     );
   }
   return id;
+}
+
+/**
+ * A registry id out of a body, or undefined when the body named something that
+ * is not one.
+ *
+ * Digits, matched as text, before `Number()` sees it — the same reason the
+ * stack id is read that way. `Number()` is willing to coerce far more than an
+ * id: `true` becomes 1, `false` and an empty array become 0, and "0x7" becomes
+ * 7. A body naming no registry at all would otherwise pull through whichever
+ * registry those land on instead of being refused. The digits have to survive
+ * the round trip too, so "007" is not mistaken for the id 7.
+ */
+function registryIdOf(raw: unknown): number | undefined {
+  if (typeof raw === 'number') return raw;
+  if (typeof raw !== 'string' || !/^\d+$/.test(raw)) return undefined;
+  const id = Number(raw);
+  return String(id) === raw ? id : undefined;
 }
 
 /** A 400 about the request body, phrased for whoever sent it. */

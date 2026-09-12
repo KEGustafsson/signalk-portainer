@@ -1696,6 +1696,70 @@ describe('AppPanel container actions', () => {
       expect(within(dialog).getByRole('button', { name: 'Fetch' })).toBeEnabled();
     });
 
+    it('does not offer the registries a previous dialog read', async () => {
+      // The list belongs to the environment that offered it, and an id from
+      // one names something else — or nothing — on the next. A read still in
+      // flight when the dialog closes used to pass the instance guard, which
+      // only sees the Portainer: an environment switch leaves that unchanged.
+      // So the picker could open holding options the panel had already
+      // discarded, and pulling through one of them failed on a registry the
+      // operator had never chosen.
+      const base = imageFetch();
+      let release: (() => void) | undefined;
+      let reads = 0;
+      const fetchMock = jest.fn((input: string, init?: RequestInit) => {
+        if (input.includes('/registries')) {
+          reads += 1;
+          // Only the first read is held; the second answers with nothing, as
+          // an environment with no registries of its own would.
+          if (reads > 1) {
+            return Promise.resolve(
+              asResponse({
+                ok: true,
+                status: 200,
+                json: () => Promise.resolve({ registries: [] }),
+              }),
+            );
+          }
+          return new Promise((resolve) => {
+            release = () =>
+              resolve(
+                asResponse({
+                  ok: true,
+                  status: 200,
+                  json: () =>
+                    Promise.resolve({
+                      registries: [{ id: 7, name: 'ghcr', url: 'ghcr.io', authenticated: true }],
+                    }),
+                }),
+              );
+          });
+        }
+        return base(input, init);
+      });
+      global.fetch = fetchMock as unknown as typeof fetch;
+      const user = userEvent.setup();
+
+      await openImages(user);
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+      await user.click(
+        within(await screen.findByRole('dialog')).getByRole('button', {
+          name: 'Cancel',
+        }),
+      );
+
+      // Reopened before the first read landed, then it lands: it is answering
+      // for a dialog that is gone, so nothing it says may reach this one.
+      await user.click(screen.getByRole('button', { name: 'Fetch image' }));
+      release?.();
+      const dialog = await screen.findByRole('dialog');
+
+      await waitFor(() =>
+        expect(within(dialog).getByText(/no registries configured/)).toBeInTheDocument(),
+      );
+      expect(within(dialog).queryByRole('option', { name: 'ghcr' })).not.toBeInTheDocument();
+    });
+
     it('will not send a reference Docker would not take', async () => {
       const fetchMock = imageFetch({ '/registries': { registries: [] } });
       global.fetch = fetchMock as unknown as typeof fetch;
