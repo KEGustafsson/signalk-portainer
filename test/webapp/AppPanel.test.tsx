@@ -132,14 +132,18 @@ describe('AppPanel', () => {
       });
 
     it('asks instead of guessing which Docker host to work against', async () => {
-      global.fetch = unchosen() as unknown as typeof fetch;
+      const fetchMock = unchosen();
+      global.fetch = fetchMock as unknown as typeof fetch;
 
       render(<AppPanel />);
 
       expect(await screen.findByText('Choose an environment to continue')).toBeInTheDocument();
-      // The tables stay empty rather than showing another environment's
-      // containers, and no container read is attempted at all.
-      expect(screen.queryByText('signalk_influxdb')).not.toBeInTheDocument();
+      // Asserted on what was requested, not on what is on screen: the panel
+      // opens on the environments, where a container name could not appear
+      // however the gate behaved.
+      const asked = fetchMock.mock.calls.map((call) => String(call[0]));
+      expect(asked.filter((url) => url.includes('/containers'))).toHaveLength(0);
+      expect(asked.some((url) => url.includes('/environments'))).toBe(true);
     });
 
     it('lands on the environments, and offers every one Portainer reported', async () => {
@@ -613,30 +617,44 @@ describe('AppPanel', () => {
   });
 
   it('does not surface an aborted request as an error', async () => {
+    // The sequence guard in `load` is what this pins: the abort check beside
+    // it is belt and braces, unreachable on its own because every abort the
+    // panel makes either starts a newer read or happens as the tree goes away.
+    // Asserted on a panel that is still mounted: after an unmount
+    // `queryByRole` returns null whatever the panel did. The abort worth
+    // testing is the panel replacing one read with another — switching tab
+    // aborts the one in flight — and the tab switched *to* deliberately never
+    // answers, because a read that succeeds clears the error again and would
+    // hide a banner the aborted one had raised.
+    let aborted = false;
+    const answered = routeFetch();
     global.fetch = jest.fn((input: string, init?: RequestInit) => {
-      if (input.includes('/instances')) {
-        return Promise.resolve(
-          asResponse({
-            ok: true,
-            status: 200,
-            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
-          }),
-        );
-      }
-      return new Promise((_resolve, reject) => {
-        init?.signal?.addEventListener('abort', () => {
-          const error = new Error('The operation was aborted');
-          error.name = 'AbortError';
-          reject(error);
+      if (input.includes('/containers')) {
+        return new Promise((_resolve, reject) => {
+          init?.signal?.addEventListener('abort', () => {
+            aborted = true;
+            const error = new Error('The operation was aborted');
+            error.name = 'AbortError';
+            reject(error);
+          });
         });
-      });
+      }
+      if (input.includes('/images')) return new Promise(() => {});
+      return answered(input, init);
     }) as unknown as typeof fetch;
 
-    const { unmount } = render(<AppPanel />);
+    render(<AppPanel />);
+
+    fireEvent.click(await screen.findByRole('tab', { name: 'Containers' }));
     await screen.findByText('Loading…');
+    fireEvent.click(screen.getByRole('tab', { name: 'Images' }));
 
-    unmount();
-
+    // The rejection has actually happened and been handled by the time the
+    // absence is asserted, rather than still being a microtask away.
+    await waitFor(() => expect(aborted).toBe(true));
+    await act(async () => {
+      await Promise.resolve();
+    });
     expect(screen.queryByRole('alert')).not.toBeInTheDocument();
   });
 

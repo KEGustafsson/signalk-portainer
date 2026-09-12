@@ -172,7 +172,13 @@ describe('PortainerClient stack writes', () => {
   });
 
   it('refuses to update a stack that is deployed from a repository', async () => {
-    withStacks();
+    const pool = withStacks();
+    // The write that must not happen, registered so it can be asserted
+    // unconsumed below. Filtering the pending set for a path nothing ever
+    // registered passes whether or not the request was made.
+    pool
+      .intercept({ path: '/api/stacks/5?endpointId=1', method: 'PUT' })
+      .reply(200, fixtures.stacks[2]);
 
     const client = createClient(agent);
     const error = await client
@@ -185,9 +191,10 @@ describe('PortainerClient stack writes', () => {
     expect(error).toBeInstanceOf(PortainerError);
     expect((error as PortainerError).status).toBe(400);
     expect((error as PortainerError).hint).toMatch(/detach it from git/);
-    expect(
-      pendingPaths(agent).filter((path) => path === '/api/stacks/5?endpointId=1'),
-    ).toHaveLength(0);
+    // Both unconsumed: the fresh read, because a git stack is refused from
+    // the list alone, and the write, because it is refused at all.
+    expect(pendingPaths(agent)).toContain('/api/stacks/5');
+    expect(pendingPaths(agent)).toContain('/api/stacks/5?endpointId=1');
   });
 
   it('reports that an update took the stack’s auto-update with it', async () => {
@@ -391,6 +398,13 @@ describe('PortainerClient stack writes', () => {
         .intercept({ path: '/api/endpoints?excludeSnapshots=true', method: 'GET' })
         .reply(200, [fixtures.localEnvironment]);
       pool.intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+      // The fresh read and the write, both registered so that the refusal is
+      // asserted as these going unconsumed. Filtering the pending set for a
+      // path nobody registered finds nothing either way.
+      pool.intercept({ path: '/api/stacks/3', method: 'GET' }).reply(200, fixtures.stacks[0]);
+      pool
+        .intercept({ path: '/api/stacks/3/git?endpointId=1', method: 'POST' })
+        .reply(200, fixtures.stacks[0]);
 
       const error = await createClient(agent)
         .stackAutoUpdate(3, { interval: '1h' })
@@ -399,7 +413,8 @@ describe('PortainerClient stack writes', () => {
       expect(error).toBeInstanceOf(PortainerError);
       expect((error as PortainerError).status).toBe(400);
       expect((error as PortainerError).message).toMatch(/not deployed from a repository/);
-      expect(pendingPaths(agent).filter((path) => path.includes('/git'))).toHaveLength(0);
+      expect(pendingPaths(agent)).toContain('/api/stacks/3');
+      expect(pendingPaths(agent)).toContain('/api/stacks/3/git?endpointId=1');
     });
 
     it('refuses an interval Portainer would take but nobody meant', async () => {
@@ -564,7 +579,12 @@ describe('PortainerClient stack writes', () => {
   });
 
   it('refuses to redeploy a stack that has no repository', async () => {
-    withStacks();
+    const pool = withStacks();
+    // As above: the write is registered so that it still being pending is the
+    // assertion, rather than a filter that matches nothing either way.
+    pool
+      .intercept({ path: '/api/stacks/3/git/redeploy?endpointId=1', method: 'PUT' })
+      .reply(200, fixtures.stacks[0]);
 
     const client = createClient(agent);
     const error = await client.redeployStack(3).catch((cause: unknown) => cause);
@@ -574,7 +594,8 @@ describe('PortainerClient stack writes', () => {
     expect(error).toBeInstanceOf(PortainerError);
     expect((error as PortainerError).status).toBe(400);
     expect((error as PortainerError).message).toMatch(/not deployed from a repository/);
-    expect(pendingPaths(agent).filter((path) => path.includes('redeploy'))).toHaveLength(0);
+    expect(pendingPaths(agent)).toContain('/api/stacks/3');
+    expect(pendingPaths(agent)).toContain('/api/stacks/3/git/redeploy?endpointId=1');
   });
 
   it('refuses every write against a stack in another environment', async () => {
@@ -603,9 +624,9 @@ describe('PortainerClient stack writes', () => {
     // environment is refused from the list alone, so the fresh read the
     // echoing writes make is never reached. Asserted this way round because
     // the filter finding nothing would pass whether or not the read happened.
-    expect(pendingPaths(agent).filter((path) => path === '/api/stacks/9').length).toBeGreaterThan(
-      0,
-    );
+    // One per attempt: `toBeGreaterThan(0)` would still pass if the guard
+    // stopped short-circuiting all but one of them.
+    expect(pendingPaths(agent).filter((path) => path === '/api/stacks/9')).toHaveLength(3);
   });
 
   it('creates a standalone stack on a daemon that is not a swarm', async () => {
