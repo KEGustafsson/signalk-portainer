@@ -1624,16 +1624,23 @@ export class PortainerClient {
    * redeploy.
    */
   async updateStack(id: number, update: StackUpdate): Promise<StackUpdateResult> {
-    const stack = await this.ownStack(id, 'PUT', `/api/stacks/${id}`);
-    if (stack.GitConfig?.URL) {
-      throw new PortainerError({
+    const known = await this.ownStack(id, 'PUT', `/api/stacks/${id}`);
+    const fromGit = (name: string): PortainerError =>
+      new PortainerError({
         status: 400,
         method: 'PUT',
         path: `/api/stacks/${id}`,
-        message: `Stack ${stack.Name} is deployed from a repository`,
+        message: `Stack ${name} is deployed from a repository`,
         hint: 'updating it here would detach it from git and drop its auto-update settings; change the file in the repository and redeploy instead',
       });
-    }
+    if (known.GitConfig?.URL) throw fromGit(known.Name);
+    // Fresh, because the environment below is echoed back to preserve it: the
+    // list this was read from is cached for fifteen seconds, and while a stack
+    // write does retire that key, it does so *after* sending — too late to
+    // stop this request carrying an environment the operator has since
+    // changed in Portainer's own UI.
+    const stack = await this.stack(id);
+    if (stack.GitConfig?.URL) throw fromGit(stack.Name);
     const path = `/api/stacks/${id}`;
     const startedAt = performance.now();
     const answered = await this.stackWrite('PUT', `${path}?${await this.endpointQuery()}`, {
@@ -1767,16 +1774,22 @@ export class PortainerClient {
    * answers that with a failure about a field the operator never filled in.
    */
   async redeployStack(id: number, options: StackRedeploy = {}): Promise<void> {
-    const stack = await this.ownStack(id, 'PUT', `/api/stacks/${id}/git/redeploy`);
-    if (!stack.GitConfig?.URL) {
-      throw new PortainerError({
+    const notGit = (name: string): PortainerError =>
+      new PortainerError({
         status: 400,
         method: 'PUT',
         path: `/api/stacks/${id}/git/redeploy`,
-        message: `Stack ${stack.Name} was not deployed from a repository`,
+        message: `Stack ${name} was not deployed from a repository`,
         hint: 'redeploy pulls the file from git; for a file-based stack, send the new file instead',
       });
-    }
+    const known = await this.ownStack(id, 'PUT', `/api/stacks/${id}/git/redeploy`);
+    if (!known.GitConfig?.URL) throw notGit(known.Name);
+    // Fresh, for the same reason as the update above: the branch, the
+    // environment and the stored credentials are all echoed back below to
+    // keep them, and a record up to fifteen seconds old would have this
+    // request revert whichever of them was changed in the meantime.
+    const stack = await this.stack(id);
+    if (!stack.GitConfig?.URL) throw notGit(stack.Name);
     const path = `/api/stacks/${id}/git/redeploy`;
     // Credentials the stack was created with are asked for again by name.
     // Portainer keeps them, but through 2.42 it reuses them only when the

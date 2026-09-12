@@ -95,6 +95,13 @@ describe('facade stack writes', () => {
   const withStacks = () => {
     withEnvironment();
     boat().intercept({ path: '/api/stacks', method: 'GET' }).reply(200, fixtures.stacks);
+    // The writes that echo a record back to preserve it read the stack itself
+    // as well, rather than trust a list cached for fifteen seconds.
+    for (const stack of fixtures.stacks) {
+      boat()
+        .intercept({ path: `/api/stacks/${stack.Id}`, method: 'GET' })
+        .reply(200, stack);
+    }
   };
 
   /** The container list a self-protection check reads. */
@@ -688,6 +695,11 @@ describe('facade stack writes', () => {
 
     it('allows the stack write once self-management is enabled', async () => {
       withStacks();
+      // The container that would trigger the guard, so its interceptor still
+      // being unconsumed below is the assertion: with self-management on the
+      // guard returns before reading anything, rather than reading the list
+      // and deciding to allow it.
+      withContainers(inStack(SELF_ID, 'signalk-server', 'signalk'));
       boat()
         .intercept({ path: '/api/stacks/3/stop?endpointId=1', method: 'POST' })
         .reply(200, fixtures.stacks[0]);
@@ -697,8 +709,11 @@ describe('facade stack writes', () => {
       ).post('/api/stacks/3/stop');
 
       expect(res.status).toBe(200);
-      // The container list is never read: the guard is off, not just passed.
-      expect(agent.pendingInterceptors()).toHaveLength(0);
+      expect(
+        agent
+          .pendingInterceptors()
+          .filter((interceptor) => String(interceptor.path).includes('/docker/containers')),
+      ).toHaveLength(1);
     });
 
     it('leaves a stack alone that Signal K is not in', async () => {
