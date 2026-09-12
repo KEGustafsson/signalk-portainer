@@ -3,6 +3,8 @@ import type { ControlState } from '../../src/webapp/control';
 import {
   envForRequest,
   envOf,
+  envProblem,
+  envProblems,
   hasChanges,
   isActive,
   isFromGit,
@@ -190,16 +192,65 @@ describe('hasChanges', () => {
 });
 
 describe('nameProblem', () => {
-  it('accepts the names Docker accepts', () => {
+  it('accepts the names compose accepts as a project', () => {
     expect(nameProblem('signalk')).toBeUndefined();
-    expect(nameProblem('boat-stack_2.1')).toBeUndefined();
+    expect(nameProblem('boat-stack_2')).toBeUndefined();
   });
 
   it('explains the ones it does not', () => {
     expect(nameProblem('')).toContain('needs a name');
-    expect(nameProblem('../etc')).toContain('only letters');
-    expect(nameProblem('-leading')).toContain('only letters');
-    expect(nameProblem('with space')).toContain('only letters');
+    expect(nameProblem('../etc')).toContain('only lowercase letters');
+    expect(nameProblem('-leading')).toContain('only lowercase letters');
+    expect(nameProblem('with space')).toContain('only lowercase letters');
+  });
+
+  it('refuses what Portainer’s own form refuses, rather than letting it be rewritten', () => {
+    // Compose lowercases a project name and drops a dot; which of those a
+    // Portainer does depends on its version, so the operator would get a
+    // stack named something they never typed, or a 400 after filling in the
+    // whole form.
+    expect(nameProblem('SignalK')).toContain('lowercase');
+    expect(nameProblem('boat.stack')).toContain('lowercase');
+  });
+});
+
+describe('envProblem', () => {
+  const rows = (...entries: [string, string][]) =>
+    entries.map(([name, value]) => ({ name, value }));
+
+  it('passes an ordinary variable, and an untouched blank row', () => {
+    expect(envProblem(rows(['TZ', 'Europe/Helsinki']), 0)).toBeUndefined();
+    expect(envProblem(rows(['', '']), 0)).toBeUndefined();
+  });
+
+  it('refuses a whole .env line pasted into the name box', () => {
+    // Portainer writes these as `NAME=value` lines, so this would define a
+    // variable called "TZ=Europe/Helsinki" and nothing useful.
+    expect(envProblem(rows(['TZ=Europe/Helsinki', '']), 0)).toMatch(/Letters, digits/);
+    expect(envProblem(rows(['2FAST', '']), 0)).toMatch(/Letters, digits/);
+  });
+
+  it('refuses a value with no name rather than dropping it silently', () => {
+    // `envForRequest` keeps only named rows, so this one would be deployed
+    // without the variable the operator typed a value for, and nothing would
+    // have said so.
+    expect(envProblem(rows(['', 'Europe/Helsinki']), 0)).toMatch(/needs a name/);
+    expect(envProblem(rows(['  ', 'Europe/Helsinki']), 0)).toMatch(/needs a name/);
+    expect(envForRequest(rows(['', 'Europe/Helsinki']))).toEqual([]);
+  });
+
+  it('refuses the same variable twice, since only one of them would survive', () => {
+    expect(envProblem(rows(['TZ', 'a'], ['TZ', 'b']), 1)).toMatch(/twice/);
+    expect(envProblem(rows(['TZ', 'a'], ['TZ', 'b']), 0)).toBeUndefined();
+  });
+
+  it('refuses a line break in a value, which would define a second variable', () => {
+    expect(envProblem(rows(['TZ', 'a\nDB=secret']), 0)).toMatch(/line break/);
+  });
+
+  it('reports the first thing wrong with the whole list', () => {
+    expect(envProblems(rows(['TZ', 'ok'], ['BAD NAME', 'x']))).toMatch(/BAD NAME/);
+    expect(envProblems(rows(['TZ', 'ok']))).toBeUndefined();
   });
 });
 

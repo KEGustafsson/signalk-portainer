@@ -6,6 +6,8 @@ import { useDialogFocus } from './dialogfocus';
 import {
   envForRequest,
   envOf,
+  envProblem,
+  envProblems,
   hasChanges,
   isFromGit,
   nameProblem,
@@ -181,6 +183,10 @@ export function StackEditor({
   }, [busy, confirmingClose, requestClose]);
 
   const problem = target.kind === 'new' ? nameProblem(name) : undefined;
+  // A variable the stack would be deployed without is a refusal, not a
+  // warning: `envForRequest` drops a row it cannot send, so a value typed
+  // against a blank name would otherwise go quietly missing from the deploy.
+  const envIssue = envProblems(env);
   const creatingFromRepository = target.kind === 'new' && source === 'repository';
   // `loadError === undefined` is load-bearing, not belt and braces. A failed
   // read leaves `original.current` at an empty file with the editor unlocked,
@@ -193,6 +199,7 @@ export function StackEditor({
     !loading &&
     loadError === undefined &&
     problem === undefined &&
+    envIssue === undefined &&
     (target.kind === 'new'
       ? creatingFromRepository
         ? repositoryUrl.trim().length > 0
@@ -532,40 +539,44 @@ function EnvEditor({
       {rows.length === 0 ? (
         <div className="text-muted small">None</div>
       ) : (
-        rows.map((row, index) => (
-          <div className="row g-2 mb-1" key={row.key}>
-            <div className="col-5">
-              <input
-                className="form-control form-control-sm font-monospace"
-                aria-label={`Variable ${index + 1} name`}
-                readOnly={readOnly}
-                value={row.name}
-                onChange={(event) => set(index, { name: event.target.value })}
-              />
+        rows.map((row, index) => {
+          const problem = envProblem(rows, index);
+          return (
+            <div className="row g-2 mb-1" key={row.key}>
+              <div className="col-5">
+                <input
+                  className="form-control form-control-sm font-monospace"
+                  aria-label={`Variable ${index + 1} name`}
+                  readOnly={readOnly}
+                  value={row.name}
+                  onChange={(event) => set(index, { name: event.target.value })}
+                />
+              </div>
+              <div className="col-6">
+                <input
+                  className="form-control form-control-sm font-monospace"
+                  aria-label={`Variable ${index + 1} value`}
+                  readOnly={readOnly}
+                  value={row.value}
+                  onChange={(event) => set(index, { value: event.target.value })}
+                />
+              </div>
+              <div className="col-1">
+                {!readOnly ? (
+                  <button
+                    type="button"
+                    className="btn btn-sm btn-outline-danger w-100"
+                    aria-label={`Remove ${row.name || `variable ${index + 1}`}`}
+                    onClick={() => onChange(rows.filter((_, at) => at !== index))}
+                  >
+                    ×
+                  </button>
+                ) : null}
+              </div>
+              {problem ? <div className="col-12 form-text text-danger">{problem}</div> : null}
             </div>
-            <div className="col-6">
-              <input
-                className="form-control form-control-sm font-monospace"
-                aria-label={`Variable ${index + 1} value`}
-                readOnly={readOnly}
-                value={row.value}
-                onChange={(event) => set(index, { value: event.target.value })}
-              />
-            </div>
-            <div className="col-1">
-              {!readOnly ? (
-                <button
-                  type="button"
-                  className="btn btn-sm btn-outline-danger w-100"
-                  aria-label={`Remove ${row.name || `variable ${index + 1}`}`}
-                  onClick={() => onChange(rows.filter((_, at) => at !== index))}
-                >
-                  ×
-                </button>
-              ) : null}
-            </div>
-          </div>
-        ))
+          );
+        })
       )}
     </div>
   );

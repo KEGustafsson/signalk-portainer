@@ -9,18 +9,26 @@ const BASE = '/plugins/signalk-portainer/api';
 export class ApiError extends Error {
   readonly status: number;
   readonly hint: string | undefined;
+  /**
+   * What Portainer itself said, when the failure came from there. The
+   * plugin's own paraphrase says a request failed with 400; this is the
+   * sentence that says which field it objected to.
+   */
+  readonly detail: string | undefined;
 
-  constructor(status: number, message: string, hint?: string) {
+  constructor(status: number, message: string, hint?: string, detail?: string) {
     super(message);
     this.name = 'ApiError';
     this.status = status;
     this.hint = hint;
+    this.detail = detail;
   }
 }
 
 interface FacadeError {
   error?: string;
   hint?: string;
+  detail?: string;
 }
 
 /**
@@ -169,10 +177,22 @@ async function send<T>(
 
   if (!response.ok) {
     const failure = body as FacadeError;
+    // A 401 or 403 with none of the facade's own fields did not come from the
+    // facade: Signal K answered it before the plugin was reached, which means
+    // the session behind this page has expired. "Request failed with 401" sent
+    // operators looking for a Portainer credential that was never involved.
+    if ((response.status === 401 || response.status === 403) && !failure.error) {
+      throw new ApiError(
+        response.status,
+        'Your Signal K session has expired',
+        'log in to the Signal K admin UI again, then reload this page',
+      );
+    }
     throw new ApiError(
       response.status,
       failure.error ?? `Request failed with ${response.status}`,
       failure.hint,
+      failure.detail,
     );
   }
 

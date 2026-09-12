@@ -216,6 +216,10 @@ describe('tables with sparse Docker data', () => {
       render(<EnvironmentsTable rows={rows} actions={{ onSelect }} />);
 
       await user.click(screen.getByRole('button', { name: 'Select lenovo' }));
+      // Once, not twice: the button sits inside a row that answers clicks of
+      // its own, and a press that reached both sent two switch requests for
+      // the same environment.
+      expect(onSelect).toHaveBeenCalledTimes(1);
       expect(onSelect).toHaveBeenCalledWith(27);
 
       onSelect.mockClear();
@@ -459,7 +463,10 @@ describe('the images table', () => {
 
   it('holds the button while that row’s own request is in flight', () => {
     render(
-      <ImagesTable rows={[image]} actions={{ control, busyId: image.Id, onRemove: () => {} }} />,
+      <ImagesTable
+        rows={[image]}
+        actions={{ control, busyIds: new Set([image.Id]), onRemove: () => {} }}
+      />,
     );
 
     expect(screen.getByRole('button', { name: 'Delete' })).toHaveAccessibleDescription(

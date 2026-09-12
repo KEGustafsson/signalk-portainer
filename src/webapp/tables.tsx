@@ -46,6 +46,15 @@ export interface EnvironmentRow {
   url?: string;
   health: string;
   isSelected: boolean;
+  /**
+   * Whether this plugin can manage the environment at all. Kubernetes, Azure
+   * and an async Edge agent have no Docker API behind them, and selecting one
+   * used to leave every tab showing an error about a tunnel or a manifest.
+   * Absent from an older plugin's answer, which knew no better, so it reads
+   * as selectable.
+   */
+  supported?: boolean;
+  reason?: string;
 }
 
 const ENVIRONMENT_TYPES: Record<number, string> = {
@@ -86,12 +95,15 @@ export function EmptyRow({ columns, message }: { columns: number; message: strin
 export function GatedButton({
   className,
   label,
+  ariaLabel,
   reason,
   onPress,
 }: {
   className: string;
-  /** The visible text, and the accessible name. */
+  /** The visible text, and the accessible name unless one is given. */
   label: string;
+  /** A fuller name, for a button whose row is what tells them apart. */
+  ariaLabel?: string;
   /** Why the press will be dropped; undefined when it will not be. */
   reason?: string;
   onPress: () => void;
@@ -114,12 +126,16 @@ export function GatedButton({
       // sibling it would sit between two buttons of a btn-group and flatten
       // the group's corners; inside and unnamed it would be read out as part
       // of the button's own name.
-      aria-label={label}
+      aria-label={ariaLabel ?? label}
       {...(inert ? { 'aria-disabled': true, 'aria-describedby': describedBy } : {})}
       // Kept for the pointer: a tooltip is still the fastest way to read this
       // with a mouse. It is no longer the only way.
       title={reason}
-      onClick={() => {
+      onClick={(event) => {
+        // Without this a button inside a row that answers clicks of its own —
+        // the environment table — has the row answer the same click, and the
+        // same environment is chosen twice.
+        event.stopPropagation();
         if (!inert) onPress();
       }}
     >
@@ -189,7 +205,9 @@ export function EnvironmentsTable({
         rows.map((row) => {
           // The one already in use is not offered again, and neither is any
           // row while a switch is still going through.
-          const choosable = select !== undefined && !row.isSelected && actions?.busy !== true;
+          const unmanageable = row.supported === false;
+          const choosable =
+            select !== undefined && !row.isSelected && !unmanageable && actions?.busy !== true;
           return (
             <tr
               key={row.id}
@@ -211,22 +229,19 @@ export function EnvironmentsTable({
                 {row.isSelected ? (
                   <span className="badge bg-primary">selected</span>
                 ) : select ? (
-                  <button
-                    type="button"
+                  <GatedButton
                     className="btn btn-sm btn-outline-primary"
+                    label="Select"
                     // Named per row: half a dozen buttons all reading "Select"
                     // tell a screen reader nothing about which one they are.
-                    aria-label={`Select ${row.name}`}
-                    disabled={actions?.busy === true}
-                    onClick={(event) => {
-                      // Without this the row underneath answers the same click,
-                      // and the same environment is chosen twice.
-                      event.stopPropagation();
-                      select(row.id);
-                    }}
-                  >
-                    Select
-                  </button>
+                    ariaLabel={`Select ${row.name}`}
+                    {...(unmanageable
+                      ? { reason: row.reason ?? 'This plugin cannot manage this environment' }
+                      : actions?.busy === true
+                        ? { reason: 'Waiting for the environment switch to finish' }
+                        : {})}
+                    onPress={() => select(row.id)}
+                  />
                 ) : null}
               </td>
             </tr>
@@ -237,11 +252,31 @@ export function EnvironmentsTable({
   );
 }
 
+/**
+ * The ports a container publishes, each once.
+ *
+ * A host with IPv6 publishes every port twice — `0.0.0.0:8086->8086` and
+ * `:::8086->8086` are the same publication seen from two families — and the
+ * row read "8086→8086, 8086→8086", which looks like a misconfiguration.
+ */
+function publishedPorts(container: DockerContainer): string {
+  const seen = new Set<string>();
+  for (const port of container.Ports ?? []) {
+    if (!port.PublicPort) continue;
+    seen.add(`${port.PublicPort}→${port.PrivatePort}${port.Type === 'udp' ? '/udp' : ''}`);
+  }
+  return [...seen].join(', ') || '—';
+}
+
 export interface ContainerActionsProps {
   /** What the server says may be offered; absent until /control answers. */
   control?: ControlState;
-  /** Id of the container a request is currently in flight for. */
-  busyId?: string;
+  /**
+   * Every container a request is currently in flight for. A set rather than
+   * one id, because two actions can be in flight at once and the first to
+   * finish used to re-enable the other's buttons.
+   */
+  busyIds?: ReadonlySet<string>;
   onAction: (container: DockerContainer, action: ContainerAction) => void;
   /** Opens the log viewer. Reading logs changes nothing, so it is never gated. */
   onLogs?: (container: DockerContainer) => void;
@@ -281,12 +316,7 @@ export function ContainersTable({
               <div className="text-muted small">{row.Status}</div>
             </td>
             <td className="small">{row.Image}</td>
-            <td className="small">
-              {(row.Ports ?? [])
-                .filter((port) => port.PublicPort)
-                .map((port) => `${port.PublicPort}→${port.PrivatePort}`)
-                .join(', ') || '—'}
-            </td>
+            <td className="small">{publishedPorts(row)}</td>
             <td>{formatAge(row.Created)}</td>
             {actions ? (
               <td>
@@ -331,7 +361,7 @@ function ActionButtons({
   row: DockerContainer;
   actions: ContainerActionsProps;
 }): ReactElement {
-  const busy = actions.busyId === row.Id;
+  const busy = actions.busyIds?.has(row.Id) === true;
   return (
     <div
       className="btn-group btn-group-sm"
@@ -448,8 +478,8 @@ function gateReason(
 
 export interface ImageActionsProps {
   control?: ControlState;
-  /** Id of the image a request is currently in flight for. */
-  busyId?: string;
+  /** Every image a request is currently in flight for; see the containers above. */
+  busyIds?: ReadonlySet<string>;
   onRemove: (image: DockerImage) => void;
   /**
    * Disk usage, read once when the tab opened. The only place the panel learns
@@ -533,7 +563,7 @@ function ImageButtons({
   row: DockerImage;
   actions: ImageActionsProps;
 }): ReactElement {
-  const busy = actions.busyId === row.Id;
+  const busy = actions.busyIds?.has(row.Id) === true;
   const label = row.RepoTags?.[0] ?? shortId(row.Id);
   return (
     <div className="btn-group btn-group-sm" role="group" aria-label={`Actions for ${label}`}>

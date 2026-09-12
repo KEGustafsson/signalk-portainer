@@ -22,9 +22,18 @@ export interface Notification {
   value: { state: AlarmState; method: string[]; message: string };
 }
 
-/** Signal K's own convention: an active alarm asks for attention, a cleared one does not. */
-function notification(state: AlarmState, message: string): Notification['value'] {
-  return { state, method: state === 'alarm' ? ['visual', 'sound'] : [], message };
+/**
+ * Signal K's own convention: an active alarm asks for attention, a cleared
+ * one does not. A paused container is the one alarm that stays silent — it
+ * was paused by someone, from the panel as often as not, and a chartplotter
+ * sounding over an operator's own action teaches them to mute the channel.
+ */
+function notification(
+  state: AlarmState,
+  message: string,
+  method: string[] = state === 'alarm' ? ['visual', 'sound'] : [],
+): Notification['value'] {
+  return { state, method, message };
 }
 
 /**
@@ -34,9 +43,33 @@ function notification(state: AlarmState, message: string): Notification['value']
  */
 const UNREACHABLE_POLLS = 2;
 
+/**
+ * Two polls in a row before the *transient* container states are alarmed.
+ *
+ * A `docker compose up` takes a service away and puts it back between two
+ * polls, and a container with a restart policy cycles through `restarting`
+ * and `created` on its way to running — so alarming the first time one of
+ * those is seen raises and clears an alarm every interval for something
+ * nobody can act on, which is how a crew learns to ignore the channel.
+ *
+ * Only those. A container that has exited, died, been paused or gone
+ * unhealthy is not on its way anywhere, and waiting a second interval to say
+ * so would be a minute of silence on the one alarm that matters.
+ */
+const TRANSIENT_STATES: readonly string[] = ['restarting', 'created', 'removing'];
+const CONTAINER_DOWN_POLLS = 2;
+
 export class Watchdog {
   /** Last state published per path, so an alarm is raised once, not per poll. */
   private readonly states = new Map<string, AlarmState>();
+  /**
+   * What was last published for a path, as the whole notification rather than
+   * its state. Deduplicating on the state alone held back everything that
+   * changes while an alarm stays an alarm: a container that went from exited
+   * to paused kept the sound method it no longer wanted, and one that went
+   * from stopped to removed went on saying it was stopped.
+   */
+  private readonly published = new Map<string, string>();
   /**
    * The path each configured watch currently publishes to.
    *
@@ -65,6 +98,8 @@ export class Watchdog {
    */
   /** Consecutive failed polls per instance, so a blip does not alarm. */
   private readonly misses = new Map<string, number>();
+  /** Consecutive polls each watched container was seen not running. */
+  private readonly downPolls = new Map<string, number>();
 
   evaluate(instance: string, snapshot: InstanceSnapshot): Notification[] {
     const watched = this.entries.filter((entry) => entry.instance === instance);
@@ -134,8 +169,28 @@ export class Watchdog {
           `Container ${entry.container} is now reported under a different key`,
         );
         this.states.delete(previous);
+        this.published.delete(previous);
       }
       this.paths.set(identity, path);
+
+      // Running, and not failing its own health check. Docker keeps a
+      // container whose healthcheck fails in the running state — the process
+      // is alive, it just no longer does its job — and that is precisely the
+      // hung AIS logger this watchdog exists to catch.
+      const unhealthy = found ? /\(unhealthy\)/i.test(found.Status ?? '') : false;
+      if (found && found.State === 'running' && !unhealthy) {
+        this.downPolls.delete(identity);
+        this.push(notifications, path, 'normal', `Container ${entry.container} is running`);
+        continue;
+      }
+
+      // A state a container passes through, or an absence a recreate
+      // explains, is given one more poll to resolve itself. Everything else
+      // is alarmed at once.
+      const down = (this.downPolls.get(identity) ?? 0) + 1;
+      this.downPolls.set(identity, down);
+      const transient = !found || TRANSIENT_STATES.includes(found.State);
+      if (transient && down < CONTAINER_DOWN_POLLS) continue;
 
       if (!found) {
         // Missing is worse than stopped, not better: a container that was
@@ -146,17 +201,20 @@ export class Watchdog {
           'alarm',
           `Container ${entry.container} does not exist on ${instance}`,
         );
-        continue;
-      }
-
-      if (found.State === 'running') {
-        this.push(notifications, path, 'normal', `Container ${entry.container} is running`);
+      } else if (unhealthy) {
+        this.push(
+          notifications,
+          path,
+          'alarm',
+          `Container ${entry.container} is running but unhealthy on ${instance}`,
+        );
       } else {
         this.push(
           notifications,
           path,
           'alarm',
           `Container ${entry.container} is ${found.State} on ${instance}`,
+          found.State === 'paused' ? ['visual'] : undefined,
         );
       }
     }
@@ -179,12 +237,22 @@ export class Watchdog {
       });
     }
     this.states.clear();
+    this.published.clear();
     return notifications;
   }
 
-  private push(into: Notification[], path: string, state: AlarmState, message: string): void {
-    if (this.states.get(path) === state) return;
+  private push(
+    into: Notification[],
+    path: string,
+    state: AlarmState,
+    message: string,
+    method?: string[],
+  ): void {
+    const value = notification(state, message, method);
+    const signature = JSON.stringify(value);
+    if (this.published.get(path) === signature) return;
     this.states.set(path, state);
-    into.push({ path, value: notification(state, message) });
+    this.published.set(path, signature);
+    into.push({ path, value });
   }
 }

@@ -6,13 +6,14 @@ import type {
   StackEnvVar,
   StackFromRepository,
   StackFromString,
+  StackRedeploy,
   StackUpdate,
 } from './client';
-import { environmentHealth } from './client';
+import { environmentHealth, environmentSupport } from './client';
 import type { PluginConfig } from './config';
 import { PolicyError, PortainerError } from './errors';
 import { redactValue } from './redact';
-import { toLines } from './logframes';
+import { toLines, type LogFrame } from './logframes';
 import { InstanceRegistry, UnknownInstanceError } from './registry';
 import { isSelfContainer, type SelfContainer } from './self';
 import { stackHoldsSelf, stackOfContainer } from './stackguard';
@@ -251,11 +252,65 @@ function isLifecycleAction(value: string): value is LifecycleAction {
   return (LIFECYCLE_ACTIONS as readonly string[]).includes(value);
 }
 
-/** Reads ?instance=<name>, defaulting to the first enabled instance. */
+/**
+ * Reads ?instance=<name>, defaulting to the first enabled instance.
+ *
+ * Given twice, or as an object, it is refused rather than ignored: a request
+ * that named two instances used to fall through to the default one, and for
+ * a mutation that is the wrong Portainer.
+ */
 export function instanceParam(req: Request): string | undefined {
   const value = req.query.instance;
-  return typeof value === 'string' && value.length > 0 ? value : undefined;
+  if (value === undefined || value === '') return undefined;
+  if (typeof value !== 'string') {
+    throw new PortainerError({
+      status: 400,
+      method: req.method,
+      path: req.path,
+      message: 'instance must be given once, as a name',
+      hint: 'send ?instance=<name>, or leave it out for the first enabled instance',
+    });
+  }
+  return value;
 }
+
+/**
+ * A container reference out of the path, or a 400 that says what was wrong
+ * with it.
+ *
+ * Docker names match `[a-zA-Z0-9][a-zA-Z0-9_.-]+` and ids are hex, so this
+ * is the rule. `.` and `..` matter most: `encodeURIComponent` leaves them
+ * alone, and a URL parser folds `/containers/../start` into `/start` — one
+ * path segment up from where the request said it was going.
+ */
+export function containerRef(req: Request, method: string, path: string): string {
+  const raw = String(req.params.id ?? '');
+  if (/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(raw) && raw !== '.' && raw !== '..') return raw;
+  throw new PortainerError({
+    status: 400,
+    method,
+    path,
+    message: `"${raw}" is not a container id or name`,
+    hint: 'a container is named by its id, or by a name of letters, digits, underscore, dot and dash',
+  });
+}
+
+/**
+ * How large a request body may be, whoever parsed it.
+ *
+ * The Signal K server parses JSON bodies for every route before a plugin's
+ * router sees them, with its own, larger limit, and body-parser skips a body
+ * that is already parsed — so the middleware below never saw an oversized
+ * one in production. The limit is enforced on what arrived instead.
+ */
+const MAX_BODY_BYTES = 512 * 1024;
+
+/**
+ * The longest piece of a line held while waiting for the line break that
+ * ends it. Well above any log line worth reading, and far below what a
+ * container writing without newlines could otherwise accumulate.
+ */
+const MAX_HELD_LINE = 64 * 1024;
 
 /**
  * The plugin's own REST surface. Signal K authenticates the request before it
@@ -305,20 +360,36 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       // `environmentOrNone` rather than `environment`: this route is what the
       // picker reads, and refusing to list the choices because no choice has
       // been made yet would leave the operator no way to make one.
-      const [environments, selected] = await Promise.all([
-        client.listEnvironments({ excludeSnapshots: true }),
-        client.environmentOrNone(),
-      ]);
+      const environments = await client.listEnvironments({ excludeSnapshots: true });
+      // A saved choice that no longer exists — the environment was removed
+      // and recreated under a new id — must not refuse this route: it is
+      // the one route that lets the operator choose again, and the config
+      // form hides the field they would otherwise clear by hand. So the
+      // failure becomes a warning beside the list, and the choice is open.
+      let selected: number | null = null;
+      let warning: string | undefined;
+      try {
+        selected = (await client.environmentOrNone())?.Id ?? null;
+      } catch (cause) {
+        if (!(cause instanceof PortainerError) || ![400, 404].includes(cause.status)) throw cause;
+        warning = `${withoutHint(cause)} — choose an environment below`;
+      }
       return {
-        selected: selected?.Id ?? null,
-        environments: environments.map((environment) => ({
-          id: environment.Id,
-          name: environment.Name,
-          type: environment.Type,
-          url: environment.URL,
-          health: environmentHealth(environment),
-          isSelected: environment.Id === selected?.Id,
-        })),
+        selected,
+        ...(warning ? { warning } : {}),
+        environments: environments.map((environment) => {
+          const support = environmentSupport(environment);
+          return {
+            id: environment.Id,
+            name: environment.Name,
+            type: environment.Type,
+            url: environment.URL,
+            health: environmentHealth(environment),
+            isSelected: environment.Id === selected,
+            supported: support.supported,
+            ...(support.supported ? {} : { reason: support.reason }),
+          };
+        }),
       };
     }),
   );
@@ -326,7 +397,9 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.get(
     '/api/capabilities',
     withClient(deps, async (_req, client) => ({
-      capabilities: await client.capabilities(),
+      // The panel is the one caller that can show an update banner, so it is
+      // the one caller that pays for the check.
+      capabilities: await client.capabilitiesWithUpdate(),
     })),
   );
 
@@ -342,8 +415,32 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.get(
     '/api/containers/:id',
     withClient(deps, async (req, client) => ({
-      container: await client.docker.inspectContainer(req.params.id as string),
+      container: await client.docker.inspectContainer(
+        containerRef(req, 'GET', '/api/containers/:id'),
+      ),
     })),
+  );
+
+  /**
+   * One reading of what a container costs. Not cached and not polled by the
+   * panel: Docker samples twice, a second apart, to compute the CPU share, so
+   * every call holds a request open for that long.
+   */
+  router.get(
+    '/api/containers/:id/stats',
+    withClient(deps, async (req, client) => {
+      const id = containerRef(req, 'GET', '/api/containers/:id/stats');
+      return { id, stats: await client.docker.stats(id) };
+    }),
+  );
+
+  /** The processes inside a running container, as `ps` lists them. */
+  router.get(
+    '/api/containers/:id/top',
+    withClient(deps, async (req, client) => {
+      const id = containerRef(req, 'GET', '/api/containers/:id/top');
+      return { id, ...(await client.docker.top(id)) };
+    }),
   );
 
   // ── stacks ──────────────────────────────────────────────────────────────
@@ -371,8 +468,29 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
    * unlimited: this is a compose file, not an upload endpoint, and an
    * unbounded body is a way to make Signal K run out of memory.
    */
-  const parseJson = bodyParser.json({ limit: '512kb' });
+  const parseJson = bodyParser.json({ limit: MAX_BODY_BYTES });
+  const tooLargeBody = (res: Response): void => {
+    res.status(413).json({
+      error: 'The request body is larger than 512kb',
+      hint: 'this route takes a compose file, not an upload',
+    });
+  };
   const body = (req: Request, res: Response, next: (cause?: unknown) => void): void => {
+    // A body the host already parsed. The Signal K server runs its own JSON
+    // parser over every route before a plugin's router sees one, with a
+    // larger limit of its own, and body-parser will not read a body twice —
+    // so the limit below was never reached in production, only in tests that
+    // mount this router on a bare Express app. Measured rather than refused
+    // on the declared length: answering before the client has finished
+    // sending breaks the connection under it, and the answer is then lost.
+    if (req.body !== undefined && (req as { _body?: boolean })._body) {
+      if (Buffer.byteLength(JSON.stringify(req.body) ?? '') > MAX_BODY_BYTES) {
+        tooLargeBody(res);
+        return;
+      }
+      next();
+      return;
+    }
     parseJson(req, res, (cause?: unknown) => {
       if (!cause) {
         next();
@@ -435,8 +553,24 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
           hint: `available: ${environments.map((e) => `${e.Id}:${e.Name}`).join(', ')}`,
         });
       }
+      // Refused here, with the reason, rather than saved and then failed by
+      // every proxy call: a Kubernetes cluster or an async Edge agent is a
+      // real environment that this plugin cannot manage.
+      const support = environmentSupport(match);
+      if (!support.supported) {
+        throw new PortainerError({
+          status: 400,
+          method: 'PUT',
+          path: '/api/environment',
+          message: `Environment ${match.Name} cannot be managed by this plugin`,
+          hint: support.reason,
+        });
+      }
 
       client.selectEnvironment(id);
+      // A persisted change of which Docker host the poller, the watchdog and
+      // every PUT handler act on: logged like every other mutation.
+      audit(deps, req, 'select', `${id}:${match.Name}`, undefined, 'environment');
 
       const instance = instanceParam(req) ?? deps.registry()?.defaultName;
       let persisted = true;
@@ -487,6 +621,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
 
   router.post(
     '/api/stacks/:id/:action',
+    body,
     withClient(deps, async (req, client) => {
       const id = stackId(req, 'POST', '/api/stacks/:id/:action');
       const action = String(req.params.action);
@@ -504,6 +639,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       // Starting a stack cannot take Signal K down with it; everything else can.
       if (action !== 'start') await requireStackNotSelf(deps, client, id, action);
 
+      let warning: string | undefined;
       if (action === 'start') await client.startStack(id);
       else if (action === 'stop') await client.stopStack(id);
       else {
@@ -512,11 +648,12 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
         // is destruction by another route: the containers go, and so does
         // anything they were the only thing keeping alive.
         if (redeploy.prune) requireDestructiveAllowed(deps);
+        if (redeploy.prune) warning = await pruneWarning(client);
         await client.redeployStack(id, redeploy);
       }
 
       audit(deps, req, action, String(id), undefined, 'stack');
-      return { id, action, ok: true };
+      return { id, action, ok: true, ...(warning ? { warning } : {}) };
     }),
   );
 
@@ -532,21 +669,25 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       const update = readStackUpdate(req);
       // Same reason as redeploy: a prune deletes whatever the new file dropped.
       if (update.prune) requireDestructiveAllowed(deps);
+      const pruneNote = update.prune ? await pruneWarning(client) : undefined;
       const result = await client.updateStack(id, update);
 
       audit(deps, req, `update${update.prune ? ' --prune' : ''}`, String(id), undefined, 'stack');
+      const warnings = [
+        // Said out loud rather than left to be discovered when the webhook
+        // stops firing: Portainer drops auto-update on every stack update.
+        ...(result.autoUpdateRemoved
+          ? [
+              'Portainer removed this stack’s auto-update settings; its webhook URL no longer works and has to be recreated',
+            ]
+          : []),
+        ...(pruneNote ? [pruneNote] : []),
+      ];
       return {
         id,
         action: 'update',
         ok: true,
-        // Said out loud rather than left to be discovered when the webhook
-        // stops firing: Portainer drops auto-update on every stack update.
-        ...(result.autoUpdateRemoved
-          ? {
-              warning:
-                'Portainer removed this stack’s auto-update settings; its webhook URL no longer works and has to be recreated',
-            }
-          : {}),
+        ...(warnings.length > 0 ? { warning: warnings.join('. ') } : {}),
       };
     }),
   );
@@ -636,6 +777,26 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
    * same reason `removeVolumes` is: the wide one is the version that can take
    * away the tag a rollback needed.
    */
+  /**
+   * Fetches an image, or a newer version of one already here.
+   *
+   * Control rather than destructive: a pull adds and removes nothing that
+   * was there — the old image stays until something prunes it — but it does
+   * spend a boat's bandwidth, and it is a change to the Docker host, so it
+   * is not offered while control is off.
+   */
+  router.post(
+    '/api/images/pull',
+    body,
+    withClient(deps, async (req, client) => {
+      requireControlEnabled(deps);
+      const reference = readImageReference(req);
+      const result = await client.docker.pullImage(reference);
+      audit(deps, req, 'pull', reference, undefined, 'image');
+      return { reference, action: 'pull', status: result.status, ok: true };
+    }),
+  );
+
   router.post(
     '/api/images/prune',
     withClient(deps, async (req, client) => {
@@ -663,7 +824,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.get(
     '/api/containers/:id/logs',
     withClient(deps, async (req, client) => {
-      const id = String(req.params.id);
+      const id = containerRef(req, 'GET', '/api/containers/:id/logs');
       const frames = await client.docker.logs(id, logOptions(req));
       return { id, lines: toLines(frames) };
     }),
@@ -757,7 +918,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
         );
       }
 
-      const id = String(req.params.id);
+      const id = containerRef(req, 'POST', '/api/containers/:id/exec');
       // A shell inside the Signal K container can stop Signal K as surely as
       // the stop button can, and with less to say about it afterwards.
       const canonical = await requireNotSelf(deps, client, id, 'open a shell in');
@@ -773,11 +934,15 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
       const session = randomBytes(16).toString('hex');
       let ticket: string;
       try {
-        const execId = await client.createExec(id, command);
+        // The id the guard cleared, as the lifecycle routes use: a name is
+        // resolved by Docker at the moment it is used, and a container
+        // recreated under the same name between the inspect and this call
+        // would be a different container from the one just inspected.
+        const execId = await client.createExec(canonical ?? id, command);
         ticket = reservation.commit({
           instance: instanceParam(req),
           execId,
-          containerId: canonical ?? id,
+          containerId: (canonical ?? id).toLowerCase(),
           session,
         });
       } catch (cause) {
@@ -834,8 +999,11 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
     '/api/containers/:id/:action',
     withClient(deps, async (req, client) => {
       const action = String(req.params.action);
-      const id = String(req.params.id);
+      const id = containerRef(req, 'POST', '/api/containers/:id/:action');
 
+      if (action === 'recreate') {
+        return recreateContainer(deps, client, req, id);
+      }
       if (!isLifecycleAction(action)) {
         throw new PortainerError({
           status: 400,
@@ -884,7 +1052,7 @@ export function registerRoutes(router: Router, deps: FacadeDeps): FacadeHandle {
   router.delete(
     '/api/containers/:id',
     withClient(deps, async (req, client) => {
-      const id = String(req.params.id);
+      const id = containerRef(req, 'DELETE', '/api/containers/:id');
       const removeVolumes = req.query.removeVolumes === 'true';
       const force = req.query.force === 'true';
 
@@ -954,13 +1122,19 @@ async function streamLogs(
   }
 
   const id = String(req.params.id);
-  const instance = instanceParam(req) ?? registry.defaultName;
+  let instance: string | undefined;
   let release: (() => void) | undefined;
   let keepalive: NodeJS.Timeout | undefined;
+  /** Why the plugin, rather than the browser or Docker, ended the stream. */
+  let stoppedBecause: string | undefined;
 
   try {
+    instance = instanceParam(req) ?? registry.defaultName;
+    const target = containerRef(req, 'GET', '/api/containers/:id/logs/stream');
     const client = registry.get(instanceParam(req));
-    release = limiter.acquire(`${instance}/${id}`);
+    // Keyed case-insensitively: the per-container ceiling is per container,
+    // not per spelling of its id.
+    release = limiter.acquire(`${instance}/${target.toLowerCase()}`);
 
     // The upstream stream is ended by this signal and nothing else, so the
     // browser navigating away has to reach it.
@@ -972,18 +1146,27 @@ async function streamLogs(
     // follow stream would never be aborted, the loop below would write forever
     // into a dead socket, and the permit would be held until Signal K
     // restarted. Eight of those and every log stream is refused.
-    const end = (): void => {
+    //
+    // On both the request and the response. The request's close is the one
+    // that fires when a socket goes; the response's is documented for it,
+    // and is also the one that survives a host middleware consuming the
+    // request stream, which ends the request early while the response is
+    // still streaming.
+    const end = (because?: string): void => {
+      if (because) stoppedBecause = because;
       controller.abort();
       release?.();
-      openStreams.delete(end);
+      openStreams.delete(stop);
     };
-    req.on('close', end);
-    openStreams.add(end);
+    const stop = (): void => end('the plugin stopped');
+    req.on('close', () => end());
+    res.on('close', () => end());
+    openStreams.add(stop);
 
     // Awaited before any header is written, so a container that does not exist
     // is a 404 rather than a 200 stream carrying one error event — which an
     // EventSource would answer by reconnecting into a loop.
-    const frames = await client.docker.logStream(id, controller.signal, logOptions(req));
+    const frames = await client.docker.logStream(target, controller.signal, logOptions(req));
     // The browser may have left while Portainer was answering. `destroyed` is
     // the flag that says so: `writableEnded` only becomes true once this
     // function itself has called end(), so it was never true here.
@@ -1012,36 +1195,83 @@ async function streamLogs(
     }, keepaliveMs);
     keepalive.unref?.();
 
-    for await (const frame of frames) {
+    // A frame is whatever Docker handed over in one read, and a line can be
+    // split across two of them — a TTY container's output arrives in
+    // network-sized chunks, and a non-TTY message longer than Docker's 16 KiB
+    // read buffer comes as two frames. So the tail of each frame is held
+    // until the line break that ends it arrives, per stream, since stdout
+    // and stderr interleave.
+    const partial: Record<LogFrame['stream'], string> = { stdout: '', stderr: '' };
+    const lines = (frame: LogFrame): LogFrame[] => {
+      const text = partial[frame.stream] + frame.text;
+      const pieces = text.split('\n');
+      let held = pieces.pop() ?? '';
+      // A line has to end somewhere. A container writing a very long line —
+      // or binary — would otherwise be held in memory for as long as it took
+      // to find a line break, which for a stream that never writes one is
+      // forever: nothing would reach the browser and the buffer would grow
+      // with every frame. Past this much, what is held is sent as a line.
+      while (held.length > MAX_HELD_LINE) {
+        pieces.push(held.slice(0, MAX_HELD_LINE));
+        held = held.slice(MAX_HELD_LINE);
+      }
+      partial[frame.stream] = held;
+      return toLines(pieces.map((piece) => ({ stream: frame.stream, text: `${piece}\n` })));
+    };
+    const remainder = (): LogFrame[] =>
+      (['stdout', 'stderr'] as const).flatMap((stream) => {
+        const text = partial[stream];
+        partial[stream] = '';
+        return text ? toLines([{ stream, text }]) : [];
+      });
+
+    const send = async (line: LogFrame): Promise<boolean> => {
+      // Redacted like every other response body. The one-shot read goes
+      // through `handle()`, which does this; the stream bypasses it, and a
+      // container printing a token would otherwise have it masked on one
+      // route and passed through verbatim on the other.
+      const written = res.write(`data: ${JSON.stringify(redactValue(line))}\n\n`);
+      // `write` returning false means the socket cannot take any more: a
+      // chatty container over a slow link. Ignoring it — which is what
+      // discarding this value did — accumulates the whole difference in the
+      // Node heap, unbounded, because the stream ceiling limits how many
+      // streams are open and not how many bytes each one holds. On a
+      // Raspberry Pi that is what OOM-kills Signal K.
+      if (!written) await drained(res, controller.signal);
+      return !res.destroyed;
+    };
+
+    frames: for await (const frame of frames) {
       if (res.destroyed) break;
-      for (const line of toLines([frame])) {
-        // Redacted like every other response body. The one-shot read goes
-        // through `handle()`, which does this; the stream bypasses it, and a
-        // container printing a token would otherwise have it masked on one
-        // route and passed through verbatim on the other.
-        const written = res.write(`data: ${JSON.stringify(redactValue(line))}\n\n`);
-        // `write` returning false means the socket cannot take any more: a
-        // chatty container over a slow link. Ignoring it — which is what
-        // discarding this value did — accumulates the whole difference in the
-        // Node heap, unbounded, because the stream ceiling limits how many
-        // streams are open and not how many bytes each one holds. On a
-        // Raspberry Pi that is what OOM-kills Signal K.
-        if (!written) await drained(res, controller.signal);
-        if (res.destroyed) break;
+      for (const line of lines(frame)) {
+        if (!(await send(line))) break frames;
       }
     }
     // Docker ended it: a container that stopped, or a non-follow log that ran
-    // out. Say so rather than letting the browser reconnect into a loop.
+    // out. Whatever was still waiting for its line break is the container's
+    // last word, and goes out before the end is announced. Said rather than
+    // left silent, or the browser reconnects into a loop.
+    if (!res.destroyed) {
+      for (const line of remainder()) {
+        if (!(await send(line))) break;
+      }
+    }
     if (!res.destroyed) {
       res.write('event: end\ndata: {}\n\n');
       res.end();
     }
   } catch (cause) {
     const failure = describeStreamFailure(cause);
-    deps.log(`log stream ${instance}/${id}: ${failure.error}`);
+    deps.log(`log stream ${instance ?? 'default instance'}/${id}: ${failure.error}`);
     // Nothing to tell a socket that has gone, and writing to it throws.
     if (res.destroyed) return;
-    if (res.headersSent) {
+    if (res.headersSent && stoppedBecause !== undefined) {
+      // The plugin ending its own streams is not a failure the viewer should
+      // offer to retry: the plugin is stopping, and a retry would reconnect
+      // into a 503. Announced as the end it is, with the reason.
+      res.write(`event: end\ndata: ${JSON.stringify({ reason: stoppedBecause })}\n\n`);
+      res.end();
+    } else if (res.headersSent) {
       // Mid-stream: the status is long gone, so the failure travels as an
       // event the browser can show beside the lines it already has. Redacted
       // like the data lines above: these messages interpolate what Portainer
@@ -1138,15 +1368,83 @@ function isStackAction(value: string): value is StackAction {
   return (STACK_ACTIONS as readonly string[]).includes(value);
 }
 
+/**
+ * Recreates a container, optionally from a freshly pulled image.
+ *
+ * Control, destructive and self-protection all apply: the old container is
+ * removed — which is what makes it destructive, whatever comes after — and
+ * recreating the one running Signal K ends the plugin issuing the request.
+ * The new container has a new id, which the answer carries so the panel can
+ * follow it.
+ */
+async function recreateContainer(
+  deps: FacadeDeps,
+  client: PortainerClient,
+  req: Request,
+  id: string,
+): Promise<Payload> {
+  const pullImage = req.query.pullImage === 'true';
+  requireControlEnabled(deps);
+  requireDestructiveAllowed(deps);
+  const canonical = await requireNotSelf(deps, client, id, 'recreate');
+  const created = await client.recreateContainer(canonical ?? id, { pullImage });
+  audit(deps, req, `recreate${pullImage ? ' --pull' : ''}`, id, canonical);
+  return {
+    id,
+    action: 'recreate',
+    pullImage,
+    ok: true,
+    ...(typeof created?.Id === 'string' ? { newId: created.Id } : {}),
+  };
+}
+
+/**
+ * The note that goes with a prune on a Portainer that will not do one.
+ *
+ * Before 2.42, Portainer's compose stack update had no prune field at all —
+ * the request carried it and the handler dropped it without a word — and
+ * only swarm stacks pruned. An operator who ticked the box and watched the
+ * dropped service keep running was left to wonder which of them was wrong.
+ */
+async function pruneWarning(client: PortainerClient): Promise<string | undefined> {
+  const capabilities = await client.capabilities().catch(() => undefined);
+  if (!capabilities || capabilities.swarm) return undefined;
+  const version = parseVersion(capabilities.portainerVersion);
+  if (!version || compareVersions(version, [2, 42, 0]) >= 0) return undefined;
+  return `Portainer ${capabilities.portainerVersion} ignores prune on a compose stack; services the file no longer names keep running until Portainer 2.42 or newer`;
+}
+
+/** `2.27.9` as numbers, or nothing for a version that does not read as one. */
+function parseVersion(value: string | undefined): number[] | undefined {
+  const match = /^v?(\d+)\.(\d+)(?:\.(\d+))?/.exec(value ?? '');
+  if (!match) return undefined;
+  return [Number(match[1]), Number(match[2]), Number(match[3] ?? '0')];
+}
+
+/**
+ * Orders two version tuples: negative when the left is older, positive when it
+ * is newer, zero when they are the same release. A missing segment counts as
+ * zero, so `2.42` and `2.42.0` compare equal.
+ */
+function compareVersions(left: number[], right: number[]): number {
+  for (let index = 0; index < Math.max(left.length, right.length); index += 1) {
+    const difference = (left[index] ?? 0) - (right[index] ?? 0);
+    if (difference !== 0) return difference;
+  }
+  return 0;
+}
+
 /** The stack id in the path, or a 400 that says what was wrong with it. */
 function stackId(req: Request, method: string, path: string): number {
   const raw = String(req.params.id);
   // Digits, matched as text, before `Number()` sees it. `Number()` reads other
   // notations as numbers too: "0x3" becomes 3 and "1e1" becomes 10, so a
-  // request naming one stack would stop a different one.
+  // request naming one stack would stop a different one. And the digits have
+  // to survive the round trip: "03" and a twenty-digit string both read as
+  // numbers Portainer would never have issued.
   if (/^\d+$/.test(raw)) {
     const id = Number(raw);
-    if (Number.isInteger(id) && id > 0) return id;
+    if (Number.isSafeInteger(id) && id > 0 && String(id) === raw) return id;
   }
   throw new PortainerError({
     status: 400,
@@ -1154,6 +1452,31 @@ function stackId(req: Request, method: string, path: string): number {
     path,
     message: `Stack id "${raw}" is not a number`,
   });
+}
+
+/** An image reference out of the body, in the form Docker takes it. */
+function readImageReference(req: Request): string {
+  const path = '/api/images/pull';
+  const payload = (req.body ?? {}) as { reference?: unknown };
+  const reference = typeof payload.reference === 'string' ? payload.reference.trim() : '';
+  // Docker's own grammar, near enough: a registry host with an optional port,
+  // path components, a tag or a digest. What it refuses is what could be
+  // more than a name — whitespace, a query, a path escape.
+  if (
+    reference.length === 0 ||
+    reference.length > 255 ||
+    !/^[a-z0-9]+(?:[._-][a-z0-9]+)*(?::\d+)?(?:\/[a-z0-9]+(?:[._-][a-z0-9]+)*)*(?::[A-Za-z0-9_][A-Za-z0-9_.-]{0,127})?(?:@sha256:[a-f0-9]{64})?$/.test(
+      reference,
+    )
+  ) {
+    throw badRequest(
+      'POST',
+      path,
+      'reference must be an image name, with an optional tag or digest',
+      'send { "reference": "ghcr.io/owner/name:1.2" }',
+    );
+  }
+  return reference;
 }
 
 /** A 400 about the request body, phrased for whoever sent it. */
@@ -1173,12 +1496,32 @@ function readEnv(value: unknown, method: string, path: string): StackEnvVar[] | 
   if (!Array.isArray(value)) {
     throw badRequest(method, path, 'env must be a list of { name, value }');
   }
+  const seen = new Set<string>();
   return value.map((entry) => {
     const pair = entry as { name?: unknown; value?: unknown };
     if (typeof pair?.name !== 'string' || pair.name.length === 0) {
       throw badRequest(method, path, 'every environment variable needs a name');
     }
-    return { name: pair.name, value: typeof pair.value === 'string' ? pair.value : '' };
+    // Portainer writes these as `NAME=value` lines into the stack's env file,
+    // so a name with `=` in it — a whole `.env` line pasted into the name box
+    // — or a value with a line break injects a second variable nobody set.
+    if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(pair.name)) {
+      throw badRequest(
+        method,
+        path,
+        `"${pair.name}" is not a valid environment variable name`,
+        'letters, digits and underscore, not starting with a digit',
+      );
+    }
+    if (seen.has(pair.name)) {
+      throw badRequest(method, path, `environment variable ${pair.name} is listed twice`);
+    }
+    seen.add(pair.name);
+    const text = typeof pair.value === 'string' ? pair.value : '';
+    if (/[\r\n]/.test(text)) {
+      throw badRequest(method, path, `the value of ${pair.name} must not contain a line break`);
+    }
+    return { name: pair.name, value: text };
   });
 }
 
@@ -1208,9 +1551,54 @@ function readStackUpdate(req: Request): StackUpdate {
   };
 }
 
-/** Redeploy options come from the query, since the route takes no body. */
-function readRedeploy(req: Request): { prune: boolean; pullImage: boolean } {
-  return { prune: req.query.prune === 'true', pullImage: req.query.pullImage === 'true' };
+/**
+ * Redeploy options, from the query or from a body.
+ *
+ * The query is what the panel has always sent; the body is where credentials
+ * can go — a token belongs in no URL — for a stack whose repository needs
+ * them again, or needs different ones.
+ */
+function readRedeploy(req: Request): StackRedeploy & { prune: boolean; pullImage: boolean } {
+  const path = '/api/stacks/:id/redeploy';
+  const payload = (req.body ?? {}) as {
+    prune?: unknown;
+    pullImage?: unknown;
+    username?: unknown;
+    password?: unknown;
+  };
+  const authentication = readAuthentication(payload, 'POST', path);
+  return {
+    prune: req.query.prune === 'true' || payload.prune === true,
+    pullImage: req.query.pullImage === 'true' || payload.pullImage === true,
+    ...(authentication ? { authentication } : {}),
+  };
+}
+
+/**
+ * Repository credentials out of a body, when any were sent.
+ *
+ * A password with no username is a token, which is how several git hosts
+ * are reached, and is accepted. A username with no password is not
+ * accepted: Portainer refuses it with a 400 about a field the operator
+ * never saw, so it is refused here with one they did.
+ */
+function readAuthentication(
+  payload: { username?: unknown; password?: unknown },
+  method: string,
+  path: string,
+): { username: string; password: string } | undefined {
+  const username = typeof payload.username === 'string' ? payload.username : '';
+  const password = typeof payload.password === 'string' ? payload.password : '';
+  if (!username && !password) return undefined;
+  if (!password) {
+    throw badRequest(
+      method,
+      path,
+      'a repository username needs a password or token with it',
+      'send both, or a token as the password on its own',
+    );
+  }
+  return { username, password };
 }
 
 /**
@@ -1232,12 +1620,16 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
     password?: unknown;
   };
 
-  if (typeof payload.name !== 'string' || !/^[A-Za-z0-9][A-Za-z0-9_.-]*$/.test(payload.name)) {
+  // Compose's own rule for a project name, which is what a stack name
+  // becomes: lowercase, and nothing a shell or a hostname would object to.
+  // Portainer's UI enforces the same, and what it does with anything else
+  // depends on the version — normalised quietly, or refused after the fact.
+  if (typeof payload.name !== 'string' || !/^[a-z0-9][a-z0-9_-]*$/.test(payload.name)) {
     throw badRequest(
       'POST',
       path,
-      'name is required, and may contain only letters, digits, dot, dash and underscore',
-      'Docker uses the stack name as a resource-name prefix, so it has the same rules',
+      'name is required, and may contain only lowercase letters, digits, dash and underscore',
+      'Docker uses the stack name as a compose project name, so it has the same rules',
     );
   }
 
@@ -1254,12 +1646,7 @@ function readStackCreate(req: Request): StackFromString | StackFromRepository {
   }
 
   const env = readEnv(payload.env, 'POST', path);
-  // Either half is enough to mean "this repository needs credentials": a token
-  // in the password field with no username is how several git hosts are
-  // reached, and requiring both would silently clone anonymously instead.
-  const username = typeof payload.username === 'string' ? payload.username : '';
-  const password = typeof payload.password === 'string' ? payload.password : '';
-  const authentication = username || password ? { username, password } : undefined;
+  const authentication = readAuthentication(payload, 'POST', path);
 
   if (hasContent) {
     return { name: payload.name, content: payload.content as string, ...(env ? { env } : {}) };

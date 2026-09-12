@@ -186,7 +186,13 @@ export class PutHandlers {
   /** The same three refusals the facade makes, checked before anything is sent. */
   private refusalFor(instance: string, key: string, requested: PutState): ActionResult | undefined {
     const control = this.deps.config()?.control;
-    if (!control?.allowPutControl) {
+    // No configuration at all means the plugin has stopped — the server
+    // withdraws the handlers a moment later — which is not the same as the
+    // operator having turned control off, and should not be reported as it.
+    if (!control) {
+      return { state: 'FAILED', statusCode: 503, message: 'The plugin is not running' };
+    }
+    if (!control.allowPutControl) {
       return {
         state: 'FAILED',
         statusCode: 403,

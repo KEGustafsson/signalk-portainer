@@ -55,6 +55,10 @@ export const swarmInfo: DockerInfo = {
   ServerVersion: '27.3.1',
   Swarm: {
     LocalNodeState: 'active',
+    // A manager, not a worker: a worker reports the same node state but has
+    // no view of the cluster, and every services/nodes call against one is
+    // refused by Docker.
+    ControlAvailable: true,
     NodeID: 'x7k2p9',
     Cluster: { ID: 'abc123swarmcluster' },
   },

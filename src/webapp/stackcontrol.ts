@@ -168,14 +168,60 @@ export function hasChanges(
   );
 }
 
-/** What a stack name may contain, matching the facade's own rule. */
-const NAME = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;
+/**
+ * What a stack name may contain, matching the facade's own rule — which is
+ * compose's rule for a project name, because that is what Portainer turns a
+ * stack name into. Uppercase and dots are what Portainer's own form refuses,
+ * and what a version that does not refuse them silently rewrites.
+ */
+const NAME = /^[a-z0-9][a-z0-9_-]*$/;
 
 /** Why this name would be refused, or undefined when it would not be. */
 export function nameProblem(name: string): string | undefined {
   if (name.length === 0) return 'A stack needs a name';
   if (!NAME.test(name)) {
-    return 'A name may contain only letters, digits, dot, dash and underscore, and must start with a letter or digit';
+    return 'A name may contain only lowercase letters, digits, dash and underscore, and must start with a letter or digit';
+  }
+  return undefined;
+}
+
+/** What an environment variable name may be, as the facade and compose read it. */
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
+
+/**
+ * Why this environment row would be refused, or undefined when it would not.
+ *
+ * Portainer writes these as `NAME=value` lines into the stack's env file, so
+ * a whole `.env` line pasted into the name box, or a value with a line break
+ * in it, quietly defines a second variable nobody set. A duplicate name is
+ * refused for the same reason: only one of the two would survive, and which
+ * one depends on the version.
+ */
+export function envProblem(rows: readonly EnvVar[], index: number): string | undefined {
+  const row = rows[index];
+  if (!row) return undefined;
+  const name = row.name.trim();
+  // An untouched blank row is not a mistake; `envForRequest` drops it. A row
+  // with a value and no name is a different thing: dropping that one silently
+  // deploys the stack without a variable the operator typed a value for.
+  if (name.length === 0) {
+    return row.value.length === 0 ? undefined : 'A value needs a name';
+  }
+  if (!ENV_NAME.test(name)) {
+    return 'Letters, digits and underscore only, and not starting with a digit';
+  }
+  if (rows.some((other, at) => at < index && other.name.trim() === name)) {
+    return 'This variable is listed twice';
+  }
+  if (/[\r\n]/.test(row.value)) return 'A value cannot contain a line break';
+  return undefined;
+}
+
+/** The first thing wrong with the environment as a whole, if anything is. */
+export function envProblems(rows: readonly EnvVar[]): string | undefined {
+  for (let index = 0; index < rows.length; index += 1) {
+    const problem = envProblem(rows, index);
+    if (problem) return `${rows[index]?.name.trim() ?? ''}: ${problem}`;
   }
   return undefined;
 }

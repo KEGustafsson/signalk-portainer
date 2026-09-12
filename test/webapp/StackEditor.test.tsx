@@ -119,6 +119,30 @@ describe('StackEditor', () => {
     expect((onDeploy.mock.calls[0]?.[0] as StackDeployment).env).toEqual([]);
   });
 
+  it('will not deploy a variable whose value was typed against a blank name', async () => {
+    // The row is dropped on its way to the request, so deploying it would
+    // quietly leave out a variable the operator filled in — the compose file
+    // would come up without it and nothing would have said why.
+    const user = userEvent.setup();
+    const { onDeploy } = renderEditor();
+    await waitFor(() =>
+      expect(screen.getByLabelText('Compose file')).toHaveValue('services:\n  influxdb:\n'),
+    );
+
+    await user.click(screen.getByRole('button', { name: 'Add' }));
+    await user.type(screen.getByLabelText('Variable 2 value'), 'Europe/Helsinki');
+
+    expect(screen.getByText(/needs a name/)).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Deploy' })).toBeDisabled();
+
+    await user.type(screen.getByLabelText('Variable 2 name'), 'TZ2');
+    await user.click(screen.getByRole('button', { name: 'Deploy' }));
+    expect((onDeploy.mock.calls[0]?.[0] as StackDeployment).env).toEqual([
+      { name: 'TZ', value: 'Europe/Helsinki' },
+      { name: 'TZ2', value: 'Europe/Helsinki' },
+    ]);
+  });
+
   it('shows a git-backed stack read-only, and offers no deploy at all', async () => {
     renderEditor({ target: { kind: 'existing', stack: gitStack } });
 
@@ -417,7 +441,7 @@ describe('StackEditor', () => {
       await user.type(screen.getByLabelText('Name'), '../etc');
 
       expect(screen.getByRole('button', { name: 'Create' })).toBeDisabled();
-      expect(screen.getByText(/only letters, digits/)).toBeInTheDocument();
+      expect(screen.getByText(/only lowercase letters/)).toBeInTheDocument();
     });
 
     it('creates from a compose file', async () => {

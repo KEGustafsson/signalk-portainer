@@ -7,6 +7,143 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+A robustness pass over every layer, from five reviews of the whole codebase, and
+the Portainer and Docker calls the plugin was missing.
+
+### Added
+
+- **Container stats and processes.** `GET /containers/:id/stats` gives one
+  reading of CPU, memory, network and block I/O, reduced the way `docker stats`
+  reduces it — the page cache subtracted, the CPU share scaled by the number of
+  CPUs — and `GET /containers/:id/top` lists what is running inside. Neither is
+  polled: Docker samples twice a second apart to compute a CPU share.
+- **Image pull.** `POST /images/pull` fetches an image or a newer version of
+  one. Docker answers a pull as it starts and reports a failure inside the
+  progress stream, so the stream is read to its end and a missing tag is an
+  error rather than a success.
+- **Container recreate.** `POST /containers/:id/recreate` moves a container
+  started by hand onto a newer image, optionally pulling it first. Portainer's
+  own operation, so the container's configuration, networks and volumes come
+  across; needs Portainer 2.19 or newer, and is gated like any other removal.
+- **Portainer update notice.** `GET /capabilities` reports whether Portainer
+  has a newer release, when Portainer was able to check.
+
+### Fixed
+
+- **Self-protection no longer misidentifies a host as a container.** A Signal K
+  installed on a Raspberry Pi beside Docker — the ordinary setup — has every
+  running container's mounts in its own mount table, and the plugin read the
+  first id it found there as its own: it then refused to stop that container,
+  usually Portainer itself. The mount table is now read as a table, and only a
+  mount whose destination is one of the three files Docker binds into a
+  container counts. Podman is recognised too.
+- **An allowlist can no longer empty itself.** A PUT-allowlist entry naming an
+  instance that failed validation was dropped, and dropping the last entry
+  opened every container to any readwrite client. Every entry is kept now,
+  matching nothing until the name is corrected. A duplicate instance row no
+  longer takes the working instance's watches and allowlist entries with it,
+  and an instance named with different capitalisation matches.
+- **A stack deploy waits for the deploy.** Portainer 2.42 answers an update or
+  a redeploy immediately and deploys in the background (2.44 for a create), so
+  "deployed" was reported while compose was still pulling and a failed deploy
+  was never reported at all.
+- **A git-backed stack redeploys with its own credentials.** The redeploy sent
+  `RepositoryAuthentication: false`, so Portainer cloned anonymously and every
+  private repository failed. The stored credentials are asked for by name now,
+  and a redeploy can carry replacements in its body.
+- **A saved environment that no longer exists is recoverable.** `GET
+/environments` answered 404 — the one route that offers the list to choose
+  from — and the panel then had no row to press and no field to clear.
+- **Environments the plugin cannot manage are refused with a reason.**
+  Kubernetes, Azure and an async Edge agent have no Docker API behind them;
+  they were selectable, and then every read failed with a message about a
+  tunnel or a manifest.
+- **Stopping a container no longer times out while Docker is stopping it.**
+  A stop with no explicit grace period ran under the 10s read budget while
+  Docker held the request for the container's own grace period, so the operator
+  got an error and a stopped container.
+- **undici's own deadlines no longer end a quiet log stream or a long deploy.**
+  Every client owns a dispatcher with both turned off, so the request's own
+  budget is the only bound — and a dispatcher the host installed is honoured
+  rather than bypassed.
+- **A body that is not JSON is diagnosed.** A captive portal or a login page
+  answering 200 with HTML was a bare `SyntaxError`; it now names the likely
+  cause and quotes the start of what arrived.
+- **The console relay holds a fast shell back.** Output was forwarded to the
+  browser without reading what was queued for it, so `yes` on a LAN-speed
+  Portainer relayed to a phone piled the difference into the heap. Both sockets
+  are pinged, a peer that stops answering is dropped, and what the operator
+  types before the shell exists is queued rather than lost.
+- **A log line split across two reads is one line again.** TTY output arrives
+  in network-sized chunks and Docker splits a message longer than 16 kB, so the
+  viewer showed "…connection lo" and "st to 10.0.0.5" as two lines.
+- **The demuxer asks Docker rather than guessing.** Docker 23 and newer say
+  whether a log stream is multiplexed in the content type, so a TTY container
+  that prints a short banner and goes quiet is no longer withheld.
+- **The watchdog catches a container that is running but unhealthy**, gives a
+  restarting or recreated container one poll to settle, and no longer sounds an
+  alarm for a container an operator paused.
+- **The panel recovers rather than dead-ends.** A hung backend is reported
+  instead of "Loading…" forever, the poll backs off while reads fail and pauses
+  while the tab is hidden, an action finishing after a tab switch no longer
+  paints the wrong table, two actions in flight no longer re-enable each
+  other's buttons, and what Portainer itself said about a failure is shown.
+- **Warnings the server sends are shown**: an environment choice that could not
+  be saved, and a stack update that took its auto-update settings with it.
+- Smaller ones: a stack name is validated as the compose project name it
+  becomes; environment variables are checked for the shapes Portainer would
+  mangle; an image reference reaches Docker with its slashes intact; the
+  per-container stream ceiling counts containers rather than spellings of an
+  id; `?instance=` given twice is refused rather than falling back to the
+  default; a JWT's own expiry is honoured; caches and timers use a monotonic
+  clock; credentials in a URL are redacted; `start()` is idempotent.
+- **An image reference can no longer climb out of the Docker proxy.** The
+  slashes in `ghcr.io/owner/app` are kept as slashes so Docker reads the name
+  whole, which made `..` among them a path segment the URL parser acted on:
+  `DELETE /images/../../../stacks/3` resolved to `/api/stacks/3` and deleted a
+  stack, past the ownership guard and the audit that route has. Empty, `.` and
+  `..` segments are refused.
+- **A console cannot be made to hold a message of any size.** The backlog
+  kept for what is typed before the shell exists measured only what it was
+  already holding, so the first message through — on a socket whose ticket had
+  not been checked yet — was kept whatever its size.
+- **Backpressure holds back whichever side is outrunning the other.** One
+  drain timer belonged to the direction that congested first; the other could
+  not pause its sender and ran to the hard limit, closing a console that flow
+  control would have recovered.
+- **A watchdog alarm that changes is published again.** Deduplicating on the
+  alarm state alone held back everything that changes while an alarm stays an
+  alarm — a container that went from exited to paused kept the sound it no
+  longer wanted, and one that went from stopped to removed went on saying it
+  was stopped.
+- **A stack write and the deploy it waits for share one budget.** The settle
+  poll started its deadline when the write was answered, so a single deploy
+  could hold its caller for twice the configured write timeout.
+- **A URL carrying a token rather than a user and password is redacted.** The
+  forge form is `https://<token>@host`, with no colon for the pattern to find.
+- **A value typed against a blank name is refused.** The row was dropped on its
+  way to the request, so the stack deployed without a variable the operator had
+  filled in and nothing said why.
+- **A press of Select counts once.** The button sits inside a row that answers
+  clicks of its own, and the press reached both — two switch requests for the
+  same environment.
+- **One polling timer, not several.** A tab becoming visible while a read was
+  in flight left a second polling chain running, and the backoff counted for
+  nothing.
+- A pull's progress stream is read a line at a time rather than buffered
+  whole, and a redeploy no longer sends a git credential id Portainer's
+  redeploy route has never had a field for.
+- **A pull that reported nothing is not a pull.** Docker answers
+  `/images/create` with a progress stream and nothing else — an image already
+  current still says so — so an answer carrying no readable progress came from
+  something in between, and calling it `ok` told the operator an image was
+  there when nothing had said so.
+- **An answer for a Portainer the operator has left is dropped.** The request
+  went to the right host, but its result banner, the dialog it closed and the
+  busy mark it lifted were written against whichever instance was on screen
+  when it landed — so a slow stop on one Portainer announced itself over
+  another, and re-enabled a button whose own request was still open.
+
 ## [0.1.2] - 2026-08-24
 
 The release that works behind a proxy and can free the disk. Every write was

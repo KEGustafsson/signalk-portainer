@@ -1009,6 +1009,10 @@ describe('AppPanel container actions', () => {
     await waitFor(() => expect(screen.getByText('shore-only')).toBeInTheDocument());
     // Without the guard the stale refresh renders boat's containers here.
     expect(screen.queryByText('ais-logger')).toBeNull();
+    // Nor its banner: "Start ais-logger: done" under shore's table describes a
+    // Portainer the operator has left, and names a container shore has never
+    // heard of.
+    expect(screen.queryByText(/Start ais-logger/)).toBeNull();
   });
 
   it('warns when the plugin cannot identify its own container', async () => {
@@ -1701,5 +1705,222 @@ describe('AppPanel container actions', () => {
         /Destructive operations are disabled/,
       );
     });
+  });
+});
+
+/**
+ * The three ways the panel used to leave an operator with nothing to act on:
+ * a saved environment Portainer no longer has, a backend that stopped
+ * answering, and a warning the server sent that the panel dropped.
+ */
+describe('AppPanel recovers rather than dead-ends', () => {
+  afterEach(() => {
+    jest.useRealTimers();
+  });
+
+  it('keeps the environment picker on screen when every read is failing', async () => {
+    // The environment was removed and recreated in Portainer, so the saved id
+    // is gone: the facade answers the picker with no selection and a warning,
+    // and every other read with a 404. Hiding the table behind that error hid
+    // the one row that could put it right, and the plugin's configuration
+    // form does not show the id either.
+    const failure = {
+      ok: false,
+      status: 404,
+      json: () => Promise.resolve({ error: 'Portainer environment id 7 not found' }),
+    };
+    global.fetch = jest.fn((input: string) => {
+      const path = input.replace('/plugins/signalk-portainer/api', '').split('?')[0] as string;
+      if (path === '/instances') {
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () => Promise.resolve({ instances: [{ name: 'boat', isDefault: true }] }),
+          }),
+        );
+      }
+      if (path === '/environments') {
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                selected: null,
+                warning: 'Portainer environment id 7 not found — choose an environment below',
+                environments: [
+                  { id: 9, name: 'rebuilt', type: 1, health: 'up', isSelected: false },
+                ],
+              }),
+          }),
+        );
+      }
+      return Promise.resolve(asResponse(failure));
+    }) as unknown as typeof fetch;
+
+    render(<AppPanel />);
+
+    expect(await screen.findByText(/environment id 7 not found/)).toBeInTheDocument();
+    expect(await screen.findByText('rebuilt')).toBeInTheDocument();
+    expect(screen.getByRole('button', { name: 'Select rebuilt' })).not.toHaveAttribute(
+      'aria-disabled',
+    );
+  });
+
+  it('will not offer an environment the plugin cannot manage', async () => {
+    global.fetch = routeFetch({
+      '/environments': {
+        selected: null,
+        environments: [
+          { id: 1, name: 'docker', type: 1, health: 'up', isSelected: false, supported: true },
+          {
+            id: 2,
+            name: 'cluster',
+            type: 5,
+            health: 'up',
+            isSelected: false,
+            supported: false,
+            reason: 'Kubernetes environments are not managed by this plugin',
+          },
+        ],
+      },
+    }) as unknown as typeof fetch;
+
+    render(<AppPanel />);
+
+    const refused = await screen.findByRole('button', { name: 'Select cluster' });
+    expect(refused).toHaveAttribute('aria-disabled', 'true');
+    expect(refused).toHaveAccessibleDescription(/Kubernetes/);
+    expect(screen.getByRole('button', { name: 'Select docker' })).not.toHaveAttribute(
+      'aria-disabled',
+    );
+  });
+
+  it('says when a chosen environment could not be saved', async () => {
+    // Live either way, but gone after a restart — and an operator who is not
+    // told assumes the choice stuck.
+    const fetchMock = routeFetch({
+      '/environments': {
+        selected: null,
+        environments: [
+          { id: 1, name: 'primary', type: 1, health: 'up', isSelected: false },
+          { id: 27, name: 'lenovo', type: 2, health: 'up', isSelected: false },
+        ],
+      },
+    });
+    global.fetch = ((input: string, init?: RequestInit) => {
+      if (init?.method === 'PUT') {
+        return Promise.resolve(
+          asResponse({
+            ok: true,
+            status: 200,
+            json: () =>
+              Promise.resolve({
+                selected: 27,
+                name: 'lenovo',
+                persisted: false,
+                warning: 'Selected for now, but it could not be saved',
+              }),
+          }),
+        );
+      }
+      return fetchMock(input, init);
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    render(<AppPanel />);
+    await user.click(await screen.findByRole('button', { name: 'Select lenovo' }));
+
+    expect(await screen.findByText(/could not be saved/)).toBeInTheDocument();
+  });
+
+  it('shows what Portainer itself said about a refused action', async () => {
+    // The plugin's own paraphrase names the request; this names the field
+    // Portainer objected to, which is the difference between "failed with
+    // 400" and "yaml: line 5: did not find expected key".
+    const fetchMock = routeFetch({ '/control': { ...control, allowDestructive: true } });
+    global.fetch = ((input: string, init?: RequestInit) => {
+      if (init?.method === 'POST' && input.includes('/restart')) {
+        return Promise.resolve(
+          asResponse({
+            ok: false,
+            status: 409,
+            json: () =>
+              Promise.resolve({
+                error: 'Portainer POST /containers/c1f0e2a3b4c5/restart failed with 409',
+                hint: 'conflict — the resource is in an incompatible state',
+                detail: 'cannot restart container: driver failed programming external connectivity',
+              }),
+          }),
+        );
+      }
+      return fetchMock(input, init);
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    await showContainers();
+    await screen.findByText('signalk_influxdb');
+    const row = within(screen.getByRole('group', { name: 'Actions for signalk_influxdb' }));
+    await user.click(row.getByRole('button', { name: 'Restart' }));
+    const dialog = within(await screen.findByRole('dialog'));
+    await user.click(dialog.getByRole('button', { name: 'Restart' }));
+
+    expect(await screen.findByTestId('portainer-detail')).toHaveTextContent(
+      /driver failed programming/,
+    );
+  });
+
+  it('holds every container it is waiting on, not just the last one', async () => {
+    // One slot meant the first action to finish re-enabled the other's
+    // buttons while its request was still open, and Restart is not
+    // idempotent.
+    const pending = new Map<string, () => void>();
+    const fetchMock = routeFetch();
+    global.fetch = ((input: string, init?: RequestInit) => {
+      if (init?.method === 'POST') {
+        return new Promise((resolve) => {
+          pending.set(input, () =>
+            resolve(
+              asResponse({ ok: true, status: 200, json: () => Promise.resolve({ ok: true }) }),
+            ),
+          );
+        });
+      }
+      return fetchMock(input, init);
+    }) as unknown as typeof fetch;
+
+    const user = userEvent.setup();
+    await showContainers();
+    await screen.findByText('signalk_influxdb');
+    const influx = () =>
+      within(screen.getByRole('group', { name: 'Actions for signalk_influxdb' }));
+    const ais = () => within(screen.getByRole('group', { name: 'Actions for ais-logger' }));
+
+    await user.click(influx().getByRole('button', { name: 'Pause' }));
+    await user.click(
+      within(await screen.findByRole('dialog')).getByRole('button', { name: 'Pause' }),
+    );
+    await user.click(ais().getByRole('button', { name: 'Start' }));
+    await waitFor(() => expect(pending.size).toBe(2));
+
+    // The ais-logger request settles; the influxdb one has not.
+    const aisRequest = [...pending.entries()].find(([url]) => url.includes('d2e1f0a9b8c7'));
+    // Asserted rather than reached for optionally: a lookup that found
+    // nothing would otherwise resolve nothing and leave both still waiting,
+    // which is exactly what the last expectation below is looking for.
+    expect(aisRequest).toBeDefined();
+    act(() => {
+      aisRequest![1]();
+    });
+
+    // The one that finished is live again, the one still open is not.
+    await waitFor(() =>
+      expect(ais().getByRole('button', { name: 'Start' })).not.toHaveAttribute('aria-disabled'),
+    );
+    expect(influx().getByRole('button', { name: 'Pause' })).toHaveAttribute(
+      'aria-disabled',
+      'true',
+    );
   });
 });

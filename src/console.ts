@@ -58,6 +58,8 @@ export interface ConsoleOptions {
   /** Opens the socket to Portainer; injectable so tests need no network. */
   connect?: (target: ConsoleTarget, timeoutMs: number) => Promise<RelaySocket> | RelaySocket;
   idleMs?: number;
+  /** Ping period for an open console; injectable for tests. */
+  heartbeatMs?: number;
   /** How long Portainer has to finish the handshake; injectable for tests. */
   connectTimeoutMs?: number;
 }
@@ -76,6 +78,48 @@ const CONNECT_TIMEOUT_MS = 15_000;
  * a container. Fewer of those than log streams, and for the same reason.
  */
 const CONSOLE_LIMITS = { total: 3, perTarget: 2 };
+
+/**
+ * How much of what the operator types before the shell exists is kept. A
+ * command line and a keystroke or two is all this window can hold; the cap
+ * is what stops it being a way to spend memory on an unauthorised socket.
+ */
+const MAX_BACKLOG_MESSAGES = 64;
+const MAX_BACKLOG_BYTES = 64 * 1024;
+
+/**
+ * How many bytes one `ws` message is, in every shape `ws` hands one over:
+ * text as a string, binary as a Uint8Array or ArrayBuffer, and a fragmented
+ * message as the array of its pieces. Anything else counts as nothing rather
+ * than throwing — a message that cannot be measured cannot be relayed either.
+ */
+function messageSize(data: unknown): number {
+  if (typeof data === 'string') return Buffer.byteLength(data);
+  if (data instanceof Uint8Array) return data.byteLength;
+  if (data instanceof ArrayBuffer) return data.byteLength;
+  if (Array.isArray(data)) {
+    return data.reduce<number>((total, part) => total + messageSize(part), 0);
+  }
+  return 0;
+}
+
+/** A queued message in the form the upstream socket takes. */
+function asBytes(data: unknown): string | Uint8Array {
+  if (typeof data === 'string') return data;
+  if (data instanceof Uint8Array) return data;
+  if (data instanceof ArrayBuffer) return new Uint8Array(data);
+  if (Array.isArray(data)) {
+    const parts = data.filter((part): part is Uint8Array => part instanceof Uint8Array);
+    const joined = new Uint8Array(parts.reduce((total, part) => total + part.length, 0));
+    let at = 0;
+    for (const part of parts) {
+      joined.set(part, at);
+      at += part.length;
+    }
+    return joined;
+  }
+  return String(data);
+}
 
 export function openConsole(options: ConsoleOptions): ConsoleServer {
   const endpoint = options.register(CONSOLE_MOUNT);
@@ -133,6 +177,26 @@ async function accept(
   browser.on('error', () => {
     gone = true;
   });
+  // Whatever the operator types before the shell exists, held rather than
+  // dropped. The 101 is written before this function runs, so the browser
+  // considers itself connected and focuses its terminal while Portainer is
+  // still being asked for the socket — and a keystroke in that window had no
+  // listener to reach. Bounded, because an unbounded backlog is a way to
+  // spend the server's memory before any shell has been authorised.
+  const backlog: unknown[] = [];
+  let backlogBytes = 0;
+  const queue = (data: unknown): void => {
+    // The incoming message is measured before it is kept, not after: a limit
+    // that only looks at what is already held lets one message of any size
+    // through, which is the whole of the bound this exists to put on an
+    // unauthenticated socket.
+    const size = messageSize(data);
+    if (backlog.length >= MAX_BACKLOG_MESSAGES || size > MAX_BACKLOG_BYTES - backlogBytes) return;
+    backlogBytes += size;
+    backlog.push(data);
+  };
+  browser.on('message', queue);
+
   const grant = options.tickets.consume(ticketOf(request.url));
   if (!grant) {
     // Deliberately uninformative: a caller without a ticket learns only that
@@ -148,20 +212,33 @@ async function accept(
   }
 
   let release: (() => void) | undefined;
-  // Recorded before anything is awaited. `ws` writes the 101 response before it
-  // fires 'connection', so the browser's onopen — and the resize it sends the
-  // moment after — arrive while this function is still waiting for the exec
-  // socket and the upstream handshake. A session added after those awaits made
-  // that first resize a 404, and the shell then stayed at Docker's 80x24 for
-  // the rest of its life, which is the failure this session table exists to
-  // prevent. Removed again on every path below that does not reach the relay.
-  options.sessions.add(grant.session, {
-    instance: grant.instance,
-    execId: grant.execId,
-    containerId: grant.containerId,
-  });
+  let sessionAdded = false;
   try {
-    release = limits.acquire(`${grant.instance ?? registry.defaultName}/${grant.containerId}`);
+    // The permit first, so a refusal costs nothing else. Then the session,
+    // before anything is awaited: `ws` writes the 101 response before it
+    // fires 'connection', so the browser's onopen — and the resize it sends
+    // the moment after — arrive while this function is still waiting for the
+    // exec socket and the upstream handshake. A session added after those
+    // awaits made that first resize a 404, and the shell then stayed at
+    // Docker's 80x24 for the rest of its life, which is the failure this
+    // session table exists to prevent. Removed again on every path below
+    // that does not reach the relay.
+    release = limits.acquire(
+      `${grant.instance ?? registry.defaultName}/${grant.containerId.toLowerCase()}`,
+    );
+    options.sessions.add(grant.session, {
+      instance: grant.instance,
+      execId: grant.execId,
+      containerId: grant.containerId,
+    });
+    sessionAdded = true;
+    // Checked before Portainer is asked for anything: a browser that gave up
+    // while the ticket was being redeemed should not cause a shell process to
+    // be started in the container at all.
+    if (state.closing || gone) {
+      browser.close(RELAY_CLOSE.refused, 'the console is no longer available');
+      return;
+    }
     const client: PortainerClient = registry.get(grant.instance);
     const target = await client.execSocket(grant.execId);
     const upstream = await (options.connect ?? connectWithWs)(
@@ -175,13 +252,14 @@ async function accept(
     if (state.closing || gone) {
       upstream.close();
       release?.();
-      options.sessions.remove(grant.session);
+      if (sessionAdded) options.sessions.remove(grant.session);
       browser.close(RELAY_CLOSE.refused, 'the console is no longer available');
       return;
     }
 
     const end = relay(browser, upstream, {
       ...(options.idleMs !== undefined ? { idleMs: options.idleMs } : {}),
+      ...(options.heartbeatMs !== undefined ? { heartbeatMs: options.heartbeatMs } : {}),
       onEnd: (reason) => {
         release?.();
         open.delete(end);
@@ -190,11 +268,15 @@ async function accept(
         options.log(`console on ${grant.containerId.slice(0, 12)} ended: ${reason}`);
       },
     });
+    // The relay is listening now, so what was typed in the meantime can go
+    // where it was always meant to.
+    browser.off?.('message', queue);
+    for (const data of backlog.splice(0)) upstream.send(asBytes(data));
     open.add(end);
     options.log(`console opened on ${grant.containerId.slice(0, 12)}`);
   } catch (cause) {
     release?.();
-    options.sessions.remove(grant.session);
+    if (sessionAdded) options.sessions.remove(grant.session);
     const refused = cause instanceof StreamLimitError;
     options.log(
       `console on ${grant.containerId.slice(0, 12)} refused: ${

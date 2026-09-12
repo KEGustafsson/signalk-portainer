@@ -44,6 +44,7 @@ export class InstanceRegistry {
           auth: instance.auth,
           tls: instance.tls,
           timeoutMs: instance.timeoutMs,
+          writeTimeoutMs: instance.writeTimeoutMs,
           environment: instance.environment,
           log: (message) => log(`[${instance.name}] ${message}`),
         }),

@@ -8,6 +8,8 @@ export interface InstanceConfig {
   auth: AuthOptions;
   tls: TlsOptions;
   timeoutMs: number;
+  /** The budget for a deploy, a pull or a prune; see the client for why it is separate. */
+  writeTimeoutMs: number;
   environment: { id: number | null; name: string };
 }
 
@@ -66,6 +68,14 @@ export class ConfigError extends Error {
   constructor(message: string) {
     super(message);
     this.name = 'ConfigError';
+  }
+}
+
+/** A second row with a name the first already holds; see `normalizeInstances`. */
+class DuplicateInstanceError extends ConfigError {
+  constructor(name: string) {
+    super(`Duplicate instance name "${name}" — names must be unique`);
+    this.name = 'DuplicateInstanceError';
   }
 }
 
@@ -147,6 +157,13 @@ export const PLUGIN_SCHEMA = {
                 description: 'Set when connecting by IP to a certificate issued for a hostname.',
               },
               timeoutMs: { type: 'number', title: 'Request timeout (ms)', default: 10000 },
+              writeTimeoutMs: {
+                type: 'number',
+                title: 'Deploy timeout (ms)',
+                default: 300000,
+                description:
+                  'How long a stack deploy, an image pull or a prune may take. Raise it on a slow link or a slow SD card.',
+              },
             },
           },
           // Written by the panel when an environment is chosen there, and
@@ -185,7 +202,8 @@ export const PLUGIN_SCHEMA = {
           type: 'boolean',
           title: 'Allow destructive operations',
           default: false,
-          description: 'Remove containers and volumes, delete stacks, prune.',
+          description:
+            'Remove containers (optionally with their volumes), recreate containers, delete stacks, delete and prune images.',
         },
         allowSelfManagement: {
           type: 'boolean',
@@ -272,6 +290,7 @@ export const PLUGIN_UI_SCHEMA = {
 /** The settings an operator rarely touches, kept out of the way in the form. */
 interface RawAdvanced {
   timeoutMs?: number;
+  writeTimeoutMs?: number;
   rejectUnauthorized?: boolean;
   caCert?: string;
   servername?: string;
@@ -353,28 +372,33 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
     pathPrefix: pathPrefix(raw?.telemetry?.pathPrefix),
   };
 
-  // An allowlist, not a watch: an entry naming a dropped instance is simply a
-  // rule that can never match, so it is recorded and skipped rather than
-  // widening the list by accident.
+  /**
+   * The configured spelling of an instance name, matched without regard to
+   * case: instance names are unique case-insensitively, so `Boat` can only
+   * mean `boat`, and an entry that spelled it that way used to be refused —
+   * or, for a watch, to fail the whole plugin start.
+   */
+  const configuredName = (wanted: string): string | undefined =>
+    instances.find((candidate) => candidate.name.toLowerCase() === wanted.toLowerCase())?.name;
+
+  // An allowlist, not a watch. Every entry is kept, whatever it names: an
+  // allowlist is only consulted while it has entries, so removing one —
+  // because it named a dropped instance, or a misspelled one — could remove
+  // the last, empty the list, and open every container to a PUT. Kept, an
+  // entry that names nothing goes on matching nothing, and the problem says
+  // so in the plugin status.
   const putContainers: PluginConfig['control']['putContainers'] = [];
   for (const entry of raw?.control?.putContainers ?? []) {
     if (!entry.container) continue;
-    const instance = entry.instance || (instances[0]?.name ?? 'local');
-    if (dropped.has(instance.toLowerCase())) {
+    const wanted = entry.instance || (instances[0]?.name ?? 'local');
+    const instance = configuredName(wanted) ?? wanted;
+    if (dropped.has(wanted.toLowerCase())) {
       problems.push(
-        `PUT allowlist entry for "${entry.container}" names instance "${instance}", which could not be used`,
+        `PUT allowlist entry for "${entry.container}" names instance "${wanted}", which could not be used — it allows nothing until that instance is fixed`,
       );
-      continue;
-    }
-    // A name that matches no instance is reported but still kept. Dropping it
-    // would be the dangerous repair: an allowlist is only consulted while it
-    // has entries, so removing the last bad one empties the list and opens
-    // every container to a PUT. Kept, it goes on matching nothing — which is
-    // what an operator who wrote a name down meant, minus the typo — and the
-    // problem says so in the plugin status.
-    if (!instances.some((candidate) => candidate.name === instance)) {
+    } else if (!instances.some((candidate) => candidate.name === instance)) {
       problems.push(
-        `PUT allowlist entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance — it allows nothing until the name is corrected`,
+        `PUT allowlist entry for "${entry.container}" names instance "${wanted}", which is not a configured, enabled instance — it allows nothing until the name is corrected`,
       );
     }
     putContainers.push({ instance, container: entry.container });
@@ -383,14 +407,15 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
   const watchdog: PluginConfig['control']['watchdog'] = [];
   for (const entry of raw?.control?.watchdog ?? []) {
     if (!entry.container) continue;
-    const instance = entry.instance || (instances[0]?.name ?? 'local');
+    const wanted = entry.instance || (instances[0]?.name ?? 'local');
+    const instance = configuredName(wanted) ?? wanted;
     // A watch on an instance that was dropped a moment ago is not a typo, and
     // failing here would undo the whole point of dropping it: the boat's own
     // instance would lose its telemetry because a half-filled second row was
     // being watched.
-    if (dropped.has(instance.toLowerCase())) {
+    if (dropped.has(wanted.toLowerCase())) {
       problems.push(
-        `watchdog entry for "${entry.container}" watches instance "${instance}", which could not be used`,
+        `watchdog entry for "${entry.container}" watches instance "${wanted}", which could not be used`,
       );
       continue;
     }
@@ -400,7 +425,7 @@ export function normalizeConfig(raw: RawConfig | undefined): PluginConfig {
     // they were watching dies and no alarm sounds.
     if (!instances.some((candidate) => candidate.name === instance)) {
       throw new ConfigError(
-        `Watchdog entry for "${entry.container}" names instance "${instance}", which is not a configured, enabled instance`,
+        `Watchdog entry for "${entry.container}" names instance "${wanted}", which is not a configured, enabled instance`,
       );
     }
     watchdog.push({ instance, container: entry.container });
@@ -458,7 +483,10 @@ function normalizeInstances(rawInstances: RawInstance[]): {
       if (!(cause instanceof ConfigError)) throw cause;
       problems.push(cause.message);
       const name = (entry?.name ?? '').trim();
-      if (name) dropped.add(name.toLowerCase());
+      // A duplicate row is dropped, but its name is not: the row that was
+      // kept still answers to it, and marking the name as dropped would have
+      // every watch and allowlist entry for the working instance thrown out.
+      if (name && !(cause instanceof DuplicateInstanceError)) dropped.add(name.toLowerCase());
     }
   });
 
@@ -519,9 +547,7 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
       `Instance name "${name}" is not path-safe — use letters, digits, underscore or hyphen`,
     );
   }
-  if (seen.has(name.toLowerCase())) {
-    throw new ConfigError(`Duplicate instance name "${name}" — names must be unique`);
-  }
+  if (seen.has(name.toLowerCase())) throw new DuplicateInstanceError(name);
   seen.add(name.toLowerCase());
 
   const baseUrl = baseUrlOf(entry, label);
@@ -539,6 +565,14 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
   if (!Number.isFinite(timeoutMs) || timeoutMs < 1000 || timeoutMs > 120_000) {
     throw new ConfigError(`Instance "${label}" needs a timeout between 1000 and 120000 ms`);
   }
+  // The same ceiling reasoning, an hour: a pull over a slow uplink can take
+  // most of that, and past it a request is holding a connection for nothing.
+  const writeTimeoutMs = advanced.writeTimeoutMs ?? 300_000;
+  if (!Number.isFinite(writeTimeoutMs) || writeTimeoutMs < 10_000 || writeTimeoutMs > 3_600_000) {
+    throw new ConfigError(
+      `Instance "${label}" needs a deploy timeout between 10000 and 3600000 ms`,
+    );
+  }
 
   const auth = normalizeAuth(entry, label);
 
@@ -554,6 +588,7 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
     auth,
     tls,
     timeoutMs,
+    writeTimeoutMs,
     environment: {
       id:
         entry.environmentId === undefined || entry.environmentId === null
@@ -568,6 +603,7 @@ function normalizeInstance(entry: RawInstance, index: number, seen: Set<string>)
 function pickAdvanced(entry: RawInstance): RawAdvanced {
   const advanced: RawAdvanced = {};
   if (entry.timeoutMs !== undefined) advanced.timeoutMs = entry.timeoutMs;
+  if (entry.writeTimeoutMs !== undefined) advanced.writeTimeoutMs = entry.writeTimeoutMs;
   if (entry.rejectUnauthorized !== undefined)
     advanced.rejectUnauthorized = entry.rejectUnauthorized;
   if (entry.caCert) advanced.caCert = entry.caCert;

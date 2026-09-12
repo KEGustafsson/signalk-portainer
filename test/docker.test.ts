@@ -190,10 +190,12 @@ describe('PortainerClient docker read surface', () => {
     withEnvironment();
     agent
       .get(BASE_URL)
-      // The slashes and the colon of a registry tag reach Docker as part of
-      // the image name, not as more path.
+      // A registry tag's slashes and colon reach Docker as they were
+      // written: Docker's route takes the rest of the path as the image
+      // name, and Portainer's proxy refuses a path carrying an encoded
+      // separator outright.
       .intercept({
-        path: '/api/endpoints/1/docker/images/ghcr.io%2Fowner%2Fapp%3A1.2',
+        path: '/api/endpoints/1/docker/images/ghcr.io/owner/app:1.2',
         method: 'DELETE',
       })
       .reply(200, [{ Untagged: 'ghcr.io/owner/app:1.2' }, { Deleted: 'sha256:aaa' }]);
@@ -211,7 +213,7 @@ describe('PortainerClient docker read surface', () => {
     withEnvironment();
     agent
       .get(BASE_URL)
-      .intercept({ path: '/api/endpoints/1/docker/images/sha256%3Aaaa', method: 'DELETE' })
+      .intercept({ path: '/api/endpoints/1/docker/images/sha256:aaa', method: 'DELETE' })
       .reply(409, { message: 'conflict: unable to delete sha256:aaa (cannot be forced)' });
 
     const client = createClient(agent);
@@ -221,6 +223,23 @@ describe('PortainerClient docker read surface', () => {
     // out of reach without the plugin having to know which one that is.
     expect(error).toBeInstanceOf(PortainerError);
     expect((error as PortainerError).status).toBe(409);
+  });
+
+  it('refuses an image reference that could climb out of the docker proxy', async () => {
+    // `/images/../../../stacks/3` is `/api/stacks/3` once the URL is parsed,
+    // so a DELETE meant for an image would have deleted a stack — past the
+    // ownership guard, the audit and the destructive gate the stack routes
+    // have. There is no such image, so there is nothing to intercept: the
+    // refusal happens before a request is built.
+    withEnvironment();
+    const client = createClient(agent);
+
+    for (const reference of ['../../../stacks/3', 'ghcr.io/..', './app', 'ghcr.io//app']) {
+      const error = await client.docker.removeImage(reference).catch((e: unknown) => e);
+      expect(error).toBeInstanceOf(PortainerError);
+      expect((error as PortainerError).status).toBe(400);
+      expect((error as PortainerError).message).toMatch(/is not an image reference/);
+    }
   });
 
   it('prunes untagged layers by default and every unused image only on request', async () => {

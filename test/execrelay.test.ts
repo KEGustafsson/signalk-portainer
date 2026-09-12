@@ -4,7 +4,18 @@ import { relay, RELAY_CLOSE, type RelaySocket } from '../src/execrelay';
 class FakeSocket implements RelaySocket {
   sent: (string | Uint8Array)[] = [];
   closed: { code?: number; reason?: string } | undefined;
+  /** What `ws` has queued for a peer it cannot write to fast enough. */
+  bufferedAmount = 0;
+  paused = false;
   private readonly listeners = new Map<string, ((...args: never[]) => void)[]>();
+
+  pause(): void {
+    this.paused = true;
+  }
+
+  resume(): void {
+    this.paused = false;
+  }
 
   send(data: string | Uint8Array): void {
     if (this.closed) throw new Error('socket is closed');
@@ -73,6 +84,24 @@ describe('relay', () => {
     upstream.emit('message', new TextEncoder().encode('bytes').buffer);
 
     expect(browser.text).toBe('bytes');
+  });
+
+  it('holds back whichever sender is outrunning its receiver, in either direction', () => {
+    // One drain timer belonged to whichever direction congested first, and the
+    // other could then never pause its own sender: it ran on to the hard
+    // limit and closed a console that flow control would have recovered.
+    const { browser, upstream, end } = pair();
+
+    upstream.bufferedAmount = 2 * 1024 * 1024;
+    browser.emit('message', 'a very long paste');
+    expect(browser.paused).toBe(true);
+
+    browser.bufferedAmount = 2 * 1024 * 1024;
+    upstream.emit('message', 'a very long build log');
+    expect(upstream.paused).toBe(true);
+
+    // Both drain timers belong to the relay, and end clears them.
+    end();
   });
 
   it('always sends a close code, so the reason reaches the browser', () => {

@@ -6,6 +6,25 @@
 const TOKEN_PATTERNS: readonly RegExp[] = [
   /ptr_[A-Za-z0-9+/=_-]+/g,
   /\beyJ[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_.+/=-]*/g,
+  // Credentials embedded in a URL — `https://user:secret@host` — which a
+  // transport failure would otherwise quote back at the operator in its hint,
+  // and a git repository address for a stack carries as often as not. The
+  // password is optional because the common form for a forge token is
+  // `https://<token>@host` with no colon at all, and that whole userinfo is
+  // the secret rather than half of it.
+  /(\b[a-z][a-z0-9+.-]*:\/\/)([^/@\s:]+)(?::([^/@\s]+))?@/gi,
+];
+
+/**
+ * How each pattern is replaced. The URL one keeps the scheme, and keeps the
+ * user only where there is a password to take its place — userinfo with no
+ * password is a token, and naming it would be publishing it.
+ */
+const REPLACEMENTS: readonly (string | ((...groups: string[]) => string))[] = [
+  '[redacted]',
+  '[redacted]',
+  (_match: string, scheme: string, user: string, password?: string) =>
+    password === undefined ? `${scheme}[redacted]@` : `${scheme}${user}:[redacted]@`,
 ];
 
 /**
@@ -42,7 +61,12 @@ function isPlainObject(value: object): boolean {
 
 /** Replaces anything that looks like a credential in free text. */
 export function redactText(input: string): string {
-  return TOKEN_PATTERNS.reduce((text, pattern) => text.replace(pattern, '[redacted]'), input);
+  return TOKEN_PATTERNS.reduce((text, pattern, index) => {
+    const replacement = REPLACEMENTS[index] ?? '[redacted]';
+    return typeof replacement === 'string'
+      ? text.replace(pattern, replacement)
+      : text.replace(pattern, replacement);
+  }, input);
 }
 
 /**

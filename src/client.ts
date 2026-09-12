@@ -1,13 +1,18 @@
-import { Agent, fetch as undiciFetch, type Dispatcher } from 'undici';
+import { performance } from 'node:perf_hooks';
+import { Agent, getGlobalDispatcher, fetch as undiciFetch, type Dispatcher } from 'undici';
 import { TtlCache, TTL } from './cache';
 import { PortainerError, type AuthMode } from './errors';
 import { LogDemuxer, type LogFrame } from './logframes';
 import { redactValue } from './redact';
 import {
   EDGE_ENVIRONMENT_TYPES,
+  EnvironmentType,
   type Capabilities,
+  type ContainerStats,
   type DockerContainer,
   type DockerContainerInspect,
+  type DockerContainerStats,
+  type DockerContainerTop,
   type DockerDiskUsage,
   type DockerImage,
   type DockerImagePrune,
@@ -20,8 +25,12 @@ import {
   type DockerVolumeList,
   type Environment,
   type EnvironmentHealth,
+  type EnvironmentSupport,
+  type ImagePullResult,
   type PortainerStatus,
+  type PortainerVersion,
   type Stack,
+  StackStatus,
 } from './types';
 
 /** What to read of a container's log. */
@@ -122,7 +131,6 @@ export interface StackRedeploy {
   pullImage?: boolean;
   /** Credentials for a private repository, when the stack needs them again. */
   authentication?: { username: string; password: string };
-  tlsSkipVerify?: boolean;
 }
 
 export interface StackFromString {
@@ -179,6 +187,27 @@ export interface DockerApi {
   unpauseContainer(id: string): Promise<void>;
 
   // ── logs ────────────────────────────────────────────────────────────────
+
+  // ── diagnostics ─────────────────────────────────────────────────────────
+
+  /**
+   * One reading of what a container is costing: CPU, memory, network and
+   * disk. Docker takes two samples a second apart to compute the CPU share,
+   * so this call takes about that long. Never cached — the point is now.
+   */
+  stats(id: string): Promise<ContainerStats>;
+  /** The processes running inside a container, as `ps` would list them. */
+  top(id: string): Promise<DockerContainerTop>;
+
+  // ── images, fetched ─────────────────────────────────────────────────────
+
+  /**
+   * Pulls an image by reference, `name:tag` or `name@digest`, waiting for the
+   * whole pull. Docker answers 200 as soon as it starts and reports a failure
+   * — no such tag, no route to the registry — inside the progress stream, so
+   * that stream is read to the end and the answer comes from its last word.
+   */
+  pullImage(reference: string): Promise<ImagePullResult>;
 
   /** A bounded slice of the log, demuxed. `tail` is always sent. */
   logs(id: string, options?: LogOptions): Promise<LogFrame[]>;
@@ -247,8 +276,53 @@ const CONTAINER_VOLATILE_KEYS = [
  */
 const IMAGE_VOLATILE_KEYS = ['images', 'df'] as const;
 
-/** A JWT is valid for ~8h; renew at 7h so a long poll never straddles expiry. */
+/**
+ * Cache keys a stack write can change: everything a container mutation can,
+ * plus the images a `PullImage` deploy fetches and the networks compose
+ * creates and removes with the project.
+ */
+const STACK_VOLATILE_KEYS = [
+  ...CONTAINER_VOLATILE_KEYS,
+  ...IMAGE_VOLATILE_KEYS,
+  'networks',
+] as const;
+
+/**
+ * A JWT is valid for ~8h by default; renew at 7h so a long poll never
+ * straddles expiry. The token's own `exp` claim shortens this when an
+ * administrator has set a shorter session timeout.
+ */
 const JWT_MAX_AGE_MS = 7 * 60 * 60 * 1000;
+/** How long before a token's own expiry it is renewed. */
+const JWT_RENEW_MARGIN_MS = 60 * 1000;
+
+/**
+ * The least a response body is given to finish arriving.
+ *
+ * The request timeout bounds the handshake — connect, send, first byte of the
+ * answer — and a body then gets at least this long on top of it. Holding both
+ * to one 10s budget made a 5000-line log or a large container list fail over
+ * a slow marina link with "no response before the configured timeout", when
+ * Portainer had answered within a second and the bytes were still coming.
+ */
+const BODY_BUDGET_MIN_MS = 60_000;
+
+/**
+ * How long `close()` waits for undici to drain in-flight requests before it
+ * destroys the connections instead. `Agent.close()` never resolves while a
+ * response body is left unconsumed, and a plugin stopping mid-deploy should
+ * not keep a socket open for the life of the process.
+ */
+const CLOSE_GRACE_MS = 5_000;
+
+/**
+ * undici's dispatcher as it was before anything in this process changed it.
+ *
+ * Read once, at load. Anything else there later — a proxy agent the host
+ * installed, a mock agent a test installed — was put there deliberately and
+ * is honoured rather than bypassed by an agent of this client's own.
+ */
+const PRISTINE_GLOBAL_DISPATCHER: Dispatcher = getGlobalDispatcher();
 
 /** Edge agents are "up" while they checked in within 2 x interval + 20s. */
 const EDGE_GRACE_SECONDS = 20;
@@ -318,8 +392,14 @@ export class PortainerClient {
   private readonly ownsDispatcher: boolean;
   private readonly cache = new TtlCache();
   private readonly log: (message: string) => void;
-  private jwt: { token: string; issuedAt: number } | undefined;
+  /** The cached token and the monotonic instant it should be renewed at. */
+  private jwt: { token: string; renewAt: number } | undefined;
   private jwtInFlight: Promise<string> | undefined;
+  /**
+   * The read budget a standard-mode Edge environment needs for its proxy
+   * calls, learned when the environment is resolved; see `readBudget`.
+   */
+  private edgeBudgetMs: number | undefined;
 
   /** Read-only Docker surface; see {@link DockerApi}. */
   readonly docker: DockerApi;
@@ -336,24 +416,48 @@ export class PortainerClient {
     this.log = options.log ?? (() => {});
 
     this.tls = options.tls;
+    const tls = options.tls;
+    const configured = Boolean(
+      tls && (tls.ca || tls.rejectUnauthorized === false || tls.servername),
+    );
+    // Something has replaced undici's process-wide dispatcher: a proxy agent
+    // the Signal K server installed, or a test's mock. That is a deliberate
+    // act by whoever owns this process, so it is used as it stands — and not
+    // closed here, because it is not this client's to close. TLS settings
+    // are the exception: they are this instance's, and an Agent has to be
+    // built to carry them.
+    const installed = getGlobalDispatcher();
     if (options.dispatcher) {
       this.dispatcher = options.dispatcher;
       this.ownsDispatcher = false;
-    } else if (
-      options.tls &&
-      (options.tls.ca || options.tls.rejectUnauthorized === false || options.tls.servername)
-    ) {
+    } else if (!configured && installed !== PRISTINE_GLOBAL_DISPATCHER) {
+      this.dispatcher = installed;
+      this.ownsDispatcher = false;
+    } else {
+      // Always an Agent of its own, TLS settings or not. undici's defaults
+      // carry two budgets of their own — 300s to the headers, 300s between
+      // body bytes — that fire regardless of the signal a request was given:
+      // a follow stream on a container that prints hourly was torn down after
+      // five quiet minutes and reconnected by the browser, forever, and a
+      // deploy that legitimately took longer than that failed as unreachable
+      // while Portainer carried on and finished it. Both are off, so the
+      // request's own signal is the only thing that ends it. An owned Agent
+      // is also one the plugin can close: connections pooled in undici's
+      // process-global dispatcher outlive the plugin stopping.
       this.dispatcher = new Agent({
-        connect: {
-          ca: options.tls.ca || undefined,
-          rejectUnauthorized: options.tls.rejectUnauthorized !== false,
-          servername: options.tls.servername || undefined,
-        },
+        headersTimeout: 0,
+        bodyTimeout: 0,
+        ...(configured && tls
+          ? {
+              connect: {
+                ca: tls.ca || undefined,
+                rejectUnauthorized: tls.rejectUnauthorized !== false,
+                servername: tls.servername || undefined,
+              },
+            }
+          : {}),
       });
       this.ownsDispatcher = true;
-    } else {
-      this.dispatcher = undefined;
-      this.ownsDispatcher = false;
     }
 
     this.docker = this.buildDockerApi();
@@ -378,9 +482,17 @@ export class PortainerClient {
      * leaving the operator with an error and a stopped container. The extra 10s
      * covers the kill itself and the round trip.
      */
-    const stopBudget = (timeoutSeconds?: number): number | undefined =>
+    const stopBudget = (timeoutSeconds?: number): number =>
       timeoutSeconds === undefined
-        ? undefined
+        ? // No `t` means Docker waits the container's own grace period — 10s
+          // by default, a minute or more for a database that asked for it in
+          // its compose file — and that period is not known here without an
+          // inspect. So a stop that names no grace period gets the write
+          // budget, as a deploy does: held to the 10s read budget it aborted
+          // at the very moment Docker was about to SIGKILL, and the operator
+          // was told the instance was unreachable while the container
+          // stopped anyway.
+          Math.max(this.timeoutMs, this.writeTimeoutMs)
         : Math.max(this.timeoutMs, (Math.max(0, Math.floor(timeoutSeconds)) + 10) * 1000);
 
     /**
@@ -411,6 +523,109 @@ export class PortainerClient {
       // released rather than left for the collector.
       await response.body?.cancel().catch(() => undefined);
       this.cache.invalidate(CONTAINER_VOLATILE_KEYS);
+    };
+
+    /**
+     * Reads a stream of JSON progress lines to its end and returns the last
+     * word of it: Docker answers a pull with 200 the moment it starts, and a
+     * failure — no such tag, no route to the registry — arrives inside the
+     * stream as `{"error": …}` rather than as a status.
+     *
+     * Read a line at a time rather than buffered whole. Docker emits a line
+     * per layer per tick, so a multi-layer image over a boat's uplink is a
+     * stream with no bound on its length — and only the newest line is worth
+     * anything once the one before it has been read.
+     */
+    const readPullProgress = async (
+      response: Response,
+      method: string,
+      path: string,
+    ): Promise<ImagePullResult> => {
+      let status = '';
+      let read = 0;
+      const protocolError = (why: string): PortainerError =>
+        new PortainerError({
+          status: 502,
+          method,
+          path,
+          message: `Docker did not report what it did with the image: ${why}`,
+          hint: 'the pull may or may not have happened; check the image list',
+        });
+      const take = (line: string): void => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        let entry: { status?: unknown; error?: unknown; errorDetail?: { message?: unknown } };
+        try {
+          entry = JSON.parse(trimmed) as typeof entry;
+        } catch {
+          return;
+        }
+        const failure =
+          typeof entry.errorDetail?.message === 'string'
+            ? entry.errorDetail.message
+            : typeof entry.error === 'string'
+              ? entry.error
+              : undefined;
+        if (failure) {
+          throw new PortainerError({
+            status: 502,
+            method,
+            path,
+            message: `Docker could not pull the image: ${failure}`,
+            hint: 'check the image name and tag, and that the registry is reachable from the Docker host',
+            body: failure,
+          });
+        }
+        read += 1;
+        if (typeof entry.status === 'string') status = entry.status;
+      };
+
+      // No body at all is not an empty pull: Docker answers `/images/create`
+      // with a progress stream and nothing else, so an answer without one came
+      // from something in between — a proxy that buffered it away, a tunnel
+      // that dropped it — and reporting it as a completed pull would tell the
+      // operator an image is there when nothing has said so.
+      const body = response.body;
+      if (!body) throw protocolError('the answer carried no progress stream');
+      const reader = body.getReader();
+      const decoder = new TextDecoder();
+      let held = '';
+      try {
+        for (;;) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          if (value) held += decoder.decode(value, { stream: true });
+          for (let at = held.indexOf('\n'); at !== -1; at = held.indexOf('\n')) {
+            take(held.slice(0, at));
+            held = held.slice(at + 1);
+          }
+          // A line longer than any progress line Docker writes is not one.
+          // Held, it would put the bound back where reading a line at a time
+          // took it from; skipped, it would let a stream that is not Docker's
+          // pass for a pull that worked. So the buffer goes and so does the
+          // answer.
+          if (held.length > MAX_PULL_LINE_BYTES) {
+            held = '';
+            throw protocolError(`a progress line ran past ${MAX_PULL_LINE_BYTES} bytes`);
+          }
+        }
+        held += decoder.decode();
+        take(held);
+        // Docker says something about every pull, an image already current
+        // included — that one answers "Status: Image is up to date for …". A
+        // stream that said nothing this could read is not a pull that worked,
+        // and answering `ok` for it tells the operator an image is there when
+        // nothing has said so.
+        if (read === 0) throw protocolError('nothing in the stream was a progress record');
+      } catch (cause) {
+        // A failure Docker reported inside the stream is the answer, not a
+        // transport fault, and must reach the caller as it was written.
+        if (cause instanceof PortainerError) throw cause;
+        throw PortainerError.fromTransport(cause, method, path, this.baseUrl);
+      } finally {
+        await reader.cancel().catch(() => undefined);
+      }
+      return { status };
     };
 
     /**
@@ -496,12 +711,61 @@ export class PortainerClient {
           `/containers/${encode(id)}/kill${signal ? `?signal=${encodeURIComponent(signal)}` : ''}`,
         ),
 
+      stats: async (id) => {
+        // `stream=false` has Docker take two samples a second apart, which is
+        // what a CPU share is computed from; `one-shot=true` would answer at
+        // once with an empty `precpu_stats` and no way to tell.
+        const path = `${await this.dockerBase()}/containers/${encode(id)}/stats?stream=false`;
+        return summarizeStats(await this.json<DockerContainerStats>('GET', path));
+      },
+
+      top: async (id) => {
+        const payload = await this.json<DockerContainerTop>(
+          'GET',
+          `${await this.dockerBase()}/containers/${encode(id)}/top`,
+        );
+        return {
+          Titles: Array.isArray(payload?.Titles) ? payload.Titles : [],
+          Processes: Array.isArray(payload?.Processes) ? payload.Processes : [],
+        };
+      },
+
+      pullImage: async (reference) => {
+        const { name, tag } = splitImageReference(reference);
+        const query = new URLSearchParams({ fromImage: name });
+        if (tag) query.set('tag', tag);
+        const path = `${await this.dockerBase()}/images/create?${query.toString()}`;
+        // The write budget: a pull is a download, and on a boat's uplink a
+        // multi-hundred-megabyte image is minutes of it.
+        const response = await this.send('POST', path, { timeoutMs: this.writeTimeoutMs }, true);
+        const result = await readPullProgress(response, 'POST', path);
+        this.cache.invalidate(IMAGE_VOLATILE_KEYS);
+        return { reference, ...result };
+      },
+
       logs: async (id, options = {}) => {
         const path = `${await this.dockerBase()}/containers/${encode(id)}/logs?${logQuery(options)}`;
         const response = await this.send('GET', path, {}, true);
-        const demuxer = new LogDemuxer();
-        const bytes = new Uint8Array(await response.arrayBuffer());
-        return [...demuxer.push(bytes), ...demuxer.flush()];
+        // Streamed rather than buffered whole: `tail` bounds lines, not
+        // bytes, and a container that writes very long lines can put tens of
+        // megabytes behind 5000 of them.
+        const frames: LogFrame[] = [];
+        let bytes = 0;
+        for await (const frame of readLogFrames(response, (chunk) => {
+          bytes += chunk;
+          if (bytes > MAX_LOG_BYTES) {
+            throw new PortainerError({
+              status: 413,
+              method: 'GET',
+              path,
+              message: `The log is larger than ${MAX_LOG_BYTES} bytes`,
+              hint: 'ask for fewer lines with ?tail=, or follow the stream instead',
+            });
+          }
+        })) {
+          frames.push(frame);
+        }
+        return frames;
       },
 
       logStream: async (id, signal, options = {}) => {
@@ -514,8 +778,16 @@ export class PortainerClient {
         // the connection and then says nothing holds the request forever. The
         // two are composed for the send and the timer cleared as soon as the
         // response arrives, so only the caller can end it from then on.
+        //
+        // The abort carries a TimeoutError as its reason. A bare abort() is
+        // reported as the caller cancelling the request, which sends an
+        // operator whose Portainer is slow looking for a fault in their own
+        // browser.
         const handshake = new AbortController();
-        const timer = setTimeout(() => handshake.abort(), this.timeoutMs);
+        const timer = setTimeout(
+          () => handshake.abort(timeoutError('the log stream handshake', this.timeoutMs)),
+          this.timeoutMs,
+        );
         try {
           const response = await this.send(
             'GET',
@@ -543,14 +815,18 @@ export class PortainerClient {
       // absent, and Docker's default for the second already drops the untagged
       // parents an image leaves behind, which is the space this exists to free.
       //
-      // The reference is encoded whole, so a registry tag's slashes travel as
-      // %2F and reach Docker as part of the image name rather than as more
-      // path. The panel sends an id, which has none — a slashed tag only
-      // arrives from a direct API caller.
-      removeImage: (reference) =>
+      // The reference is encoded a segment at a time, so a registry tag's
+      // slashes stay slashes: Docker takes `/images/ghcr.io/owner/name:1.2`
+      // as one name, and Portainer's proxy refuses a path that carries an
+      // encoded separator outright. The panel sends an id, which has none — a
+      // slashed tag only arrives from a direct API caller.
+      // `async` for the sake of a reference this refuses: the encoder throws,
+      // and a lifecycle method that returns a promise everywhere else must
+      // not throw past the caller's await on one input in four.
+      removeImage: async (reference) =>
         mutateJson<DockerImageRemoval[]>(
           'DELETE',
-          `/images/${encode(reference)}`,
+          `/images/${encodeImageReference(reference)}`,
           IMAGE_VOLATILE_KEYS,
           this.writeTimeoutMs,
         ),
@@ -601,17 +877,44 @@ export class PortainerClient {
     };
     if (init.json !== undefined) headers['content-type'] = 'application/json';
 
+    // Two budgets, not one. The request timeout bounds the handshake — connect,
+    // send, the first byte of the answer — because that is where an
+    // unreachable Portainer shows itself. The body then gets its own, longer
+    // deadline: holding both to the same 10s made a large answer over a slow
+    // link fail as "no response", when Portainer had answered within a second
+    // and the bytes were still arriving. A caller-owned signal replaces both,
+    // since the caller has taken responsibility for ending the exchange.
+    const budget = init.timeoutMs ?? this.readBudget(path);
+    const controller = new AbortController();
+    const handshake = setTimeout(
+      () => controller.abort(timeoutError('a response', budget)),
+      budget,
+    );
     let res: Response;
     try {
       res = (await undiciFetch(`${this.baseUrl}${path}`, {
         method,
         headers,
         body: init.json === undefined ? undefined : JSON.stringify(init.json),
-        signal: init.signal ?? AbortSignal.timeout(init.timeoutMs ?? this.timeoutMs),
+        signal: init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal,
         ...(this.dispatcher ? { dispatcher: this.dispatcher } : {}),
       })) as unknown as Response;
     } catch (cause) {
       throw PortainerError.fromTransport(cause, method, path, this.baseUrl);
+    } finally {
+      clearTimeout(handshake);
+    }
+    if (!init.signal) {
+      // Unreferenced, and left to fire: a body that was consumed long ago is
+      // aborted to no effect, and a body that stalled is the one this exists
+      // for. Clearing it would need a hook into the moment the caller finishes
+      // reading, which a fetch Response does not offer.
+      const bodyBudget = Math.max(budget, BODY_BUDGET_MIN_MS);
+      const body = setTimeout(
+        () => controller.abort(timeoutError('the rest of the response', bodyBudget)),
+        bodyBudget,
+      );
+      body.unref?.();
     }
 
     // A rejected JWT is renewable; a rejected API key is not.
@@ -642,7 +945,38 @@ export class PortainerClient {
 
   private async json<T>(method: string, path: string, init: RawInit = {}): Promise<T> {
     const res = await this.send(method, path, init, true);
-    return (await res.json()) as T;
+    return parseJsonBody<T>(await this.readText(res, method, path), res, method, path);
+  }
+
+  /**
+   * The body as text, with a failure on the way reported as the transport
+   * failure it is. `Response.text()` rejecting mid-body — the deadline above
+   * firing, a connection reset — is otherwise a bare DOMException that the
+   * facade answers with a 500 and no hint.
+   */
+  private async readText(res: Response, method: string, path: string): Promise<string> {
+    try {
+      return await res.text();
+    } catch (cause) {
+      throw PortainerError.fromTransport(cause, method, path, this.baseUrl);
+    }
+  }
+
+  /**
+   * The read budget for a request that named none.
+   *
+   * A standard-mode Edge agent is reached through a tunnel Portainer opens on
+   * demand, and opening it means waiting for the agent's next check-in — up
+   * to two intervals, which for a 30s interval is a minute. Held to the 10s
+   * default, the first request after an idle spell aborted every time and
+   * the environment read as unreachable. The proxy paths are the ones that
+   * cross the tunnel; Portainer's own API answers at once.
+   */
+  private readBudget(path: string): number {
+    if (this.edgeBudgetMs !== undefined && path.includes('/docker/')) {
+      return Math.max(this.timeoutMs, this.edgeBudgetMs);
+    }
+    return this.timeoutMs;
   }
 
   private async authHeaders(): Promise<Record<string, string>> {
@@ -652,7 +986,7 @@ export class PortainerClient {
 
   private async jwtToken(): Promise<string> {
     if (this.auth.mode !== 'userPass') throw new Error('jwtToken called outside userPass mode');
-    if (this.jwt && Date.now() - this.jwt.issuedAt < JWT_MAX_AGE_MS) return this.jwt.token;
+    if (this.jwt && performance.now() < this.jwt.renewAt) return this.jwt.token;
 
     // Concurrent callers share one /api/auth round trip: without this, a burst
     // of parallel requests authenticates once per request and the last response
@@ -684,8 +1018,13 @@ export class PortainerClient {
 
     if (!res.ok) throw await PortainerError.fromResponse(res, 'POST', '/api/auth', this.auth.mode);
 
-    const payload = (await res.json()) as { jwt?: string };
-    if (!payload.jwt) {
+    const payload = parseJsonBody<{ jwt?: unknown }>(
+      await this.readText(res, 'POST', '/api/auth'),
+      res,
+      'POST',
+      '/api/auth',
+    );
+    if (typeof payload?.jwt !== 'string' || payload.jwt.length === 0) {
       throw new PortainerError({
         status: 0,
         method: 'POST',
@@ -694,14 +1033,55 @@ export class PortainerClient {
         hint: 'the response did not look like a Portainer auth response — check the base URL',
       });
     }
-    this.jwt = { token: payload.jwt, issuedAt: Date.now() };
+    // Renewed before the token's own expiry when that comes sooner than the
+    // default: an administrator can shorten the session timeout to minutes,
+    // and a token cached for seven hours regardless would cost a rejected
+    // request and a re-authentication every few minutes after that.
+    const lifetime = jwtLifetimeMs(payload.jwt);
+    const renewIn =
+      lifetime === undefined
+        ? JWT_MAX_AGE_MS
+        : Math.max(0, Math.min(JWT_MAX_AGE_MS, lifetime - JWT_RENEW_MARGIN_MS));
+    this.jwt = { token: payload.jwt, renewAt: performance.now() + renewIn };
     return payload.jwt;
   }
 
   // ---------------------------------------------------------------- typed API
 
+  /**
+   * Portainer's own version.
+   *
+   * `/api/system/status` exists from Portainer 2.17; the route it replaced,
+   * `/api/status`, still answers on every later release but is deprecated.
+   * The new one is asked first, and the old one only when the new one is not
+   * there — so a 2.16 reports its version rather than nothing.
+   */
   async systemStatus(): Promise<PortainerStatus> {
-    return this.json<PortainerStatus>('GET', '/api/system/status');
+    try {
+      return await this.json<PortainerStatus>('GET', '/api/system/status');
+    } catch (cause) {
+      if (!(cause instanceof PortainerError) || cause.status !== 404) throw cause;
+      return this.json<PortainerStatus>('GET', '/api/status');
+    }
+  }
+
+  /**
+   * Whether Portainer itself has an update waiting, as Portainer reports it.
+   *
+   * `/api/system/version` is authenticated and needs 2.19 or newer; anything
+   * that goes wrong here is a missing nicety, not a failure, so the answer is
+   * simply absent.
+   */
+  async systemVersion(): Promise<PortainerVersion | undefined> {
+    try {
+      const version = await this.json<PortainerVersion>('GET', '/api/system/version');
+      return typeof version === 'object' && version !== null ? version : undefined;
+    } catch (cause) {
+      this.log(
+        `system version probe failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+      );
+      return undefined;
+    }
   }
 
   async listEnvironments(opts: { excludeSnapshots?: boolean } = {}): Promise<Environment[]> {
@@ -740,50 +1120,91 @@ export class PortainerClient {
   async environmentOrNone(): Promise<Environment | undefined> {
     return this.cache.get('environment', TTL.environments, async () => {
       const environments = await this.listEnvironments({ excludeSnapshots: true });
-
-      if (this.selector.id !== undefined && this.selector.id !== null) {
-        const match = environments.find((env) => env.Id === this.selector.id);
-        if (match) return match;
-        throw new PortainerError({
-          status: 404,
-          method: 'GET',
-          path: '/api/endpoints',
-          message: `Portainer environment id ${this.selector.id} not found`,
-          hint: `available: ${describe(environments)}. Ids are assigned in creation order, not by name`,
-        });
+      const chosen = this.chooseEnvironment(environments);
+      if (chosen) {
+        // A selection that names something the plugin cannot manage — a
+        // Kubernetes cluster, an async Edge agent — is refused here, where
+        // the reason can be said, rather than on the first proxy call, which
+        // Portainer answers with an error about a tunnel or a manifest.
+        const support = environmentSupport(chosen);
+        if (!support.supported) {
+          throw new PortainerError({
+            status: 400,
+            method: 'GET',
+            path: '/api/endpoints',
+            message: `Portainer environment ${chosen.Id}:${chosen.Name} cannot be managed by this plugin`,
+            hint: support.reason,
+          });
+        }
+        this.edgeBudgetMs = edgeReadBudgetMs(chosen);
       }
-
-      if (this.selector.name) {
-        const wanted = this.selector.name.toLowerCase();
-        const match = environments.find((env) => env.Name.toLowerCase() === wanted);
-        if (match) return match;
-        throw new PortainerError({
-          status: 404,
-          method: 'GET',
-          path: '/api/endpoints',
-          message: `Portainer environment named "${this.selector.name}" not found`,
-          hint: `available: ${describe(environments)}`,
-        });
-      }
-
-      const only = environments[0];
-      if (environments.length === 1 && only) return only;
-
-      if (environments.length === 0) {
-        throw new PortainerError({
-          status: 404,
-          method: 'GET',
-          path: '/api/endpoints',
-          message: 'Portainer reports no environments',
-          hint: 'either none is configured, or this credential is not authorized for any',
-        });
-      }
-
-      // Several, and no choice made: not an error at this level. The caller
-      // decides what an open question means — `environment()` refuses, the
-      // picker offers the list.
-      return undefined;
+      return chosen;
     });
+  }
+
+  /** The selection rule, on its own so the refusals above stay readable. */
+  private chooseEnvironment(environments: Environment[]): Environment | undefined {
+    if (this.selector.id !== undefined && this.selector.id !== null) {
+      const match = environments.find((env) => env.Id === this.selector.id);
+      if (match) return match;
+      throw new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: '/api/endpoints',
+        message: `Portainer environment id ${this.selector.id} not found`,
+        hint: `available: ${describe(environments)}. Ids are assigned in creation order, not by name`,
+      });
+    }
+
+    if (this.selector.name) {
+      const wanted = this.selector.name.toLowerCase();
+      const matches = environments.filter((env) => env.Name.toLowerCase() === wanted);
+      const match = matches[0];
+      // Portainer allows two environments to share a name. Taking the first
+      // would be a guess, and the id is how the choice is made unambiguous.
+      if (matches.length > 1) {
+        throw new PortainerError({
+          status: 400,
+          method: 'GET',
+          path: '/api/endpoints',
+          message: `Several Portainer environments are named "${this.selector.name}"`,
+          hint: `choose one by id in the Portainer panel — matching: ${describe(matches)}`,
+        });
+      }
+      if (match) return match;
+      throw new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: '/api/endpoints',
+        message: `Portainer environment named "${this.selector.name}" not found`,
+        hint: `available: ${describe(environments)}`,
+      });
+    }
+
+    if (environments.length === 0) {
+      throw new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: '/api/endpoints',
+        message: 'Portainer reports no environments',
+        hint: 'either none is configured, or this credential is not authorized for any',
+      });
+    }
+
+    // The unmade choice is made only when there is nothing to choose between:
+    // one environment, or one the plugin could manage among several it could
+    // not. The unsupported ones are not candidates, so they do not make the
+    // question open.
+    const only = environments[0];
+    if (environments.length === 1 && only) return only;
+    const manageable = environments.filter((env) => environmentSupport(env).supported);
+    const candidate = manageable[0];
+    if (manageable.length === 1 && candidate) return candidate;
+
+    // Several, and no choice made: not an error at this level. The caller
+    // decides what an open question means — `environment()` refuses, the
+    // picker offers the list.
+    return undefined;
   }
 
   /**
@@ -793,6 +1214,7 @@ export class PortainerClient {
    */
   selectEnvironment(id: number | null): void {
     this.selector = id === null ? {} : { id };
+    this.edgeBudgetMs = undefined;
     this.cache.invalidate();
   }
 
@@ -822,7 +1244,11 @@ export class PortainerClient {
           return undefined;
         }),
       ]);
-      const swarm = info.Swarm?.LocalNodeState === 'active';
+      // A swarm *manager*, not merely a swarm member. A worker reports its
+      // node state as active too, but has no view of the cluster: every
+      // service and node call is refused with "not a swarm manager", and a
+      // stack create would be refused for the missing id it cannot report.
+      const swarm = info.Swarm?.LocalNodeState === 'active' && info.Swarm.ControlAvailable === true;
       const result: Capabilities = { swarm };
       const swarmId = info.Swarm?.Cluster?.ID;
       if (swarm && swarmId) result.swarmId = swarmId;
@@ -830,6 +1256,29 @@ export class PortainerClient {
       if (status?.Version) result.portainerVersion = status.Version;
       return result;
     });
+  }
+
+  /**
+   * The capabilities above, plus whether Portainer has an update waiting.
+   *
+   * Separate because the update check is a nicety and the capabilities are
+   * not: the poller and the health report ask for capabilities on every
+   * cycle, and neither should wait on a Portainer asking its own version
+   * service. Only the panel's capabilities route asks for this.
+   */
+  async capabilitiesWithUpdate(): Promise<Capabilities> {
+    const [capabilities, version] = await Promise.all([
+      this.capabilities(),
+      this.cache.get('system/version', TTL.dockerInfo, () => this.systemVersion()),
+    ]);
+    const result: Capabilities = { ...capabilities };
+    if (typeof version?.LatestVersion === 'string' && version.LatestVersion) {
+      result.portainerLatestVersion = version.LatestVersion;
+    }
+    if (typeof version?.UpdateAvailable === 'boolean') {
+      result.portainerUpdateAvailable = version.UpdateAvailable;
+    }
+    return result;
   }
 
   /**
@@ -841,7 +1290,29 @@ export class PortainerClient {
     const all = await this.cache.get('stacks', TTL.stacks, () =>
       this.json<Stack[]>('GET', '/api/stacks'),
     );
-    return all.filter((stack) => stack.EndpointId === environmentId);
+    // Defensively: `json` casts whatever Portainer answered with, and a proxy
+    // or a captive portal answering 200 with something else would otherwise
+    // throw from `filter` rather than read as "no stacks".
+    if (!Array.isArray(all)) return [];
+    return all.filter((stack) => stack?.EndpointId === environmentId);
+  }
+
+  /**
+   * One stack, fresh from Portainer rather than from the 15s-cached list, so
+   * a deploy's outcome is read as it settles rather than as it was.
+   */
+  async stack(id: number): Promise<Stack> {
+    const stack = await this.json<Stack>('GET', `/api/stacks/${id}`);
+    const environmentId = await this.environmentId();
+    if (typeof stack?.Id !== 'number' || stack.EndpointId !== environmentId) {
+      throw new PortainerError({
+        status: 404,
+        method: 'GET',
+        path: `/api/stacks/${id}`,
+        message: `Stack ${id} does not belong to this environment`,
+      });
+    }
+    return stack;
   }
 
   /**
@@ -896,15 +1367,78 @@ export class PortainerClient {
     );
     // Read defensively rather than through json(): Portainer answers a delete
     // with 204 and no body at all, and a stack write is not worth failing over
-    // a body nobody needed.
-    const text = await response.text().catch(() => '');
-    this.cache.invalidate(CONTAINER_VOLATILE_KEYS);
+    // a body nobody needed. A failure *reading* it is still reported — that is
+    // the connection going, not an empty answer.
+    const text = await this.readText(response, method, path);
+    this.cache.invalidate(STACK_VOLATILE_KEYS);
     if (!text) return undefined;
     try {
       return JSON.parse(text) as unknown;
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Waits for a deploy that Portainer runs in the background.
+   *
+   * From Portainer 2.42 a stack update or redeploy answers at once with the
+   * stack marked *deploying* and does the work afterwards; a create does the
+   * same from 2.44. Reporting that answer as "deployed" told the operator a
+   * stack was up while compose was still pulling, and a deploy that failed
+   * was never reported at all. So a stack that answers as deploying is read
+   * again until it settles, within the same write budget a synchronous deploy
+   * had, and a stack that settles in error carries Portainer's reason.
+   *
+   * `startedAt` is when the write was sent, not when it was answered: the
+   * budget covers the write and the settling together. Measured from the
+   * answer instead, one stack write could hold its caller for twice the
+   * configured budget — ten minutes at the default — which is not the budget
+   * the operator set.
+   *
+   * Older Portainers never answer with the deploying status, so they pay one
+   * check and nothing more.
+   */
+  private async awaitStackSettled(
+    id: number,
+    answered: unknown,
+    path: string,
+    startedAt: number,
+  ): Promise<Stack | undefined> {
+    // Only what Portainer said. A version that answers a write with nothing,
+    // or with a body that is not a stack, has told us nothing about a
+    // background deploy — because it does not run them — and asking again
+    // would be a request per write for no answer.
+    const first = asStack(answered);
+    if (!first) return undefined;
+    const deadline = startedAt + this.writeTimeoutMs;
+    let current = first;
+    while (current.Status === StackStatus.Deploying) {
+      if (performance.now() > deadline) {
+        throw new PortainerError({
+          status: 504,
+          method: 'GET',
+          path,
+          message: `Stack ${current.Name} is still deploying after ${Math.round(this.writeTimeoutMs / 1000)}s`,
+          hint: 'Portainer is still working on it; check the stack in a moment',
+        });
+      }
+      await sleep(STACK_SETTLE_POLL_MS);
+      current = await this.stack(id);
+    }
+    if (current.Status === StackStatus.Error) {
+      const reason = lastDeploymentMessage(current);
+      throw new PortainerError({
+        status: 502,
+        method: 'GET',
+        path,
+        message: `Stack ${current.Name} failed to deploy${reason ? `: ${reason}` : ''}`,
+        hint: 'fix the compose file or the image reference and deploy again',
+        ...(reason ? { body: reason } : {}),
+      });
+    }
+    this.cache.invalidate(STACK_VOLATILE_KEYS);
+    return current;
   }
 
   /** `?endpointId=`, which every stack write needs. */
@@ -948,12 +1482,19 @@ export class PortainerClient {
         hint: 'updating it here would detach it from git and drop its auto-update settings; change the file in the repository and redeploy instead',
       });
     }
-    await this.stackWrite('PUT', `/api/stacks/${id}?${await this.endpointQuery()}`, {
+    const path = `/api/stacks/${id}`;
+    const startedAt = performance.now();
+    const answered = await this.stackWrite('PUT', `${path}?${await this.endpointQuery()}`, {
       StackFileContent: update.content,
       Env: pairs(update.env ?? stack.Env ?? []),
       Prune: update.prune === true,
       PullImage: update.pullImage === true,
+      // The name Portainer has used for the same flag since 2.36; both are
+      // honoured, and sending both keeps the older name working on the
+      // releases that only know it.
+      RepullImageAndRedeploy: update.pullImage === true,
     });
+    await this.awaitStackSettled(id, answered, path, startedAt);
     // Portainer's update handler clears AutoUpdate, and the request has no
     // field that could have kept it. Reported rather than swallowed: a webhook
     // that stops firing is otherwise discovered by it not firing.
@@ -977,20 +1518,35 @@ export class PortainerClient {
         hint: 'redeploy pulls the file from git; for a file-based stack, send the new file instead',
       });
     }
-    await this.stackWrite('PUT', `/api/stacks/${id}/git/redeploy?${await this.endpointQuery()}`, {
+    const path = `/api/stacks/${id}/git/redeploy`;
+    // Credentials the stack was created with are asked for again by name.
+    // Portainer keeps them, but through 2.42 it reuses them only when the
+    // request says authentication is wanted and sends no password of its own
+    // — so a redeploy that stayed silent about them cloned anonymously, and
+    // every private repository failed with "unable to clone". A blank password
+    // is the documented way to say "keep the stored one", on every release
+    // from 2.17 to the Sources model of 2.43, which starts from the stored
+    // credentials and only lets a non-empty password replace them.
+    const stored = stack.GitConfig.Authentication ?? undefined;
+    const authentication = options.authentication
+      ? {
+          RepositoryUsername: options.authentication.username,
+          RepositoryPassword: options.authentication.password,
+        }
+      : stored
+        ? { RepositoryUsername: stored.Username ?? '', RepositoryPassword: '' }
+        : undefined;
+    const startedAt = performance.now();
+    const answered = await this.stackWrite('PUT', `${path}?${await this.endpointQuery()}`, {
       RepositoryReferenceName: stack.GitConfig.ReferenceName ?? '',
-      RepositoryAuthentication: options.authentication !== undefined,
-      ...(options.authentication
-        ? {
-            RepositoryUsername: options.authentication.username,
-            RepositoryPassword: options.authentication.password,
-          }
-        : {}),
+      RepositoryAuthentication: authentication !== undefined,
+      ...(authentication ?? {}),
       Env: pairs(stack.Env ?? []),
       Prune: options.prune === true,
       PullImage: options.pullImage === true,
-      TLSSkipVerify: options.tlsSkipVerify === true,
+      RepullImageAndRedeploy: options.pullImage === true,
     });
+    await this.awaitStackSettled(id, answered, path, startedAt);
   }
 
   /**
@@ -1002,46 +1558,59 @@ export class PortainerClient {
    */
   async createStackFromString(stack: StackFromString): Promise<Stack | undefined> {
     const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/string');
-    return asStack(
-      await this.stackWrite(
-        'POST',
-        `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/string?${await this.endpointQuery()}`,
-        {
-          Name: stack.name,
-          ...(swarm ? { SwarmID: swarmId } : {}),
-          StackFileContent: stack.content,
-          Env: pairs(stack.env ?? []),
-        },
-      ),
+    const path = `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/string`;
+    const startedAt = performance.now();
+    return this.createdStack(
+      await this.stackWrite('POST', `${path}?${await this.endpointQuery()}`, {
+        Name: stack.name,
+        ...(swarm ? { SwarmID: swarmId } : {}),
+        StackFileContent: stack.content,
+        Env: pairs(stack.env ?? []),
+      }),
+      path,
+      startedAt,
     );
+  }
+
+  /**
+   * A create's answer, once the stack it describes has settled. A Portainer
+   * that answers with no stack — older ones answered with the whole stack,
+   * and that is what is relied on — is left as it answered.
+   */
+  private async createdStack(
+    answered: unknown,
+    path: string,
+    startedAt: number,
+  ): Promise<Stack | undefined> {
+    const created = asStack(answered);
+    if (!created) return undefined;
+    return (await this.awaitStackSettled(created.Id, created, path, startedAt)) ?? created;
   }
 
   /** A new stack whose compose file lives in a git repository. */
   async createStackFromRepository(stack: StackFromRepository): Promise<Stack | undefined> {
     const { swarm, swarmId } = await this.swarmTarget('/api/stacks/create/{type}/repository');
-    return asStack(
-      await this.stackWrite(
-        'POST',
-        `/api/stacks/create/${
-          swarm ? 'swarm' : 'standalone'
-        }/repository?${await this.endpointQuery()}`,
-        {
-          Name: stack.name,
-          ...(swarm ? { SwarmID: swarmId } : {}),
-          RepositoryURL: stack.repositoryUrl,
-          ...(stack.reference ? { RepositoryReferenceName: stack.reference } : {}),
-          ComposeFile: stack.composeFile ?? '',
-          RepositoryAuthentication: stack.authentication !== undefined,
-          ...(stack.authentication
-            ? {
-                RepositoryUsername: stack.authentication.username,
-                RepositoryPassword: stack.authentication.password,
-              }
-            : {}),
-          Env: pairs(stack.env ?? []),
-          TLSSkipVerify: stack.tlsSkipVerify === true,
-        },
-      ),
+    const path = `/api/stacks/create/${swarm ? 'swarm' : 'standalone'}/repository`;
+    const startedAt = performance.now();
+    return this.createdStack(
+      await this.stackWrite('POST', `${path}?${await this.endpointQuery()}`, {
+        Name: stack.name,
+        ...(swarm ? { SwarmID: swarmId } : {}),
+        RepositoryURL: stack.repositoryUrl,
+        ...(stack.reference ? { RepositoryReferenceName: stack.reference } : {}),
+        ComposeFile: stack.composeFile ?? '',
+        RepositoryAuthentication: stack.authentication !== undefined,
+        ...(stack.authentication
+          ? {
+              RepositoryUsername: stack.authentication.username,
+              RepositoryPassword: stack.authentication.password,
+            }
+          : {}),
+        Env: pairs(stack.env ?? []),
+        TLSSkipVerify: stack.tlsSkipVerify === true,
+      }),
+      path,
+      startedAt,
     );
   }
 
@@ -1054,6 +1623,58 @@ export class PortainerClient {
   async deleteStack(id: number): Promise<void> {
     await this.ownStack(id, 'DELETE', `/api/stacks/${id}`);
     await this.stackWrite('DELETE', `/api/stacks/${id}?${await this.endpointQuery()}`);
+  }
+
+  /**
+   * Recreates a container, optionally from a freshly pulled image.
+   *
+   * Portainer's own operation rather than Docker's: Docker has no "recreate",
+   * only remove and create, and Portainer's handler carries the container's
+   * configuration, networks and volumes across for it. This is how a
+   * container started by hand — outside any stack — is brought up to its
+   * image's newest version. The container that comes back has a new id, so
+   * every cached read that named the old one goes.
+   *
+   * Needs Portainer 2.19 or newer; the 404 an older one answers is said so.
+   */
+  async recreateContainer(
+    containerId: string,
+    options: { pullImage?: boolean } = {},
+  ): Promise<DockerContainerInspect | undefined> {
+    const environmentId = await this.environmentId();
+    const path = `/api/docker/${environmentId}/containers/${encodeURIComponent(containerId)}/recreate`;
+    let response: Response;
+    try {
+      response = await this.send(
+        'POST',
+        path,
+        { json: { PullImage: options.pullImage === true }, timeoutMs: this.writeTimeoutMs },
+        true,
+      );
+    } catch (cause) {
+      if (cause instanceof PortainerError && cause.status === 404) {
+        throw new PortainerError({
+          status: 404,
+          method: 'POST',
+          path,
+          message: 'Portainer did not offer the recreate operation',
+          hint: 'recreating a container needs Portainer 2.19 or newer, and the container has to exist',
+          ...(cause.body ? { body: cause.body } : {}),
+        });
+      }
+      throw cause;
+    }
+    const text = await this.readText(response, 'POST', path);
+    this.cache.invalidate([...CONTAINER_VOLATILE_KEYS, ...IMAGE_VOLATILE_KEYS, 'networks']);
+    if (!text) return undefined;
+    try {
+      const parsed = JSON.parse(text) as unknown;
+      return typeof parsed === 'object' && parsed !== null
+        ? (parsed as DockerContainerInspect)
+        : undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   /**
@@ -1171,13 +1792,32 @@ export class PortainerClient {
 
   close(): void {
     if (!this.ownsDispatcher || !this.dispatcher) return;
-    // close() rejecting during shutdown would otherwise surface as an unhandled
-    // rejection and take the Signal K process down with it.
-    this.dispatcher.close().catch((cause: unknown) => {
+    const agent = this.dispatcher;
+    const report = (what: string, cause: unknown): void => {
       this.log(
-        `dispatcher close failed: ${cause instanceof Error ? cause.message : String(cause)}`,
+        `dispatcher ${what} failed: ${cause instanceof Error ? cause.message : String(cause)}`,
       );
-    });
+    };
+    // A graceful close waits for in-flight requests, and never finishes while
+    // a response body is left unread — a deploy still answering at stop(), an
+    // un-aborted stream. Given a moment, then torn down: a plugin that has
+    // stopped should not hold a socket to Portainer for the life of the
+    // process. Both rejections are caught: one surfacing during shutdown
+    // would be an unhandled rejection, and Node ends Signal K on those.
+    const destroy = (): void => {
+      if (typeof agent.destroy !== 'function') return;
+      agent.destroy().catch((cause: unknown) => report('destroy', cause));
+    };
+    const fallback = setTimeout(destroy, CLOSE_GRACE_MS);
+    fallback.unref?.();
+    agent
+      .close()
+      .then(() => clearTimeout(fallback))
+      .catch((cause: unknown) => {
+        clearTimeout(fallback);
+        report('close', cause);
+        destroy();
+      });
   }
 
   /** Safe to log or return: no credentials, no snapshot payloads. */
@@ -1251,17 +1891,23 @@ function edgeCheckinInterval(environment: Environment): number {
  * keeping it out of the class makes it plain that the response is already open
  * by the time anything here runs.
  */
-async function* readLogFrames(response: Response): AsyncIterable<LogFrame> {
+async function* readLogFrames(
+  response: Response,
+  onChunk?: (bytes: number) => void,
+): AsyncIterable<LogFrame> {
   const body = response.body;
   if (!body) return;
 
-  const demuxer = new LogDemuxer();
+  const demuxer = new LogDemuxer(multiplexedByContentType(response));
   const reader = body.getReader();
   try {
     for (;;) {
       const { done, value } = await reader.read();
       if (done) break;
-      if (value) yield* demuxer.push(value);
+      if (value) {
+        onChunk?.(value.byteLength);
+        yield* demuxer.push(value);
+      }
     }
     yield* demuxer.flush();
   } finally {
@@ -1269,4 +1915,286 @@ async function* readLogFrames(response: Response): AsyncIterable<LogFrame> {
     // rejection in a finally would mask whatever ended the loop.
     await reader.cancel().catch(() => undefined);
   }
+}
+
+/**
+ * Whether a log body is Docker's multiplexed framing, from the content type.
+ *
+ * Docker 23 and later say so on the response — `multiplexed-stream` for a
+ * container without a TTY, `raw-stream` for one with — and Portainer's proxy
+ * passes the header through. Older daemons say nothing, and the demuxer then
+ * decides from the first bytes as it always did. Asking is better than
+ * guessing: the guess withholds output until eight bytes have arrived, so a
+ * TTY container that prints a short banner and goes quiet showed nothing.
+ */
+function multiplexedByContentType(response: Response): boolean | undefined {
+  const type = response.headers.get('content-type') ?? '';
+  if (type.includes('multiplexed-stream')) return true;
+  if (type.includes('raw-stream')) return false;
+  return undefined;
+}
+
+/** The most a one-shot log read may hold: `tail` bounds lines, this bounds bytes. */
+const MAX_LOG_BYTES = 16 * 1024 * 1024;
+
+/**
+ * The most of one pull-progress line that is held before it is given up on.
+ * Docker's are a few hundred bytes; only one is ever held at a time.
+ */
+const MAX_PULL_LINE_BYTES = 64 * 1024;
+
+/** How often a deploying stack is asked whether it has settled. */
+const STACK_SETTLE_POLL_MS = 2_000;
+
+/** A deadline's abort reason, named so the transport hint calls it a timeout. */
+function timeoutError(what: string, budgetMs: number): DOMException {
+  return new DOMException(`Waited ${budgetMs} ms for ${what}`, 'TimeoutError');
+}
+
+/**
+ * A pause that does not hold the process open. The timer is unreferenced
+ * because a settle poll waiting on Portainer must never be the reason Signal K
+ * refuses to exit.
+ */
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    const timer = setTimeout(resolve, ms);
+    timer.unref?.();
+  });
+}
+
+/**
+ * A body that was supposed to be JSON, or a failure that says what it was
+ * instead. A captive portal, a reverse proxy's login page, or a base URL that
+ * points at Portainer's own web page all answer 200 with HTML; parsed
+ * blindly, that was a bare SyntaxError with no hint, and the facade answered
+ * 500 with "Unexpected token '<'".
+ */
+function parseJsonBody<T>(text: string, res: Response, method: string, path: string): T {
+  try {
+    return JSON.parse(text) as T;
+  } catch {
+    const type = res.headers.get('content-type') ?? '';
+    const looksLikeHtml = text.trimStart().startsWith('<') || type.includes('html');
+    throw new PortainerError({
+      status: 502,
+      method,
+      path,
+      message: `Portainer ${method} ${path} answered with something that is not JSON`,
+      hint: looksLikeHtml
+        ? 'this looks like a web page rather than the API — check the base URL, and whether a login page or captive portal is answering instead of Portainer'
+        : 'the answer could not be parsed — check the base URL points at Portainer itself',
+      body: redactValue(text.slice(0, 500)),
+    });
+  }
+}
+
+/**
+ * How long a JWT says it is good for, from its `exp` claim, in milliseconds
+ * from now. The signature is not checked — Portainer issued it a moment ago
+ * — and a token without a readable claim simply has no answer.
+ */
+export function jwtLifetimeMs(token: string, nowMs = Date.now()): number | undefined {
+  const payload = token.split('.')[1];
+  if (!payload) return undefined;
+  try {
+    const claims = JSON.parse(Buffer.from(payload, 'base64url').toString('utf8')) as {
+      exp?: unknown;
+    };
+    if (typeof claims.exp !== 'number' || !Number.isFinite(claims.exp)) return undefined;
+    return claims.exp * 1000 - nowMs;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Portainer's last word on a deploy that ran in the background. */
+function lastDeploymentMessage(stack: Stack): string | undefined {
+  const entries = Array.isArray(stack.DeploymentStatus) ? stack.DeploymentStatus : [];
+  for (let index = entries.length - 1; index >= 0; index -= 1) {
+    const message = entries[index]?.Message;
+    if (typeof message === 'string' && message.trim()) return message.trim();
+  }
+  return undefined;
+}
+
+/**
+ * An image reference split into what `POST /images/create` wants: the name in
+ * `fromImage` and the tag — or digest — in `tag`. The last colon after the
+ * last slash is the tag separator, so a registry port is not mistaken for
+ * one: `registry.local:5000/ais-logger` has no tag, `…/ais-logger:1.4` does.
+ */
+export function splitImageReference(reference: string): { name: string; tag?: string } {
+  const trimmed = reference.trim();
+  const at = trimmed.indexOf('@');
+  if (at > 0) return { name: trimmed.slice(0, at), tag: trimmed.slice(at + 1) };
+  const lastSlash = trimmed.lastIndexOf('/');
+  const colon = trimmed.lastIndexOf(':');
+  if (colon > lastSlash) return { name: trimmed.slice(0, colon), tag: trimmed.slice(colon + 1) };
+  return { name: trimmed };
+}
+
+/**
+ * An image reference as path: each segment encoded, the slashes kept, and the
+ * tag separator left as the colon it is.
+ *
+ * Docker's own route takes the whole rest of the path as the image name, so
+ * `ghcr.io/owner/app:1.2` travels exactly as it is written. Encoding the
+ * slashes as %2F instead is what Portainer's proxy refuses outright — it
+ * rejects any proxied path carrying an encoded separator — and Docker would
+ * have read them as part of the name rather than as path anyway.
+ */
+function encodeImageReference(reference: string): string {
+  const segments = reference.split('/');
+  // The slashes are kept as slashes, so a `..` among them is a path segment
+  // the URL parser will act on: `images/../../../stacks/3` resolves to
+  // `/api/stacks/3`, and the DELETE meant for an image deletes a stack
+  // instead, past every guard the stack routes have. Docker has no image
+  // whose name contains such a segment, so refusing them costs nothing.
+  if (segments.some((segment) => segment === '' || segment === '.' || segment === '..')) {
+    throw new PortainerError({
+      status: 400,
+      method: 'DELETE',
+      path: '/images',
+      message: `"${reference}" is not an image reference`,
+      hint: 'an image is named by its id, or by repository/name with an optional tag',
+    });
+  }
+  return segments.map((segment) => encodeURIComponent(segment).replace(/%3A/gi, ':')).join('/');
+}
+
+/**
+ * Whether this plugin can manage an environment, and why not when it cannot.
+ *
+ * The plugin speaks to Docker through Portainer's proxy. A Kubernetes or
+ * Azure environment has no Docker behind it, and an Edge agent in async mode
+ * has no tunnel for the proxy to use — Portainer answers every such call
+ * with an error about a manifest or a tunnel that says nothing an operator
+ * can act on. Said here instead, once, in the picker.
+ */
+export function environmentSupport(environment: Environment): EnvironmentSupport {
+  switch (environment.Type) {
+    case EnvironmentType.AzureACI:
+      return { supported: false, reason: 'Azure ACI environments have no Docker API to manage' };
+    case EnvironmentType.LocalKubernetes:
+    case EnvironmentType.AgentOnKubernetes:
+    case EnvironmentType.EdgeAgentOnKubernetes:
+      return { supported: false, reason: 'Kubernetes environments are not managed by this plugin' };
+    case EnvironmentType.EdgeAgentOnDocker:
+      if (environment.Edge?.AsyncMode) {
+        return {
+          supported: false,
+          reason:
+            'an Edge agent in async mode cannot be reached through the Docker proxy; Portainer manages it with Edge stacks only',
+        };
+      }
+      return { supported: true };
+    default:
+      return { supported: true };
+  }
+}
+
+/**
+ * The read budget a standard-mode Edge environment needs, or none for a
+ * direct one. Portainer opens the tunnel on demand and waits up to two
+ * check-in intervals for the agent to raise it, and the request that asked
+ * waits with it.
+ */
+function edgeReadBudgetMs(environment: Environment): number | undefined {
+  if (environment.Type !== EnvironmentType.EdgeAgentOnDocker) return undefined;
+  const interval =
+    environment.EdgeCheckinInterval && environment.EdgeCheckinInterval > 0
+      ? environment.EdgeCheckinInterval
+      : EDGE_DEFAULT_INTERVAL_SECONDS;
+  return (2 * interval + EDGE_GRACE_SECONDS) * 1000;
+}
+
+/**
+ * Docker's stats sample, reduced to the figures an operator reads.
+ *
+ * The CPU share follows Docker's own arithmetic: the container's CPU time
+ * over the host's between the two samples, scaled by the number of CPUs.
+ * Every field is optional in the raw answer — a container that just exited,
+ * a cgroup v1 host, a daemon without the network namespace — so anything that
+ * cannot be computed is left out rather than reported as NaN.
+ */
+export function summarizeStats(raw: DockerContainerStats): ContainerStats {
+  const summary: ContainerStats = {};
+  if (typeof raw?.read === 'string') summary.read = raw.read;
+
+  const cpu = raw?.cpu_stats;
+  const previous = raw?.precpu_stats;
+  const cpuTotal = cpu?.cpu_usage?.total_usage;
+  const cpuPrevious = previous?.cpu_usage?.total_usage;
+  const systemTotal = cpu?.system_cpu_usage;
+  const systemPrevious = previous?.system_cpu_usage;
+  if (
+    isFiniteNumber(cpuTotal) &&
+    isFiniteNumber(cpuPrevious) &&
+    isFiniteNumber(systemTotal) &&
+    isFiniteNumber(systemPrevious)
+  ) {
+    const cpuDelta = cpuTotal - cpuPrevious;
+    const systemDelta = systemTotal - systemPrevious;
+    const cpus = isFiniteNumber(cpu?.online_cpus)
+      ? cpu.online_cpus
+      : (cpu?.cpu_usage?.percpu_usage?.length ?? 1);
+    if (systemDelta > 0 && cpuDelta >= 0) {
+      summary.cpuPercent = round((cpuDelta / systemDelta) * Math.max(1, cpus) * 100);
+    }
+  }
+
+  const memory = raw?.memory_stats;
+  if (isFiniteNumber(memory?.usage)) {
+    // cgroup v1 counts the page cache in `usage` and reports it in
+    // `stats.cache`; cgroup v2 reports `inactive_file` instead. Docker's own
+    // `docker stats` subtracts whichever is there, and so does this.
+    const cache = isFiniteNumber(memory.stats?.inactive_file)
+      ? memory.stats.inactive_file
+      : isFiniteNumber(memory.stats?.cache)
+        ? memory.stats.cache
+        : 0;
+    summary.memoryBytes = Math.max(0, memory.usage - cache);
+    if (isFiniteNumber(memory.limit) && memory.limit > 0) {
+      summary.memoryLimitBytes = memory.limit;
+      summary.memoryPercent = round((summary.memoryBytes / memory.limit) * 100);
+    }
+  }
+
+  const networks = raw?.networks;
+  if (networks && typeof networks === 'object') {
+    let rx = 0;
+    let tx = 0;
+    for (const network of Object.values(networks)) {
+      if (isFiniteNumber(network?.rx_bytes)) rx += network.rx_bytes;
+      if (isFiniteNumber(network?.tx_bytes)) tx += network.tx_bytes;
+    }
+    summary.networkRxBytes = rx;
+    summary.networkTxBytes = tx;
+  }
+
+  const io = raw?.blkio_stats?.io_service_bytes_recursive;
+  if (Array.isArray(io)) {
+    let read = 0;
+    let write = 0;
+    for (const entry of io) {
+      if (!isFiniteNumber(entry?.value)) continue;
+      const op = String(entry.op ?? '').toLowerCase();
+      if (op === 'read') read += entry.value;
+      else if (op === 'write') write += entry.value;
+    }
+    summary.blockReadBytes = read;
+    summary.blockWriteBytes = write;
+  }
+
+  if (isFiniteNumber(raw?.pids_stats?.current)) summary.pids = raw.pids_stats.current;
+  return summary;
+}
+
+function isFiniteNumber(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value);
+}
+
+function round(value: number): number {
+  return Math.round(value * 100) / 100;
 }

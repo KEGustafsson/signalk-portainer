@@ -64,9 +64,22 @@ export interface PortainerStatus {
   InstanceID?: string;
 }
 
+/** `GET /api/system/version`: whether Portainer itself has an update waiting. */
+export interface PortainerVersion {
+  ServerVersion?: string;
+  LatestVersion?: string;
+  UpdateAvailable?: boolean;
+  ServerEdition?: string;
+}
+
+/** Whether this plugin can manage an environment, and why not when it cannot. */
+export type EnvironmentSupport = { supported: true } | { supported: false; reason: string };
+
 export interface DockerSwarmInfo {
   LocalNodeState?: string;
   NodeID?: string;
+  /** True on a manager, where the cluster can be read and written. */
+  ControlAvailable?: boolean;
   Cluster?: { ID?: string };
 }
 
@@ -82,12 +95,15 @@ export interface DockerInfo {
 }
 
 export interface Capabilities {
-  /** True when the daemon is an active swarm manager or worker. */
+  /** True when the daemon is an active swarm manager. */
   swarm: boolean;
   /** Present only when swarm is true; required by swarm stack creation. */
   swarmId?: string;
   dockerVersion?: string;
   portainerVersion?: string;
+  /** The newest Portainer release, when Portainer was able to check. */
+  portainerLatestVersion?: string;
+  portainerUpdateAvailable?: boolean;
 }
 
 export type EnvironmentHealth = 'up' | 'down' | 'unknown';
@@ -141,8 +157,69 @@ export interface DockerContainerInspect {
     Env?: string[];
     Labels?: Record<string, string>;
     Cmd?: string[];
+    /** True when the log stream is raw bytes rather than Docker's framing. */
+    Tty?: boolean;
+    /** Seconds Docker waits after SIGTERM before SIGKILL, if the image set one. */
+    StopTimeout?: number;
   };
-  HostConfig?: { RestartPolicy?: { Name?: string }; NetworkMode?: string };
+  HostConfig?: {
+    RestartPolicy?: { Name?: string; MaximumRetryCount?: number };
+    NetworkMode?: string;
+  };
+}
+
+/**
+ * `GET /containers/{id}/stats?stream=false`, as far as it is read. Every
+ * field is optional: a container that has just exited, a cgroup v1 host and
+ * a daemon without a network namespace each leave parts of it out.
+ */
+export interface DockerContainerStats {
+  read?: string;
+  cpu_stats?: DockerCpuStats;
+  precpu_stats?: DockerCpuStats;
+  memory_stats?: {
+    usage?: number;
+    limit?: number;
+    stats?: { cache?: number; inactive_file?: number };
+  };
+  networks?: Record<string, { rx_bytes?: number; tx_bytes?: number }>;
+  blkio_stats?: { io_service_bytes_recursive?: { op?: string; value?: number }[] | null };
+  pids_stats?: { current?: number };
+}
+
+export interface DockerCpuStats {
+  cpu_usage?: { total_usage?: number; percpu_usage?: number[] | null };
+  system_cpu_usage?: number;
+  online_cpus?: number;
+}
+
+/** One stats reading, reduced to what an operator reads off it. */
+export interface ContainerStats {
+  /** When Docker took the sample, RFC 3339. */
+  read?: string;
+  /** Share of the host's CPUs, 0-100 per CPU as `docker stats` reports it. */
+  cpuPercent?: number;
+  /** Working set: usage less the page cache, as `docker stats` reports it. */
+  memoryBytes?: number;
+  memoryLimitBytes?: number;
+  memoryPercent?: number;
+  networkRxBytes?: number;
+  networkTxBytes?: number;
+  blockReadBytes?: number;
+  blockWriteBytes?: number;
+  pids?: number;
+}
+
+/** `GET /containers/{id}/top`: `ps` output, one row per process. */
+export interface DockerContainerTop {
+  Titles: string[];
+  Processes: string[][];
+}
+
+/** What a pull ended with: Docker's last status line, e.g. "Downloaded newer image". */
+export interface ImagePullResult {
+  reference?: string;
+  status: string;
 }
 
 export interface DockerImage {
@@ -234,9 +311,17 @@ export interface DockerNode {
 
 // ── Portainer stack shapes ────────────────────────────────────────────────
 
+/**
+ * Portainer's stack states. The last two arrived with the deploys Portainer
+ * runs in the background (updates and redeploys from 2.42, creates from
+ * 2.44): a stack is *deploying* until compose finishes, and in *error* when
+ * it did not.
+ */
 export const StackStatus = {
   Active: 1,
   Inactive: 2,
+  Deploying: 3,
+  Error: 4,
 } as const;
 
 export interface Stack {
@@ -247,12 +332,21 @@ export interface Stack {
   EndpointId: number;
   SwarmId?: string;
   EntryPoint?: string;
-  /** 1 = active, 2 = inactive. */
+  /** 1 = active, 2 = inactive, 3 = deploying, 4 = error; see StackStatus. */
   Status?: number;
   CreationDate?: number;
   UpdateDate?: number;
   Env?: { name: string; value: string }[];
-  GitConfig?: { URL?: string; ReferenceName?: string; ConfigFilePath?: string } | null;
+  GitConfig?: {
+    URL?: string;
+    ReferenceName?: string;
+    ConfigFilePath?: string;
+    TLSSkipVerify?: boolean;
+    /** The credentials Portainer stored with the stack, password withheld. */
+    Authentication?: { Username?: string; GitCredentialID?: number } | null;
+  } | null;
   /** Portainer's own polling or webhook redeploy, if the stack has one. */
   AutoUpdate?: { Interval?: string; Webhook?: string; ForcePullImage?: boolean } | null;
+  /** What a background deploy reported, newest last. */
+  DeploymentStatus?: { Type?: number; Message?: string; Timestamp?: number }[] | null;
 }
