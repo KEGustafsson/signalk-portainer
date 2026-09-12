@@ -22,6 +22,13 @@ const counted = Symbol('counted');
 
 type Pool = ReturnType<MockAgent['get']>;
 
+/**
+ * A MockAgent installed as the global dispatcher, with net connect disabled.
+ *
+ * It also counts the interceptors registered through it, which is what lets
+ * `expectAllConsumed` tell an empty pending set apart from a test that never
+ * registered anything.
+ */
 export function createMockAgent(): MockAgent {
   const agent = new MockAgent();
   agent.disableNetConnect();
