@@ -63,7 +63,7 @@ jobs:
   # ── Automatic runs (push / pull request) ──────────────────
   plugin-ci:
     if: ${{ github.event_name != 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@dd491dd17e621ccffcc228da8b7a823df6cb0ebe # SignalK/signalk-server master @ 2026-08-23
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@5612cf40785f8c3be2bc918750caec163e5bd7b1 # SignalK/signalk-server master @ 2026-08-23
     with:
       # `npm test` is `jest --coverage` and enforces the 80% threshold.
       # Passing it as coverage-command puts the summary in the job output.
@@ -86,7 +86,7 @@ jobs:
   # ── Manual runs (workflow_dispatch with custom inputs) ────
   plugin-ci-manual:
     if: ${{ github.event_name == 'workflow_dispatch' }}
-    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@dd491dd17e621ccffcc228da8b7a823df6cb0ebe # SignalK/signalk-server master @ 2026-08-23
+    uses: SignalK/signalk-server/.github/workflows/plugin-ci.yml@5612cf40785f8c3be2bc918750caec163e5bd7b1 # SignalK/signalk-server master @ 2026-08-23
     with:
       test-command: npm test
       coverage-command: npm test
